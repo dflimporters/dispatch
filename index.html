@@ -234,6 +234,12 @@
   // contractor", never a real trucker.
   const BATCH_RE = /^BATCH/i;
   function isBatch(v) { return !!v && BATCH_RE.test(v); }
+  // Assigned directly by design, never through a batch or the clerk: customer
+  // pickups (PICKUP…) and DFL's own vehicles (any code containing DFL, e.g.
+  // DFLVAN02, DFL TRUCK 1, CU3717DFL5TON). Left out of the batcher's
+  // "assigned outside a batch" count.
+  const DIRECT_OK_RE = /^PICKUP|DFL/i;
+  function isDirectOk(v) { return !!v && DIRECT_OK_RE.test(v); }
 
   const LB = {
     section: 'overview', date: null, view: 'zone', open: null,
@@ -762,11 +768,11 @@
         .sort((x, y) => ({ mismatch: 0, confirmed: 1, applied: 2 }[x.status] - { mismatch: 0, confirmed: 1, applied: 2 }[y.status]));
       const waiting = batches.filter(b => b.status === 'open');
       const inBatches = new Set(batches.flatMap(b => (b.a && b.a.confirmed_shipments) || []));
-      const direct = LB.rows.filter(r => r.ship_via && !isBatch(r.ship_via) && !inBatches.has(r.shipment_nbr));
+      const direct = LB.rows.filter(r => r.ship_via && !isBatch(r.ship_via) && !isDirectOk(r.ship_via) && !inBatches.has(r.shipment_nbr));
       body = `<div class="summary">${summary}</div>` +
         (waiting.length ? `<div class="note" style="margin-bottom:12px">Waiting on the clerk: ${waiting.map(b => `<b>${esc(b.code)}</b> (${b.rows.length})`).join(', ')}</div>` : '') +
         done.map(batcherCard).join('') +
-        (direct.length ? `<div class="note" style="margin-top:4px">${direct.length} shipment${direct.length === 1 ? '' : 's'} on this date got a trucker directly, not through a batch.</div>` : '');
+        (direct.length ? `<div class="note" style="margin-top:4px">${direct.length} shipment${direct.length === 1 ? '' : 's'} on this date got a contractor directly, not through a batch (pickups and DFL vehicles not counted).</div>` : '');
     }
     el.innerHTML = body;
   }
