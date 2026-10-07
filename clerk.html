@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f2044">
+<meta name="robots" content="noindex, nofollow">
+<title>Trucker Liaison — DFL Dispatch</title>
+<!--
+  Trucker Liaison (TRL; was "logistics clerk"): takes loads the coordinator has sent (status ready), logs calls
+  to truckers, and locks one in. Locking in (dispatch_confirm_load) is
+  followed straight away by dispatch-acu "apply", which sets ShipVia + load
+  number on each shipment in Acumatica and takes it off hold. It does not
+  confirm: shipments stay Open for picking, and the checker confirms them.
+
+  The liaison can't change what's on a load; "Send back to coordinator" returns it
+  with a reason. A load whose writeback partly failed can be retried here;
+  shipments Acumatica refused have to be moved by the coordinator.
+
+  Cards sit in two columns and are collapsed to a one-glance summary by
+  default. A card opens when clicked, when it's partly written, or while the
+  clerk has typed something into it.
+-->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="common.css">
+<style>
+  .lgrid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; align-items:start; }
+  .lgrid .lcard { margin-bottom:0; padding:0; }
+  .lsum { padding:10px 14px; cursor:pointer; user-select:none; }
+  .lsum:hover { background:#f8fafc; border-radius:12px; }
+  .lcard.open .lsum:hover { border-radius:12px 12px 0 0; }
+  .lsum .row1 { display:flex; align-items:center; gap:8px; }
+  .lsum .zones { color:var(--text-muted); font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0; }
+  .lsum .row2 { display:flex; align-items:center; gap:12px; flex-wrap:wrap; font-size:12.5px; color:var(--text-muted); margin-top:6px; padding-left:22px; }
+  .lsum .row2 b { color:var(--text); font-weight:600; }
+  .lsum .cap { min-width:150px; }
+  .lsum .last { color:var(--text-muted); }
+  .lsum .last.ok { color:var(--ok-text); }
+  .lbody { padding:4px 14px 14px 36px; border-top:1px solid var(--border); }
+  .cform { display:grid; grid-template-columns:1fr 1fr; gap:8px 10px; margin:10px 0 4px; }
+  .cform .wide { grid-column:1 / -1; }
+  .cform textarea { min-height:34px; }
+  .callrow { display:grid; grid-template-columns:130px 1fr auto; gap:8px; margin-top:10px; padding-top:10px; border-top:1px solid var(--border); }
+  .retbox { display:flex; gap:8px; margin-top:8px; }
+  .retbox input { flex:1; }
+  .section-h { display:flex; align-items:center; gap:10px; font-size:13px; font-weight:700; color:var(--navy); margin:18px 2px 8px; text-transform:uppercase; letter-spacing:0.3px; }
+  .section-h .n { font-weight:500; color:var(--text-muted); text-transform:none; letter-spacing:0; }
+  @media (max-width:1100px) { .lgrid { grid-template-columns:1fr; } }
+  @media (max-width:640px) {
+    .cform { grid-template-columns:1fr; }
+    .callrow { grid-template-columns:1fr auto; }
+    .callrow input { grid-column:1 / -1; grid-row:2; }
+    .lbody { padding-left:14px; }
+    .lsum .row2 { padding-left:0; }
+  }
+</style>
+</head>
+<body>
+<div class="page" id="app"><div class="empty">Loading…</div></div>
+<datalist id="shipViaList"></datalist>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="common.js"></script>
+<script>
+  const C = {
+    date: jmDate(0), loads: [], dates: [], sync: null, busy: false,
+    writing: new Set(), drafts: new Map(), returning: new Set(),
+    open: new Set(), seen: new Set(), wave: loadWaveFilter('clerk'),
+  };
+
+  async function loadAll() {
+    const [loads, sync, dates] = await Promise.all([fetchLoads(C.date), lastSync(), readyDates()]);
+    C.loads = loads; C.sync = sync; C.dates = dates;
+    await loadLines(loads.flatMap(l => l.ships.map(s => s.shipment_nbr)));
+    // Partly written loads open themselves the first time they're seen.
+    loads.forEach(l => {
+      if (!C.seen.has(l.id) && l.status === 'partial') C.open.add(l.id);
+      C.seen.add(l.id);
+    });
+  }
+
+  // Dates that have loads waiting for a trucker.
+  async function readyDates() {
+    const { data } = await sb.from('loads').select('load_date').eq('env', D.env).in('status', ['ready', 'confirmed', 'partial'])
+      .order('load_date', { ascending: false }).limit(500);
+    const m = new Map();
+    (data || []).forEach(r => m.set(r.load_date, (m.get(r.load_date) || 0) + 1));
+    return [...m.entries()].slice(0, 8);
+  }
+
+  // What the clerk has typed but not submitted, so a refresh doesn't wipe it.
+  function draftOf(l) {
+    if (!C.drafts.has(l.id)) C.drafts.set(l.id, { ship_via: l.ship_via || '', contractor: l.contractor || '', notes: '', outcome: 'No answer', callNote: '', ret: '' });
+    return C.drafts.get(l.id);
+  }
+  function typedIn(l) {
+    const d = C.drafts.get(l.id);
+    return !!d && (d.ship_via !== (l.ship_via || '') || d.callNote || d.ret || d.notes);
+  }
+  function isOpen(l) { return C.open.has(l.id) || C.returning.has(l.id) || typedIn(l); }
+  function visLoads() { return C.loads.filter(l => C.wave === 'all' || l.wave === C.wave); }
+
+  // ------------------------------------------------------------------
+  // Render
+  // ------------------------------------------------------------------
+  function render() {
+    const loads = visLoads();
+    const by = s => loads.filter(l => l.status === s);
+    const ready = by('ready'), drafts = by('draft');
+    const pending = loads.filter(l => ['confirmed', 'writing', 'partial'].includes(l.status));
+    const done = by('done');
+    const shown = [...ready, ...pending, ...done];
+    const chips = C.dates.length
+      ? `<div class="controls"><span class="chips">Loads waiting on: ${C.dates.map(([d, n]) => `<button class="chip ${d === C.date ? 'on' : ''}" data-date="${d}">${esc(niceDate(d))} · ${n}</button>`).join('')}</span></div>` : '';
+    const section = (title, list, note) => list.length
+      ? `<div class="section-h">${title}<span class="n">${plural(list.length, 'load')}${note || ''}</span></div><div class="lgrid">${list.map(card).join('')}</div>` : '';
+
+    document.getElementById('main').innerHTML = `
+      <div class="controls">
+        <div class="seg" id="daySeg">
+          <button data-day="0" class="${C.date === jmDate(0) ? 'on' : ''}">Today</button>
+          <button data-day="1" class="${C.date === jmDate(1) ? 'on' : ''}">Tomorrow</button>
+        </div>
+        <input type="date" id="datePick" value="${C.date}" aria-label="Load date">
+        ${syncText(C.sync)}
+        <span class="spacer"></span>
+        ${waveFilterHtml(C.wave)}
+        ${shown.length ? `<button class="btn small" data-all="open">Expand all</button><button class="btn small" data-all="close">Collapse all</button>` : ''}
+      </div>
+      ${chips}
+      <div class="kpis">
+        <div class="kpi ${ready.length ? 'warn' : ''}"><div class="l">Need a trucker</div><div class="v">${ready.length}</div><div class="s">${fmt(ready.reduce((s, l) => s + l.vol, 0))} vol · ${money(ready.reduce((s, l) => s + l.value, 0))}</div></div>
+        <div class="kpi ${by('partial').length ? 'warn' : ''}"><div class="l">Not fully written</div><div class="v">${pending.length}</div><div class="s">${by('partial').length} with problems</div></div>
+        <div class="kpi"><div class="l">Written</div><div class="v">${done.length}</div><div class="s">in Acumatica${D.env === 'test' ? ' TEST' : ''}</div></div>
+        <div class="kpi"><div class="l">Still with the coordinator</div><div class="v">${drafts.length}</div><div class="s">draft loads</div></div>
+      </div>
+      ${!shown.length ? `<div class="card"><div class="empty">No ${C.wave !== 'all' ? C.wave + ' ' : ''}loads sent to you for ${esc(niceDate(C.date))} yet.${drafts.length ? ` The coordinator has ${plural(drafts.length, 'draft')} in progress.` : ''}</div></div>` : ''}
+      ${section('Need a trucker', ready, ` · ${fmt(ready.reduce((s, l) => s + l.vol, 0))} vol`)}
+      ${section('Trucker confirmed · writing to Acumatica', pending)}
+      ${section('Done', done)}`;
+  }
+
+  // Collapsed view: what the clerk needs to pick the next call.
+  function summary(l) {
+    const calls = l.events.filter(e => e.kind === 'call');
+    const last = calls[0];
+    const written = ['confirmed', 'writing', 'done', 'partial'].includes(l.status);
+    const who = written
+      ? `<span class="target">${esc(l.ship_via)}</span><span>${esc(l.contractor || (codeInfo(l.ship_via) || {}).description || '')}</span>`
+      : last ? `<span class="last ${last.outcome === 'Accepted' ? 'ok' : ''}">${plural(calls.length, 'call')} · last: <b>${esc(last.outcome || 'Call')}</b>${last.contractor || last.ship_via ? ' · ' + esc(last.contractor || last.ship_via) : ''}, ${esc(stamp(last.created_at))}</span>`
+      : '<span class="last">No calls yet</span>';
+    const bad = l.ships.filter(s => ['refused', 'failed'].includes(s.result)).length;
+    return `<div class="lsum" data-toggle>
+      <div class="row1">${ICON.chev}<span class="lnbr">${esc(l.load_nbr)}</span>${waveTag(l.wave)}<b style="font-size:13px">${esc(l.truck_type || 'No truck')}</b>
+        <span class="zones" title="${esc(l.zones.join(', '))}">${esc(l.zones.join(', '))}</span>${statusPill(l.status)}</div>
+      <div class="row2"><span>${plural(l.count, 'ship')} · ${l.drops} drop${l.drops === 1 ? '' : 's'}</span>${capBar(l)}<b>${money(l.value)}</b>${who}${bad ? `<span class="pill bad">${bad} not written</span>` : ''}</div>
+    </div>`;
+  }
+
+  function shipsTable(l, withResults) {
+    const rows = l.ships.slice().sort((a, b) => ((a.row && a.row.customer_name) || '').localeCompare((b.row && b.row.customer_name) || ''));
+    return `<table class="ships"><thead><tr><th>Shipment</th><th>Customer</th><th class="hide-m">Zone</th><th class="r">Qty</th><th class="r">Vol</th><th class="r">Value</th>${withResults ? '<th>Acumatica</th>' : ''}</tr></thead>
+      <tbody>${rows.map(s => {
+        const r = s.row || {};
+        return `<tr><td class="num">${shipToggle(s.shipment_nbr)}</td><td class="cust" title="${esc(r.customer_name || '')}">${esc(r.customer_name || r.customer_id || '(not found)')}</td>
+          <td class="hide-m">${esc(r.shipping_zone || '—')}</td><td class="r num">${fmt(qty(r))}</td><td class="r num">${fmt(vol(r))}</td>
+          <td class="r num">${r.shipment_value == null ? '<span class="muted">—</span>' : money(val(r))}</td>
+          ${withResults ? `<td>${resultPill(s) || '<span class="pill done">Not yet</span>'}${s.result_detail ? `<div class="muted">${esc(s.result_detail)}</div>` : ''}</td>` : ''}</tr>${linesRow(s.shipment_nbr, withResults ? 7 : 6)}`;
+      }).join('')}</tbody></table>`;
+  }
+
+  function card(l) {
+    const open = isOpen(l);
+    return `<div class="lcard st-${l.status} ${open ? 'open' : ''}" data-load="${l.id}">
+      ${summary(l)}
+      ${open ? `<div class="lbody">${l.status === 'ready' ? readyBody(l) : writtenBody(l)}</div>` : ''}
+    </div>`;
+  }
+
+  function readyBody(l) {
+    const d = draftOf(l);
+    const ret = C.returning.has(l.id);
+    return `${l.notes ? `<div class="warnbox info">Coordinator's note: ${esc(l.notes)}</div>` : ''}
+      ${loadWarnings(l)}
+      <div class="cform">
+        <label class="field">Trucker's Ship Via<input data-d="ship_via" list="shipViaList" value="${esc(d.ship_via)}" placeholder="Code or name" autocomplete="off"></label>
+        <label class="field">Trucker / driver<input data-d="contractor" value="${esc(d.contractor)}" placeholder="As confirmed on the call"></label>
+        <label class="field wide">Notes<textarea data-d="notes" rows="1" placeholder="Rate agreed, pickup time, driver phone… (blank keeps the coordinator's note)">${esc(d.notes)}</textarea></label>
+      </div>
+      <div class="lactions">
+        <button class="btn primary small" data-act="confirm">Confirm trucker &amp; write to Acumatica</button>
+        <button class="btn small" data-act="return_open">Send back to coordinator</button>
+      </div>
+      ${ret ? `<div class="retbox"><input class="txt" data-d="ret" value="${esc(d.ret)}" placeholder="Why? e.g. too much for one 10 Ton, split it"><button class="btn small" data-act="return">Send back</button><button class="btn small" data-act="return_cancel">Cancel</button></div>` : ''}
+      <div class="inline-err" data-err></div>
+      <div class="callrow">
+        <select data-d="outcome" aria-label="Call outcome">${['No answer', 'Declined', 'Left message', 'Accepted'].map(o => `<option ${o === d.outcome ? 'selected' : ''}>${o}</option>`).join('')}</select>
+        <input class="txt" data-d="callNote" value="${esc(d.callNote)}" placeholder="Who you called, what they said">
+        <button class="btn small" data-act="call">Log call</button>
+      </div>
+      ${eventList(l.events, 'hist-' + l.id)}
+      <details ${keep('ships-' + l.id)}><summary>Shipments on this load (${l.count})</summary>${shipsTable(l, false)}</details>`;
+  }
+
+  function writtenBody(l) {
+    const writing = l.status === 'writing' || C.writing.has(l.id);
+    const stuck = l.status === 'writing' && !C.writing.has(l.id) && Date.now() - new Date(l.updated_at).getTime() > 5 * 60e3;
+    const bad = l.ships.filter(s => ['refused', 'failed'].includes(s.result));
+    const refused = bad.filter(s => s.result === 'refused').length;
+    return `<div class="lstats"><span>confirmed ${esc(stamp(l.confirmed_at))}</span>${l.notes ? `<span>${esc(l.notes)}</span>` : ''}</div>
+      ${writing ? `<div class="warnbox info">Writing to Acumatica${D.env === 'test' ? ' TEST' : ''}… this takes a few seconds per shipment.</div>` : ''}
+      ${l.status === 'partial' && !writing ? `<div class="warnbox bad">${plural(bad.length, 'shipment')} didn't go through.${refused ? ` Refused ones changed in Acumatica since the load was built; the coordinator has to move them.` : ''} Failed ones can be retried.</div>` : ''}
+      ${shipsTable(l, true)}
+      <div class="lactions">
+        ${l.status === 'confirmed' && !writing ? `<button class="btn primary small" data-act="apply">Write to Acumatica</button><button class="btn small" data-act="unconfirm">Undo confirmation</button>` : ''}
+        ${l.status === 'partial' && !writing ? `<button class="btn primary small" data-act="apply">Retry ${plural(bad.length, 'shipment')}</button>` : ''}
+        ${stuck ? '<button class="btn small" data-act="unstick">Writing seems stuck: mark it so it can be retried</button>' : ''}
+      </div>
+      <div class="inline-err" data-err></div>
+      ${eventList(l.events, 'hist-' + l.id)}`;
+  }
+
+  // ------------------------------------------------------------------
+  // Actions
+  // ------------------------------------------------------------------
+  async function rpc(name, args) {
+    const { data, error } = await sb.rpc(name, args);
+    if (error) throw error;
+    return data;
+  }
+  function cardErr(id, msg) {
+    const el = document.querySelector(`[data-load="${id}"] [data-err]`);
+    if (el) el.textContent = msg || '';
+  }
+
+  async function apply(id) {
+    C.writing.add(id); C.open.add(id); render();
+    try {
+      const r = await callAcu('apply', { load_id: id });
+      if (!r.ok && r.error && !r.results) throw new Error(r.error);
+      const n = k => (r.results || []).filter(x => x.result === k).length;
+      if (r.error) toast(r.error, true);
+      else if (n('refused') || n('failed')) toast(`${n('applied')} applied, ${n('refused')} refused, ${n('failed')} failed`, true);
+      else { toast(`All ${n('applied')} shipments written (Ship Via + load number)`); C.open.delete(id); }
+      if (r.udf === false) toast('Load number field (UDF) not found in Acumatica; Ship Via was still set.', true);
+    } finally {
+      C.writing.delete(id);
+    }
+  }
+
+  async function act(id, fn) {
+    if (C.busy) return;
+    C.busy = true;
+    cardErr(id, '');
+    try { await fn(); await refresh(); }
+    catch (e) { console.error('[clerk]', e); C.open.add(id); await refresh(); cardErr(id, errMsg(e)); }
+    finally { C.busy = false; }
+  }
+
+  document.getElementById('app').addEventListener('input', e => {
+    const card = e.target.closest('[data-load]');
+    if (!card || !e.target.dataset.d) return;
+    const l = C.loads.find(x => x.id === Number(card.dataset.load));
+    if (l) draftOf(l)[e.target.dataset.d] = e.target.value;
+  });
+  // Picking a code fills in the trucker's name if it's still blank.
+  document.getElementById('app').addEventListener('change', e => {
+    if (e.target.id === 'datePick') { if (e.target.value) setDate(e.target.value); return; }
+    if (e.target.dataset.d === 'outcome') { e.target.dispatchEvent(new Event('input', { bubbles: true })); return; }
+    if (e.target.dataset.d !== 'ship_via') return;
+    const card = e.target.closest('[data-load]');
+    const who = card.querySelector('[data-d="contractor"]');
+    const info = codeInfo(e.target.value.trim());
+    if (info && who && !who.value.trim()) { who.value = info.description || ''; who.dispatchEvent(new Event('input', { bubbles: true })); }
+  });
+
+  document.getElementById('app').addEventListener('click', e => {
+    const chip = e.target.closest('[data-date]');
+    if (chip) { setDate(chip.dataset.date); return; }
+    const day = e.target.closest('#daySeg button');
+    if (day) { setDate(jmDate(Number(day.dataset.day))); return; }
+    const wb = e.target.closest('.wavef button[data-wave]');
+    if (wb) { C.wave = wb.dataset.wave; saveWaveFilter('clerk', C.wave); render(); return; }
+    const all = e.target.closest('[data-all]');
+    if (all) {
+      visLoads().forEach(l => all.dataset.all === 'open' ? C.open.add(l.id) : C.open.delete(l.id));
+      if (all.dataset.all === 'close') C.returning.clear();
+      render(); return;
+    }
+    const tog = e.target.closest('[data-toggle]');
+    if (tog) {
+      const id = Number(tog.closest('[data-load]').dataset.load);
+      const l = C.loads.find(x => x.id === id);
+      if (isOpen(l)) {
+        if (typedIn(l) && !confirm(`Close ${l.load_nbr}? What you've typed here and not saved will be cleared.`)) return;
+        C.open.delete(id); C.returning.delete(id);
+        if (typedIn(l)) C.drafts.delete(id);
+      } else C.open.add(id);
+      render(); return;
+    }
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    const card = btn.closest('[data-load]');
+    const id = Number(card.dataset.load);
+    const l = C.loads.find(x => x.id === id);
+    const d = draftOf(l);
+    const a = btn.dataset.act;
+
+    if (a === 'return_open') { C.returning.add(id); render(); return; }
+    if (a === 'return_cancel') { C.returning.delete(id); render(); return; }
+    if (a === 'return') {
+      act(id, async () => { await rpc('dispatch_load_action', { p_id: id, p_action: 'return', p_note: d.ret }); C.returning.delete(id); C.drafts.delete(id); C.open.delete(id); });
+      return;
+    }
+    if (a === 'call') {
+      if (!d.ship_via.trim() && !d.contractor.trim() && !d.callNote.trim()) { cardErr(id, 'Say who you called: fill in the Ship Via, the name, or a note.'); return; }
+      act(id, async () => { await rpc('dispatch_log_call', { p_id: id, p_outcome: d.outcome, p_ship_via: d.ship_via, p_contractor: d.contractor, p_note: d.callNote }); d.callNote = ''; C.open.add(id); });
+      return;
+    }
+    if (a === 'confirm') {
+      const sv = d.ship_via.trim();
+      if (!sv) { cardErr(id, "Pick the trucker's Ship Via."); return; }
+      if (!shipViaChoices().some(c => c.ship_via === sv)) {
+        cardErr(id, D.env === 'test' ? `In Test, pick one of the listed truckers (they exist in TEST).` : `${sv} isn't a Ship Via code in Acumatica. Pick one from the list.`);
+        return;
+      }
+      const where = D.env === 'test' ? 'Acumatica TEST' : 'Acumatica';
+      if (!confirm(`Lock in ${sv} for ${l.load_nbr}?\n\nThis sets Ship Via ${sv} and load number ${l.load_nbr} on ${plural(l.count, 'shipment')} in ${where}. They stay Open for picking; the checker confirms them.`)) return;
+      act(id, async () => {
+        await rpc('dispatch_confirm_load', { p_id: id, p_ship_via: sv, p_contractor: d.contractor, p_notes: d.notes.trim() || l.notes || '' });
+        C.drafts.delete(id);
+        await loadAll();   // so the card shows as confirmed while it writes
+        await apply(id);
+      });
+      return;
+    }
+    if (a === 'apply') { act(id, () => apply(id)); return; }
+    if (a === 'unconfirm') { act(id, () => rpc('dispatch_load_action', { p_id: id, p_action: 'unconfirm' })); return; }
+    if (a === 'unstick') { act(id, () => rpc('dispatch_load_action', { p_id: id, p_action: 'unstick' })); }
+  });
+
+  function setDate(iso) { C.date = iso; refresh(); }
+  function fillShipVias() {
+    document.getElementById('shipViaList').innerHTML = shipViaChoices().map(c => `<option value="${esc(c.ship_via)}">${esc(c.description || '')}</option>`).join('');
+  }
+
+  async function refresh() {
+    try { await loadAll(); render(); }
+    catch (e) {
+      console.error('[clerk]', e);
+      document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`;
+    }
+  }
+  function editing() {
+    const a = document.activeElement;
+    return a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
+  }
+
+  onShipToggle(render);
+
+  startPage({
+    page: 'clerk', role: 'clerk', title: 'Trucker Liaison',
+    onEnvChange: () => { C.drafts.clear(); fillShipVias(); refresh(); },
+    onReady: () => {
+      fillShipVias();
+      refresh();
+      setInterval(() => { if (!C.busy && !editing()) refresh(); }, 60 * 1000);
+    },
+  });
+</script>
+</body>
+</html>

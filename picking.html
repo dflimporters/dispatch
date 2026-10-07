@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f2044">
+<meta name="robots" content="noindex, nofollow">
+<title>Picking — DFL Dispatch</title>
+<!--
+  Picking, by load (consolidated: one line per item across the load's
+  shipments), split by area 1-4. Built for phones and tablets first: one
+  tablet per area today, maybe a phone per picker later.
+
+  A load appears once its trucker is locked in (status done/partial) and stays
+  until the checker has confirmed it. Required quantities come live from the
+  shipment lines (dispatch_pick_list), so a corrected shipment shows at once.
+  The picker records what they picked (dispatch_pick_set): "All" for a full
+  pick, or a number for a short. An area is marked done once every item in it
+  has a quantity (dispatch_pick_area_done).
+
+  Area mapping is a placeholder by item class (pick_area_classes) until the
+  warehouse manager's per-item list arrives. No picker PINs for now.
+-->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="common.css">
+<style>
+  .areas { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; }
+  .areas button { font:inherit; font-size:15px; font-weight:600; padding:10px 16px; border-radius:10px; border:1px solid var(--border2); background:#fff; color:var(--text); cursor:pointer; }
+  .areas button.on { background:var(--navy); border-color:var(--navy); color:#fff; }
+  .pload { display:block; width:100%; text-align:left; font:inherit; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px; margin-bottom:10px; cursor:pointer; color:var(--text); }
+  .pload:hover { border-color:var(--border2); }
+  .pload .top { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .pload .sub { font-size:13px; color:var(--text-muted); margin-top:4px; }
+  .achips { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  .achip { font-size:12px; font-weight:600; padding:3px 9px; border-radius:999px; background:#f1f5f9; color:var(--text-muted); }
+  .achip.done { background:var(--ok-bg); color:var(--ok-text); }
+  .achip.part { background:var(--warn-bg); color:var(--warn-text); }
+  .back { font:inherit; font-size:14px; font-weight:600; background:none; border:0; color:var(--accent); cursor:pointer; padding:4px 0; margin-bottom:8px; }
+  .item { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px 12px; align-items:center; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px; margin-bottom:8px; }
+  .item.ok { border-color:#a7f3d0; background:var(--ok-bg); }
+  .item.short { border-color:#fde68a; background:var(--warn-bg); }
+  .item .desc { font-size:15px; font-weight:600; color:var(--navy); line-height:1.3; }
+  .item .meta { font-size:12.5px; color:var(--text-muted); margin-top:2px; }
+  .item .need { font-size:22px; font-weight:700; color:var(--navy); text-align:right; font-variant-numeric:tabular-nums; }
+  .item .need small { display:block; font-size:11px; font-weight:500; color:var(--text-muted); }
+  .item .acts { grid-column:1 / -1; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .item .acts .btn { font-size:15px; padding:10px 16px; }
+  .item .acts input { width:90px; font:inherit; font-size:17px; padding:9px 10px; border:1px solid var(--border2); border-radius:8px; text-align:right; }
+  .item .acts .got { font-size:13px; color:var(--text-muted); margin-left:auto; }
+  .donebar { position:sticky; bottom:10px; display:flex; gap:10px; align-items:center; background:var(--navy); color:#fff; border-radius:12px; padding:12px 14px; margin-top:12px; box-shadow:0 6px 20px rgba(15,32,68,.25); }
+  .donebar .btn { border-color:#fff; font-size:15px; padding:10px 16px; }
+  @media (max-width:640px) { .kpis { display:none; } }
+</style>
+</head>
+<body>
+<div class="page" id="app"><div class="empty">Loading…</div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="common.js"></script>
+<script>
+  const AREAS = [[1, 'Area 1'], [2, 'Area 2'], [3, 'Area 3'], [4, 'Area 4'], [0, 'Unassigned']];
+  const P = { date: jmDate(0), loads: [], lists: new Map(), done: [], open: null, busy: false, area: 'all' };
+  try { const a = localStorage.getItem('dispatch-pick-area'); if (a) P.area = a; } catch (e) {}
+  function areaName(a) { return (AREAS.find(x => x[0] === Number(a)) || [0, 'Unassigned'])[1]; }
+  function inArea(line) { return P.area === 'all' || line.area === Number(P.area); }
+
+  async function loadAll() {
+    const loads = (await fetchLoads(P.date)).filter(l => ['done', 'partial'].includes(l.status) && l.check_status !== 'confirmed');
+    const lists = await Promise.all(loads.map(l => sb.rpc('dispatch_pick_list', { p_load_id: l.id })));
+    lists.forEach((r, i) => { if (r.error) throw r.error; });
+    const ids = loads.map(l => l.id);
+    const done = ids.length ? await sb.from('pick_area_status').select('*').in('load_id', ids) : { data: [] };
+    if (done.error) throw done.error;
+    P.loads = loads;
+    P.lists = new Map(loads.map((l, i) => [l.id, lists[i].data || []]));
+    P.done = done.data || [];
+  }
+  function areaDone(loadId, area) { return P.done.find(d => d.load_id === loadId && d.area === area); }
+  function areasOf(loadId) { return [...new Set((P.lists.get(loadId) || []).map(x => x.area))].sort((a, b) => (a || 9) - (b || 9)); }
+
+  function render() {
+    const main = document.getElementById('main');
+    if (P.open) { main.innerHTML = loadView(P.loads.find(l => l.id === P.open)); return; }
+    const mine = P.loads.filter(l => (P.lists.get(l.id) || []).some(inArea));
+    const allLines = P.loads.flatMap(l => (P.lists.get(l.id) || []).filter(inArea));
+    main.innerHTML = `
+      <div class="controls">
+        <div class="seg" id="daySeg">
+          <button data-day="0" class="${P.date === jmDate(0) ? 'on' : ''}">Today</button>
+          <button data-day="1" class="${P.date === jmDate(1) ? 'on' : ''}">Tomorrow</button>
+        </div>
+        <input type="date" id="datePick" value="${P.date}" aria-label="Load date">
+      </div>
+      <div class="areas" role="group" aria-label="My area">
+        <button data-area="all" class="${P.area === 'all' ? 'on' : ''}">All areas</button>
+        ${AREAS.map(([a, n]) => `<button data-area="${a}" class="${String(P.area) === String(a) ? 'on' : ''}">${n}</button>`).join('')}
+      </div>
+      <div class="kpis">
+        <div class="kpi"><div class="l">Loads to pick</div><div class="v">${mine.length}</div><div class="s">${P.area === 'all' ? 'all areas' : areaName(P.area)}</div></div>
+        <div class="kpi"><div class="l">Lines</div><div class="v">${allLines.length}</div><div class="s">${allLines.filter(x => x.picked_qty != null).length} picked</div></div>
+        <div class="kpi ${allLines.some(x => x.picked_qty != null && Number(x.picked_qty) < Number(x.required)) ? 'warn' : ''}"><div class="l">Short</div><div class="v">${allLines.filter(x => x.picked_qty != null && Number(x.picked_qty) < Number(x.required)).length}</div><div class="s">lines picked short</div></div>
+        <div class="kpi"><div class="l">Cases</div><div class="v">${fmt(allLines.reduce((s, x) => s + Number(x.required), 0))}</div><div class="s">to pick</div></div>
+      </div>
+      ${mine.length ? mine.map(loadCard).join('') : `<div class="card"><div class="empty">No loads to pick${P.area === 'all' ? '' : ' in ' + areaName(P.area)} for ${esc(niceDate(P.date))}. A load shows here once its trucker is locked in.</div></div>`}`;
+  }
+
+  function loadCard(l) {
+    const lines = P.lists.get(l.id) || [];
+    const chips = areasOf(l.id).filter(a => P.area === 'all' || a === Number(P.area)).map(a => {
+      const al = lines.filter(x => x.area === a), got = al.filter(x => x.picked_qty != null).length;
+      const cls = areaDone(l.id, a) ? 'done' : got ? 'part' : '';
+      return `<span class="achip ${cls}">${areaName(a)} · ${areaDone(l.id, a) ? 'done' : `${got}/${al.length}`}</span>`;
+    }).join('');
+    return `<button class="pload" data-open="${l.id}">
+      <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${waveTag(l.wave)}<b>${esc(l.truck_type || '')}</b>
+        <span class="target">${esc(l.ship_via || '')}</span>${l.check_status ? '<span class="pill info">Being checked</span>' : ''}</div>
+      <div class="sub">${esc(l.contractor || '')}${l.contractor ? ' · ' : ''}${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} · ${plural(lines.filter(inArea).length, 'item')}</div>
+      <div class="achips">${chips}</div>
+    </button>`;
+  }
+
+  function loadView(l) {
+    if (!l) { P.open = null; return '<div class="empty">That load is no longer waiting to be picked.</div>'; }
+    const lines = (P.lists.get(l.id) || []).filter(inArea);
+    const areas = [...new Set(lines.map(x => x.area))];
+    const missing = lines.filter(x => x.picked_qty == null).length;
+    const locked = l.check_status === 'confirming';
+    return `
+      <button class="back" data-back>← All loads</button>
+      <div class="lhead" style="margin-bottom:6px"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${waveTag(l.wave)} <b>${esc(l.truck_type || '')}</b></div>
+        <span class="target">${esc(l.ship_via || '')}</span></div>
+      <div class="muted" style="margin-bottom:10px">${esc(l.zones.join(', '))} · ${P.area === 'all' ? 'all areas' : areaName(P.area)} · ${plural(lines.length, 'item')}</div>
+      ${l.check_status ? '<div class="warnbox info">The checker has started on this load. Changes here still count until it\'s confirmed.</div>' : ''}
+      ${areas.map(a => {
+        const al = lines.filter(x => x.area === a);
+        return `<div class="section-h" style="font-size:13px;font-weight:700;color:var(--navy);margin:14px 2px 6px">${areaName(a)}${areaDone(l.id, a) ? ' · <span class="pill ok">done</span>' : ''}</div>
+          ${al.map(x => itemRow(l, x, locked)).join('')}`;
+      }).join('')}
+      ${lines.length ? `<div class="donebar">
+        <span>${missing ? `${plural(missing, 'item')} still to pick` : 'Everything has a quantity'}</span><span class="spacer"></span>
+        ${areas.map(a => areaDone(l.id, a)
+          ? `<button class="btn small" data-reopen="${a}" ${locked ? 'disabled' : ''}>Reopen ${areaName(a)}</button>`
+          : `<button class="btn primary" data-areadone="${a}" ${locked || lines.some(x => x.area === a && x.picked_qty == null) ? 'disabled' : ''}>${areaName(a)} done</button>`).join('')}
+      </div>` : '<div class="empty">Nothing to pick in this area on this load.</div>'}`;
+  }
+
+  function itemRow(l, x, locked) {
+    const got = x.picked_qty != null, short = got && Number(x.picked_qty) < Number(x.required);
+    const doneArea = !!areaDone(l.id, x.area);
+    const dis = locked || doneArea ? 'disabled' : '';
+    return `<div class="item ${got ? (short ? 'short' : 'ok') : ''}" data-item="${esc(x.inventory_id)}">
+      <div><div class="desc">${esc(x.description || x.inventory_id)}</div>
+        <div class="meta">${esc(x.inventory_id)} · ${esc(x.uom || '')}${x.shipments > 1 ? ` · ${x.shipments} shipments` : ''}</div></div>
+      <div class="need">${fmt(x.required)}<small>to pick</small></div>
+      <div class="acts">
+        <button class="btn ${got && !short ? 'primary' : ''}" data-all ${dis}>All ${fmt(x.required)}</button>
+        <input type="number" inputmode="numeric" min="0" step="1" data-qty value="${got ? Number(x.picked_qty) : ''}" placeholder="Qty" aria-label="Picked quantity for ${esc(x.inventory_id)}" ${dis}>
+        <button class="btn small" data-save ${dis}>Save</button>
+        ${got ? `<button class="btn small link" data-clear ${dis}>Clear</button>` : ''}
+        <span class="got">${got ? `${short ? `<b style="color:var(--warn-text)">Short ${fmt(Number(x.required) - Number(x.picked_qty))}</b> · ` : ''}${esc(x.picker_name || '')} ${esc(stamp(x.picked_at))}` : ''}</span>
+      </div>
+    </div>`;
+  }
+
+  // ------------------------------------------------------------------
+  async function rpc(name, args) { const { error } = await sb.rpc(name, args); if (error) throw error; }
+  async function act(fn) {
+    if (P.busy) return;
+    P.busy = true;
+    try { await fn(); await refresh(); }
+    catch (e) { console.error('[picking]', e); toast(errMsg(e), true); await refresh(); }
+    finally { P.busy = false; }
+  }
+
+  document.getElementById('app').addEventListener('click', e => {
+    const t = e.target;
+    const day = t.closest('#daySeg button');
+    if (day) { P.date = jmDate(Number(day.dataset.day)); P.open = null; refresh(); return; }
+    const ar = t.closest('[data-area]');
+    if (ar) { P.area = ar.dataset.area; try { localStorage.setItem('dispatch-pick-area', P.area); } catch (x) {} render(); return; }
+    const op = t.closest('[data-open]');
+    if (op) { P.open = Number(op.dataset.open); render(); window.scrollTo(0, 0); return; }
+    if (t.closest('[data-back]')) { P.open = null; render(); return; }
+    const done = t.closest('[data-areadone]');
+    if (done) { act(() => rpc('dispatch_pick_area_done', { p_load_id: P.open, p_area: Number(done.dataset.areadone), p_done: true })); return; }
+    const re = t.closest('[data-reopen]');
+    if (re) { act(() => rpc('dispatch_pick_area_done', { p_load_id: P.open, p_area: Number(re.dataset.reopen), p_done: false })); return; }
+    const row = t.closest('.item[data-item]');
+    if (!row) return;
+    const item = row.dataset.item;
+    const line = (P.lists.get(P.open) || []).find(x => x.inventory_id === item);
+    if (t.closest('[data-all]')) { act(() => rpc('dispatch_pick_set', { p_load_id: P.open, p_inventory_id: item, p_picked: Number(line.required) })); return; }
+    if (t.closest('[data-clear]')) { act(() => rpc('dispatch_pick_set', { p_load_id: P.open, p_inventory_id: item, p_picked: null })); return; }
+    if (t.closest('[data-save]')) { saveQty(row, line); }
+  });
+  document.getElementById('app').addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || !e.target.dataset || e.target.dataset.qty === undefined) return;
+    const row = e.target.closest('.item[data-item]');
+    saveQty(row, (P.lists.get(P.open) || []).find(x => x.inventory_id === row.dataset.item));
+  });
+  document.getElementById('app').addEventListener('change', e => {
+    if (e.target.id === 'datePick' && e.target.value) { P.date = e.target.value; P.open = null; refresh(); }
+  });
+  function saveQty(row, line) {
+    const v = row.querySelector('[data-qty]').value.trim();
+    if (v === '') { toast('Enter the quantity picked, or tap All', true); return; }
+    const n = Math.round(Number(v));
+    if (!(n >= 0)) { toast('That isn\'t a quantity', true); return; }
+    if (n > Number(line.required)) { toast(`Only ${fmt(line.required)} needed; picking extra isn't allowed (that's a new order)`, true); return; }
+    act(() => rpc('dispatch_pick_set', { p_load_id: P.open, p_inventory_id: line.inventory_id, p_picked: n }));
+  }
+
+  async function refresh() {
+    try { await loadAll(); render(); }
+    catch (e) { console.error('[picking]', e); document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`; }
+  }
+  function editing() {
+    const a = document.activeElement;
+    return a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
+  }
+
+  startPage({
+    page: 'picker', role: 'picker', title: 'Picking',
+    onEnvChange: () => { P.open = null; refresh(); },
+    onReady: () => {
+      refresh();
+      setInterval(() => { if (!P.busy && !editing()) refresh(); }, 30 * 1000);
+    },
+  });
+</script>
+</body>
+</html>

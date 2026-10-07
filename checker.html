@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f2044">
+<meta name="robots" content="noindex, nofollow">
+<title>Checker — DFL Dispatch</title>
+<!--
+  Checker: compares what was picked for a load with what's on its shipments,
+  sets what actually goes out on each shipment line, then confirms the load in
+  Acumatica (dispatch-acu check_confirm: lowered lines are reduced, zeroed lines
+  removed, Control Qty set, Confirm Shipment). Confirm only; invoicing stays
+  with Accounts for now.
+
+  Picking is consolidated per item, so a short pick has to be split back over
+  the shipments. The default fills shipments in shipment-number order and
+  leaves the shortfall on the last ones; the checker can move it. Quantities
+  can only be lowered (an addition is a new SO). An item nobody picked defaults
+  to what's on the shipment and is flagged.
+
+  Live loads also need DISPATCH_LIVE_CHECKER = 'on' in dispatch-acu, switched on
+  after a supervised pilot load.
+-->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="common.css">
+<style>
+  .cload { display:block; width:100%; text-align:left; font:inherit; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px; margin-bottom:10px; cursor:pointer; color:var(--text); }
+  .cload .top { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .cload .sub { font-size:13px; color:var(--text-muted); margin-top:4px; }
+  .back { font:inherit; font-size:14px; font-weight:600; background:none; border:0; color:var(--accent); cursor:pointer; padding:4px 0; margin-bottom:8px; }
+  .ship { background:var(--surface); border:1px solid var(--border); border-radius:12px; margin-bottom:12px; overflow:hidden; }
+  .ship .sh { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:10px 14px; background:#f8fafc; border-bottom:1px solid var(--border); font-size:13px; }
+  .ship .sh b { color:var(--navy); }
+  table.chk { width:100%; border-collapse:collapse; font-size:13px; }
+  table.chk th { text-align:left; font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.3px; padding:6px 10px; border-bottom:1px solid var(--border); }
+  table.chk td { padding:6px 10px; border-top:1px solid #f1f5f9; vertical-align:middle; }
+  table.chk td.r, table.chk th.r { text-align:right; }
+  table.chk tr.low td { background:var(--warn-bg); }
+  table.chk tr.zero td { background:var(--bad-bg); }
+  table.chk input { width:80px; text-align:right; font:inherit; font-size:14px; padding:5px 8px; border:1px solid var(--border2); border-radius:6px; }
+  .sumbar { position:sticky; bottom:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; background:var(--navy); color:#fff; border-radius:12px; padding:12px 14px; margin-top:12px; box-shadow:0 6px 20px rgba(15,32,68,.25); font-size:13px; }
+  .sumbar .btn { border-color:#fff; }
+</style>
+</head>
+<body>
+<div class="page" id="app"><div class="empty">Loading…</div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="common.js"></script>
+<script>
+  const K = { date: jmDate(0), loads: [], picks: new Map(), areaDone: [], checks: [], open: null, final: new Map(), busy: false, writing: false };
+  const key = (nbr, ln) => nbr + '|' + ln;
+
+  async function loadAll() {
+    const loads = (await fetchLoads(K.date)).filter(l => ['done', 'partial'].includes(l.status));
+    const ids = loads.map(l => l.id);
+    await loadLines(loads.flatMap(l => l.ships.map(s => s.shipment_nbr)));
+    const [lists, done, checks] = await Promise.all([
+      Promise.all(loads.map(l => sb.rpc('dispatch_pick_list', { p_load_id: l.id }))),
+      ids.length ? sb.from('pick_area_status').select('*').in('load_id', ids) : { data: [] },
+      ids.length ? sb.from('check_lines').select('*').in('load_id', ids) : { data: [] },
+    ]);
+    lists.forEach(r => { if (r.error) throw r.error; });
+    if (done.error) throw done.error;
+    if (checks.error) throw checks.error;
+    K.loads = loads;
+    K.picks = new Map(loads.map((l, i) => [l.id, lists[i].data || []]));
+    K.areaDone = done.data || [];
+    K.checks = checks.data || [];
+  }
+
+  // Lines of a load, in shipment / line order: { nbr, customer, line_nbr, item, desc, uom, shipped }.
+  function loadLinesOf(l) {
+    return l.ships.slice().sort((a, b) => a.shipment_nbr.localeCompare(b.shipment_nbr)).flatMap(s =>
+      (D.lines.get(s.shipment_nbr) || []).filter(x => Number(x.shipped_qty) > 0).map(x => ({
+        nbr: s.shipment_nbr, customer: (s.row && (s.row.customer_name || s.row.customer_id)) || '', line_nbr: x.line_nbr,
+        item: x.inventory_id, desc: x.description, uom: x.uom, shipped: Number(x.shipped_qty),
+      })));
+  }
+
+  // Default "going out": a saved check wins; else the consolidated pick split
+  // over the shipments in order (shortfall on the last); else what's shipped.
+  function defaults(l) {
+    const lines = loadLinesOf(l);
+    const saved = K.checks.filter(c => c.load_id === l.id);
+    const m = new Map();
+    if (saved.length) {
+      lines.forEach(x => { const c = saved.find(s => s.shipment_nbr === x.nbr && s.line_nbr === x.line_nbr); m.set(key(x.nbr, x.line_nbr), c ? Number(c.final_qty) : x.shipped); });
+      return m;
+    }
+    const picks = K.picks.get(l.id) || [];
+    const left = new Map(picks.filter(p => p.picked_qty != null).map(p => [p.inventory_id, Number(p.picked_qty)]));
+    lines.forEach(x => {
+      if (!left.has(x.item)) { m.set(key(x.nbr, x.line_nbr), x.shipped); return; }
+      const give = Math.min(x.shipped, left.get(x.item));
+      left.set(x.item, left.get(x.item) - give);
+      m.set(key(x.nbr, x.line_nbr), give);
+    });
+    return m;
+  }
+
+  function pickState(l) {
+    const picks = K.picks.get(l.id) || [];
+    const areas = [...new Set(picks.map(p => p.area))];
+    const done = areas.filter(a => K.areaDone.some(d => d.load_id === l.id && d.area === a)).length;
+    return { areas: areas.length, done, unpicked: picks.filter(p => p.picked_qty == null).length,
+             short: picks.filter(p => p.picked_qty != null && Number(p.picked_qty) < Number(p.required)).length };
+  }
+  function checkPill(l) {
+    return { checking: '<span class="pill info">Check saved</span>', confirming: '<span class="pill warn">Confirming…</span>',
+             confirmed: '<span class="pill ok">Confirmed in Acumatica</span>', partial: '<span class="pill bad">Partly confirmed</span>' }[l.check_status]
+      || '<span class="pill done">Not checked</span>';
+  }
+
+  function render() {
+    const main = document.getElementById('main');
+    if (K.open) { main.innerHTML = loadView(K.loads.find(l => l.id === K.open)); return; }
+    const todo = K.loads.filter(l => l.check_status !== 'confirmed'), done = K.loads.filter(l => l.check_status === 'confirmed');
+    main.innerHTML = `
+      <div class="controls">
+        <div class="seg" id="daySeg">
+          <button data-day="0" class="${K.date === jmDate(0) ? 'on' : ''}">Today</button>
+          <button data-day="1" class="${K.date === jmDate(1) ? 'on' : ''}">Tomorrow</button>
+        </div>
+        <input type="date" id="datePick" value="${K.date}" aria-label="Load date">
+      </div>
+      <div class="kpis">
+        <div class="kpi"><div class="l">To check</div><div class="v">${todo.length}</div><div class="s">${todo.filter(l => { const p = pickState(l); return p.areas && p.done === p.areas; }).length} fully picked</div></div>
+        <div class="kpi"><div class="l">Confirmed</div><div class="v">${done.length}</div><div class="s">in Acumatica${D.env === 'test' ? ' TEST' : ''}</div></div>
+        <div class="kpi ${todo.some(l => l.check_status === 'partial') ? 'warn' : ''}"><div class="l">Problems</div><div class="v">${todo.filter(l => l.check_status === 'partial').length}</div><div class="s">partly confirmed</div></div>
+        <div class="kpi"><div class="l">Short picks</div><div class="v">${K.loads.reduce((s, l) => s + pickState(l).short, 0)}</div><div class="s">items across loads</div></div>
+      </div>
+      ${K.loads.length ? [...todo, ...done].map(loadCard).join('') : `<div class="card"><div class="empty">No loads with a trucker locked in for ${esc(niceDate(K.date))}.</div></div>`}`;
+  }
+
+  function loadCard(l) {
+    const p = pickState(l);
+    return `<button class="cload" data-open="${l.id}">
+      <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${waveTag(l.wave)}<b>${esc(l.truck_type || '')}</b><span class="target">${esc(l.ship_via || '')}</span>
+        <span class="spacer"></span>${checkPill(l)}</div>
+      <div class="sub">${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} ·
+        picking ${p.areas ? `${p.done}/${p.areas} areas done` : 'not started'}${p.unpicked ? ` · ${p.unpicked} not picked` : ''}${p.short ? ` · <b style="color:var(--warn-text)">${p.short} short</b>` : ''}</div>
+    </button>`;
+  }
+
+  function loadView(l) {
+    if (!l) { K.open = null; return '<div class="empty">That load is gone.</div>'; }
+    if (!K.final.size) K.final = defaults(l);
+    const lines = loadLinesOf(l);
+    const p = pickState(l);
+    const picks = new Map((K.picks.get(l.id) || []).map(x => [x.inventory_id, x]));
+    const locked = ['confirming', 'confirmed'].includes(l.check_status) || K.writing;
+    const lowered = lines.filter(x => K.final.get(key(x.nbr, x.line_nbr)) < x.shipped);
+    const byShip = new Map();
+    lines.forEach(x => { if (!byShip.has(x.nbr)) byShip.set(x.nbr, []); byShip.get(x.nbr).push(x); });
+    const res = new Map(l.ships.map(s => [s.shipment_nbr, s]));
+    return `
+      <button class="back" data-back>← All loads</button>
+      <div class="lhead"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${waveTag(l.wave)} <b>${esc(l.truck_type || '')}</b> <span class="target">${esc(l.ship_via || '')}</span>
+        <span class="muted">${esc(l.contractor || '')}</span></div>${checkPill(l)}</div>
+      <div class="lstats"><span>${plural(l.count, 'shipment')}</span><span>${esc(l.zones.join(', '))}</span>
+        <span>picking ${p.areas ? `${p.done}/${p.areas} areas done` : 'not started'}</span></div>
+      ${p.unpicked ? `<div class="warnbox">${plural(p.unpicked, 'item')} on this load ${p.unpicked === 1 ? 'has' : 'have'} no picked quantity. They default to the shipment's quantity; lower them if they're not going.</div>` : ''}
+      ${!lines.length ? `<div class="warnbox bad">No item lines for this load's shipments${D.env === 'live' ? ' (the live line sync may not be running yet)' : '; pull fresh TEST data'}.</div>` : ''}
+      ${[...byShip.entries()].map(([nbr, sl]) => {
+        const r = res.get(nbr) || {};
+        return `<div class="ship"><div class="sh"><b>${esc(nbr)}</b><span>${esc(sl[0].customer)}</span><span class="spacer"></span>
+          ${r.check_result ? resultPill({ result: r.check_result }) + (r.check_detail ? ` <span class="muted">${esc(r.check_detail)}</span>` : '') : ''}</div>
+          <table class="chk"><thead><tr><th>Item</th><th>Description</th><th class="hide-m">UOM</th><th class="r">On shipment</th><th class="r hide-m">Picked (load)</th><th class="r">Going out</th></tr></thead>
+          <tbody>${sl.map(x => {
+            const f = K.final.get(key(x.nbr, x.line_nbr)), pk = picks.get(x.item);
+            const cls = f === 0 ? 'zero' : f < x.shipped ? 'low' : '';
+            return `<tr class="${cls}"><td class="num">${esc(x.item)}</td><td>${esc(x.desc || '')}</td><td class="hide-m">${esc(x.uom || '')}</td>
+              <td class="r num">${fmt(x.shipped)}</td>
+              <td class="r num hide-m">${pk && pk.picked_qty != null ? `${fmt(pk.picked_qty)} / ${fmt(pk.required)}` : '<span class="tag old">not picked</span>'}</td>
+              <td class="r"><input type="number" min="0" max="${x.shipped}" step="1" data-final="${esc(key(x.nbr, x.line_nbr))}" value="${f}" ${locked ? 'disabled' : ''} aria-label="Going out for ${esc(x.item)} on ${esc(x.nbr)}"></td></tr>`;
+          }).join('')}</tbody></table></div>`;
+      }).join('')}
+      ${lines.length ? `<div class="sumbar">
+        <span>${lowered.length ? `${plural(lowered.length, 'line')} lowered (${lowered.filter(x => K.final.get(key(x.nbr, x.line_nbr)) === 0).length} removed)` : 'Everything goes out as on the shipments'}</span>
+        <span class="spacer"></span>
+        <button class="btn small" data-act="reset" ${locked ? 'disabled' : ''}>Reset to pick</button>
+        <button class="btn small" data-act="save" ${locked ? 'disabled' : ''}>Save check</button>
+        <button class="btn primary small" data-act="confirm" ${locked && l.check_status !== 'partial' ? 'disabled' : ''}>${l.check_status === 'partial' ? 'Retry confirm' : 'Confirm in Acumatica'}</button>
+      </div>` : ''}
+      ${eventList(l.events, 'hist-' + l.id)}`;
+  }
+
+  // ------------------------------------------------------------------
+  function payload(l) {
+    return loadLinesOf(l).map(x => ({ shipment_nbr: x.nbr, line_nbr: x.line_nbr, final_qty: K.final.get(key(x.nbr, x.line_nbr)) }));
+  }
+  async function save(l) {
+    const { error } = await sb.rpc('dispatch_check_save', { p_load_id: l.id, p_lines: payload(l) });
+    if (error) throw error;
+  }
+  async function act(fn) {
+    if (K.busy) return;
+    K.busy = true;
+    try { await fn(); }
+    catch (e) { console.error('[checker]', e); toast(errMsg(e), true); }
+    finally { K.busy = false; K.writing = false; await refresh(); }
+  }
+
+  document.getElementById('app').addEventListener('click', e => {
+    const t = e.target;
+    const day = t.closest('#daySeg button');
+    if (day) { K.date = jmDate(Number(day.dataset.day)); K.open = null; refresh(); return; }
+    const op = t.closest('[data-open]');
+    if (op) { K.open = Number(op.dataset.open); K.final = new Map(); render(); window.scrollTo(0, 0); return; }
+    if (t.closest('[data-back]')) { K.open = null; K.final = new Map(); render(); return; }
+    const b = t.closest('[data-act]');
+    if (!b) return;
+    const l = K.loads.find(x => x.id === K.open);
+    if (b.dataset.act === 'reset') { K.checks = K.checks.filter(c => c.load_id !== l.id); K.final = defaults(l); render(); return; }
+    if (b.dataset.act === 'save') { act(async () => { await save(l); toast('Check saved'); }); return; }
+    if (b.dataset.act === 'confirm') {
+      const lines = loadLinesOf(l);
+      const low = lines.filter(x => K.final.get(key(x.nbr, x.line_nbr)) < x.shipped).length;
+      const where = D.env === 'test' ? 'Acumatica TEST' : 'live Acumatica';
+      if (!confirm(`Confirm ${l.load_nbr} in ${where}?\n\n${plural(new Set(lines.map(x => x.nbr)).size, 'shipment')} will be confirmed${low ? `, with ${plural(low, 'line')} lowered or removed` : ''}. Invoicing stays with Accounts.`)) return;
+      act(async () => {
+        if (l.check_status !== 'partial') await save(l);
+        K.writing = true; render();
+        const r = await callAcu('check_confirm', { load_id: l.id });
+        if (!r.ok && r.error && !r.results) throw new Error(r.error);
+        const n = k => (r.results || []).filter(x => x.result === k).length;
+        if (r.error) toast(r.error, true);
+        else if (n('refused') || n('failed')) toast(`${n('applied')} confirmed, ${n('refused')} refused, ${n('failed')} failed`, true);
+        else toast(`All ${n('applied')} shipments confirmed`);
+      });
+    }
+  });
+  document.getElementById('app').addEventListener('change', e => {
+    const t = e.target;
+    if (t.id === 'datePick' && t.value) { K.date = t.value; K.open = null; refresh(); return; }
+    if (t.dataset.final === undefined) return;
+    const l = K.loads.find(x => x.id === K.open);
+    const x = loadLinesOf(l).find(y => key(y.nbr, y.line_nbr) === t.dataset.final);
+    let n = Math.round(Number(t.value));
+    if (!(n >= 0)) n = 0;
+    if (n > x.shipped) { toast(`Only ${fmt(x.shipped)} on the shipment; adding is a new order`, true); n = x.shipped; }
+    K.final.set(t.dataset.final, n);
+    render();
+  });
+
+  async function refresh() {
+    try { await loadAll(); render(); }
+    catch (e) { console.error('[checker]', e); document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`; }
+  }
+  function editing() {
+    const a = document.activeElement;
+    return a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
+  }
+
+  startPage({
+    page: 'checker', role: 'checker', title: 'Checker',
+    onEnvChange: () => { K.open = null; K.final = new Map(); refresh(); },
+    onReady: () => {
+      refresh();
+      setInterval(() => { if (!K.busy && !editing() && !K.open) refresh(); }, 30 * 1000);
+    },
+  });
+</script>
+</body>
+</html>
