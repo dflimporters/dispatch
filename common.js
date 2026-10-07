@@ -157,7 +157,7 @@ async function startPage({ page, role, title, onReady, onEnvChange }) {
     return;
   }
 
-  // Overview (index.html) is left out of the nav for now.
+  // index.html is just a landing page that links to these, so it isn't in the nav.
   const links = [['batcher.html', 'Coordinator', 'batcher'], ['transfers.html', 'Transfers', 'batcher', 'transfers'],
                  ['clerk.html', 'Trucker Liaison', 'clerk'], ['picking.html', 'Picking', 'picker'], ['checker.html', 'Checker', 'checker']]
     .filter(([, , r]) => me.roles.includes(r))

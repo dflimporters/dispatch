@@ -10,7 +10,7 @@ portal's pull-request flow. Both use the same Supabase project (`hzagwndglwhceps
 
 | Page | Who | Sign-in |
 |---|---|---|
-| `index.html` | Overview: shipments per zone or per trucker, fill, best-fit trucks. Still has the old BATCH-placeholder clerk/batcher sections until the new pages replace them. | none (anon) |
+| `index.html` | Landing page: signs in and links to the pages your roles allow (straight through if only one). | any dispatch role |
 | `batcher.html` | **Internal Logistics Coordinator** (was "batcher"): builds loads from open shipments, suggested per zone and wave; move/merge/split, truck type, send to the liaison. | Microsoft, `batcher` role |
 | `transfers.html` | **Transfer lists** (coordinator): numbered, time-bound lists (TR-MMDD-NN) of items bumped off shipments, Ashenheim → 71. Draft → Sent; print / CSV. | Microsoft, `batcher` role |
 | `clerk.html` | **Trucker Liaison** (was "clerk"): logs trucker calls, locks in a trucker per load (writes ShipVia + LOADNBR). | Microsoft, `clerk` role |
@@ -118,7 +118,7 @@ sandbox allows 1 and 50. `dispatch-acu` runs one job at a time per target (lease
 | `truck_types` | Maintained by hand (Van 120, 5 Ton 400, 10 Ton 800, 12 Ton 900) | — |
 | `dispatch_roles` | Who is a `batcher` / `clerk`. Granted by hand in SQL. | — |
 | `loads`, `load_shipments`, `load_events` | Written only through the `dispatch_*` functions and `dispatch-acu` | — |
-| `batch_assignments`, `batch_events` | Old placeholder flow (index.html). Drop once the new pages are in use. | — |
+| `batch_assignments`, `batch_events` | Old placeholder flow from the retired load board. No policies (service role only). Drop after go-live. | — |
 | `pick_areas`, `pick_area_classes`, `pick_area_items` | Which warehouse area (1–4) picks an item: per-item override, else by item class (`pick_area_of()`). Class rules are a **placeholder** until the warehouse manager's mapping arrives. | by hand |
 | `acu_leases` | One Acumatica job at a time per target (see API limits above) | by the edge functions |
 
@@ -146,8 +146,7 @@ Microsoft SSO through Supabase. Azure only redirects to the Supabase callback, s
 changes there; this site's URL (and `http://localhost:3000`) are in Supabase's Redirect URLs.
 Sessions are **not** shared with dflhq.com.
 
-`index.html` is still unguarded (anon key, temporary `*_anon` / `*_test` policies) until its old
-sections are retired.
+Nothing is readable anonymously: the old load board and its anon policies were retired 2026-10-07.
 
 ## Working on it
 
