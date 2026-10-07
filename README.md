@@ -118,7 +118,6 @@ sandbox allows 1 and 50. `dispatch-acu` runs one job at a time per target (lease
 | `truck_types` | Maintained by hand (Van 120, 5 Ton 400, 10 Ton 800, 12 Ton 900) | — |
 | `dispatch_roles` | Who is a `batcher` / `clerk`. Granted by hand in SQL. | — |
 | `loads`, `load_shipments`, `load_events` | Written only through the `dispatch_*` functions and `dispatch-acu` | — |
-| `batch_assignments`, `batch_events` | Old placeholder flow from the retired load board. No policies (service role only). Drop after go-live. | — |
 | `pick_areas`, `pick_area_classes`, `pick_area_items` | Which warehouse area (1–4) picks an item: per-item override, else by item class (`pick_area_of()`). Class rules are a **placeholder** until the warehouse manager's mapping arrives. | by hand |
 | `acu_leases` | One Acumatica job at a time per target (see API limits above) | by the edge functions |
 
