@@ -22,7 +22,8 @@ const STALE_MIN = 15;
 // switches (DISPATCH_LIVE_WRITEBACK, DISPATCH_LIVE_CHECKER) in dispatch-acu.
 const LIVE_ENABLED = true;
 
-const ROLE_NAMES = { batcher: 'Logistics Coordinator', clerk: 'Trucker Liaison', picker: 'Picker', checker: 'Checker' };
+const ROLE_NAMES = { batcher: 'Logistics Coordinator', clerk: 'Trucker Liaison', picker: 'Picker', checker: 'Checker',
+  supervisor: 'Supervisor', manager: 'Operations Manager' };
 
 const D = { env: 'test', me: null, truckTypes: [], codes: [], acuStatus: null,
   lines: new Map(),       // shipment_nbr -> its line items (shipment_lines)
@@ -149,8 +150,9 @@ async function startPage({ page, role, title, onReady, onEnvChange }) {
   const { data: me, error } = await sb.rpc('dispatch_me');
   if (error) { gate(`<h2>Something went wrong</h2><p>${esc(errMsg(error))}</p><button class="btn" onclick="signOut()">Sign out</button>`); return; }
   D.me = me;
-  if (!me.roles.includes(role)) {
-    const roleName = ROLE_NAMES[role] || role;
+  const needs = [].concat(role);   // a page can allow more than one role
+  if (!needs.some(r => me.roles.includes(r))) {
+    const roleName = needs.map(r => ROLE_NAMES[r] || r).join(' or ');
     gate(`<h2>No ${esc(roleName)} access</h2>
       <p>You're signed in as <b>${esc(session.user.email)}</b>, but this account doesn't have the ${esc(roleName)} role for dispatch. Ask Joel to add it.</p>
       <button class="btn" onclick="signOut()">Sign out</button>`);
@@ -159,8 +161,9 @@ async function startPage({ page, role, title, onReady, onEnvChange }) {
 
   // index.html is just a landing page that links to these, so it isn't in the nav.
   const links = [['batcher.html', 'Coordinator', 'batcher'], ['transfers.html', 'Transfers', 'batcher', 'transfers'],
-                 ['clerk.html', 'Trucker Liaison', 'clerk'], ['picking.html', 'Picking', 'picker'], ['checker.html', 'Checker', 'checker']]
-    .filter(([, , r]) => me.roles.includes(r))
+                 ['clerk.html', 'Trucker Liaison', 'clerk'], ['picking.html', 'Picking', 'picker'], ['checker.html', 'Checker', 'checker'],
+                 ['invoicing.html', 'Invoicing', 'supervisor'], ['dashboard.html', 'Dashboard', ['manager', 'supervisor'], 'dashboard']]
+    .filter(([, , r]) => [].concat(r).some(x => me.roles.includes(x)))
     .map(([href, label, r, key]) => `<a href="${href}" class="${(key || r) === page ? 'on' : ''}">${label}</a>`).join('');
   document.getElementById('app').innerHTML = `
     <div class="hdr">

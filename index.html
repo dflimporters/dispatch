@@ -36,6 +36,8 @@ const PAGES = [
   ['clerk.html',     'Trucker Liaison', 'clerk',   'Book truckers and lock loads in.'],
   ['picking.html',   'Picking',         'picker',  'Pick locked-in loads by area.'],
   ['checker.html',   'Checker',         'checker', 'Check picked against shipped, then confirm.'],
+  ['invoicing.html', 'Invoicing',       'supervisor', 'Convert confirmed shipments to invoices in bulk.'],
+  ['dashboard.html', 'Dashboard',       ['manager', 'supervisor'], 'Orders, shipments, picking and checking at a glance.'],
 ];
 
 (async function () {
@@ -50,7 +52,7 @@ const PAGES = [
   const { data: me, error } = await sb.rpc('dispatch_me');
   if (error) { gate(`<h2>Something went wrong</h2><p>${esc(errMsg(error))}</p><button class="btn" onclick="signOut()">Sign out</button>`); return; }
 
-  const mine = PAGES.filter(([, , role]) => me.roles.includes(role));
+  const mine = PAGES.filter(([, , role]) => [].concat(role).some(r => me.roles.includes(r)));
   if (!mine.length) {
     gate(`<h2>No dispatch access</h2>
       <p>You're signed in as <b>${esc(session.user.email)}</b>, but this account has no dispatch roles yet. Ask Joel to add them.</p>

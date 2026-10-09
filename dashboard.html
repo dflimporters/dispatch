@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f2044">
+<meta name="robots" content="noindex, nofollow">
+<title>Dashboard — DFL Dispatch</title>
+<!--
+  Operations Manager dashboard (read-only): the day at a glance. Sales orders by
+  status, shipments by status, and every load's progress through picking,
+  checking, confirming and invoicing. All of it comes from one database call,
+  dispatch_ops_summary(env, date), refreshed every 30 seconds.
+
+  Sales orders are production's (so_ordered_items, refreshed every 5 minutes), so
+  that card is the same in Test and Live; shipments and loads follow the switch.
+-->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="common.css">
+<style>
+  .cols { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px; }
+  @media (max-width:800px) { .cols { grid-template-columns:1fr; } }
+  .box { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px; }
+  .box h3 { font-size:13px; font-weight:600; color:var(--navy); margin-bottom:8px; }
+  .box h3 span { font-weight:400; color:var(--text-muted); }
+  .srow { display:flex; align-items:center; gap:10px; padding:4px 0; font-size:13px; }
+  .srow .nm { width:110px; color:var(--text-muted); }
+  .srow .bar { flex:1; height:8px; background:#eef2f7; border-radius:4px; overflow:hidden; }
+  .srow .bar i { display:block; height:100%; background:var(--accent); border-radius:4px; }
+  .srow.warnrow .bar i { background:var(--warn); }
+  .srow.badrow .bar i { background:var(--bad); }
+  .srow.okrow .bar i { background:var(--ok); }
+  .srow .n { width:46px; text-align:right; font-weight:600; font-variant-numeric:tabular-nums; }
+  table.ops { width:100%; border-collapse:collapse; font-size:13px; }
+  table.ops th { text-align:left; font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.3px; padding:8px 10px; border-bottom:1px solid var(--border); white-space:nowrap; }
+  table.ops td { padding:8px 10px; border-top:1px solid #f1f5f9; vertical-align:middle; }
+  .stage { min-width:110px; }
+  .stage .bar { height:7px; background:#eef2f7; border-radius:4px; overflow:hidden; margin-bottom:3px; }
+  .stage .bar i { display:block; height:100%; background:var(--accent); }
+  .stage.ok .bar i { background:var(--ok); }
+  .stage.warn .bar i { background:var(--warn); }
+  .stage .t { font-size:12px; color:var(--text-muted); }
+  .scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<div class="page" id="app"><div class="empty">Loading…</div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="common.js"></script>
+<script>
+  const M = { date: jmDate(0), data: null, at: null };
+
+  async function loadAll() {
+    const { data, error } = await sb.rpc('dispatch_ops_summary', { p_env: D.env, p_date: M.date });
+    if (error) throw error;
+    M.data = data; M.at = new Date();
+  }
+
+  const ORDER_TONE = { 'On Hold': 'warnrow', 'Credit Hold': 'badrow', 'Back Order': 'warnrow', Completed: 'okrow' };
+  const SHIP_TONE = { 'On Hold': 'warnrow', Confirmed: '', Completed: 'okrow', Invoiced: 'okrow', Cancelled: 'badrow' };
+
+  function bars(rows, key, nKey, tone) {
+    const max = Math.max(1, ...rows.map(r => r[nKey]));
+    return rows.length ? rows.map(r => `<div class="srow ${tone[r[key]] || ''}"><span class="nm">${esc(r[key])}</span>
+      <span class="bar"><i style="width:${Math.round(100 * r[nKey] / max)}%"></i></span><span class="n">${fmt(r[nKey])}</span></div>`).join('')
+      : '<div class="muted">Nothing</div>';
+  }
+  function stage(done, total, text, cls) {
+    const pct = total ? Math.round(100 * done / total) : 0;
+    return `<div class="stage ${cls || (total && done >= total ? 'ok' : '')}"><div class="bar"><i style="width:${pct}%"></i></div><div class="t">${text}</div></div>`;
+  }
+  function checkText(l) {
+    if (l.check_status === 'confirmed') return ['Confirmed', 'ok'];
+    if (l.check_status === 'confirming') return ['Confirming…', 'warn'];
+    if (l.check_status === 'partial') return ['Partly confirmed', 'warn'];
+    if (l.check_status === 'checking') return ['Check saved', ''];
+    return ['Not checked', ''];
+  }
+
+  function render() {
+    const d = M.data;
+    const main = document.getElementById('main');
+    const ord = d.orders.by_status, shp = d.shipments.by_status;
+    const cnt = (list, k, f) => (list.find(r => r.status === k) || {})[f] || 0;
+    const openOrders = ['Open', 'Back Order', 'Shipping'].reduce((t, k) => t + cnt(ord, k, 'orders'), 0);
+    const holds = cnt(ord, 'On Hold', 'orders') + cnt(ord, 'Credit Hold', 'orders');
+    const shipTotal = shp.reduce((t, r) => t + r.n, 0);
+    const loads = d.loads;
+    const stuck = loads.filter(l => ['partial'].includes(l.status) || l.check_status === 'partial').length;
+    main.innerHTML = `
+      <div class="controls">
+        <div class="seg" id="daySeg">
+          <button data-day="0" class="${M.date === jmDate(0) ? 'on' : ''}">Today</button>
+          <button data-day="1" class="${M.date === jmDate(1) ? 'on' : ''}">Tomorrow</button>
+        </div>
+        <input type="date" id="datePick" value="${M.date}" aria-label="Date">
+        <span class="spacer"></span><span class="sync">Updated ${M.at.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span>
+      </div>
+      <div class="kpis">
+        <div class="kpi"><div class="l">Orders today</div><div class="v">${fmt(d.orders.new_today)}</div><div class="s">${fmt(d.orders.completed_today)} already completed</div></div>
+        <div class="kpi"><div class="l">Open orders</div><div class="v">${fmt(openOrders)}</div><div class="s">open, back order, shipping</div></div>
+        <div class="kpi ${holds ? 'warn' : ''}"><div class="l">On hold</div><div class="v">${fmt(holds)}</div><div class="s">order or credit hold</div></div>
+        <div class="kpi"><div class="l">Shipments (${esc(niceDate(M.date))})</div><div class="v">${fmt(shipTotal)}</div><div class="s">${fmt(d.shipments.older_active)} older still active</div></div>
+        <div class="kpi ${d.free ? 'warn' : ''}"><div class="l">Not on a load</div><div class="v">${fmt(d.free)}</div><div class="s">open shipments to assign</div></div>
+        <div class="kpi ${stuck ? 'warn' : ''}"><div class="l">Loads with problems</div><div class="v">${stuck}</div><div class="s">partly written or confirmed</div></div>
+      </div>
+      <div class="cols">
+        <div class="box"><h3>Sales orders by status <span>· production, open plus today's</span></h3>${bars(ord, 'status', 'orders', ORDER_TONE)}</div>
+        <div class="box"><h3>Shipments by status <span>· ${esc(niceDate(M.date))}${D.env === 'test' ? ' · TEST' : ''}</span></h3>${bars(shp, 'status', 'n', SHIP_TONE)}</div>
+      </div>
+      <div class="box"><h3>Loads <span>· ${plural(loads.length, 'load')} on ${esc(niceDate(M.date))}</span></h3>
+        ${loads.length ? `<div class="scroll"><table class="ops"><thead><tr><th>Load</th><th>Trucker</th><th>Shipments</th><th>Picking</th><th>Checking</th><th>Confirmed</th><th>Invoiced</th></tr></thead><tbody>
+        ${loads.map(l => {
+          const [ct, cc] = checkText(l);
+          const locked = ['done', 'partial'].includes(l.status);
+          return `<tr><td><span class="lnbr">${esc(l.load_nbr)}</span> ${waveTag(l.wave)}<div class="muted">${esc(l.truck_type || '')}</div></td>
+            <td>${locked ? `<span class="target">${esc(l.ship_via || '')}</span>` : statusPill(l.status)}${l.status === 'partial' ? ' <span class="pill bad">Partly written</span>' : ''}</td>
+            <td class="num">${l.shipments}</td>
+            <td>${locked ? stage(l.picked, l.items, `${l.picked}/${l.items} items · ${l.areas_done}/${l.areas} areas${l.short ? ` · <b style="color:var(--warn-text)">${l.short} short</b>` : ''}`) : '<span class="muted">not locked in</span>'}</td>
+            <td>${locked ? stage(l.check_status === 'confirmed' ? 1 : 0, 1, ct, cc) : ''}</td>
+            <td>${stage(l.confirmed, l.shipments, `${l.confirmed}/${l.shipments}`)}</td>
+            <td>${stage(l.invoiced, l.shipments, `${l.invoiced}/${l.shipments}${l.invoice_queued ? ` · ${l.invoice_queued} queued` : ''}`)}</td></tr>`;
+        }).join('')}</tbody></table></div>` : '<div class="empty">No loads for this date.</div>'}
+      </div>`;
+  }
+
+  async function refresh() {
+    try { await loadAll(); render(); }
+    catch (e) { console.error('[dashboard]', e); document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`; }
+  }
+  function editing() { const a = document.activeElement; return a && /^(INPUT|SELECT)$/.test(a.tagName); }
+
+  document.getElementById('app').addEventListener('click', e => {
+    const day = e.target.closest('#daySeg button');
+    if (day) { M.date = jmDate(Number(day.dataset.day)); refresh(); }
+  });
+  document.getElementById('app').addEventListener('change', e => {
+    if (e.target.id === 'datePick' && e.target.value) { M.date = e.target.value; refresh(); }
+  });
+
+  startPage({
+    page: 'dashboard', role: ['manager', 'supervisor'], title: 'Operations Dashboard',
+    onEnvChange: () => refresh(),
+    onReady: () => { refresh(); setInterval(() => { if (!editing()) refresh(); }, 30 * 1000); },
+  });
+</script>
+</body>
+</html>

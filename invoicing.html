@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f2044">
+<meta name="robots" content="noindex, nofollow">
+<title>Invoicing — DFL Dispatch</title>
+<!--
+  Supervisor invoicing: lists shipments that are Confirmed in Acumatica (so
+  checked and ready) grouped by load, lets the supervisor tick any of them, and
+  runs Prepare Invoice on the ticked ones in bulk (dispatch-acu invoice_request).
+  The writes go through the same background queue as the other Acumatica jobs,
+  so the page returns at once and polls for progress. Releasing the invoice
+  stays with Accounts.
+
+  Live also needs DISPATCH_LIVE_INVOICE = 'on' in dispatch-acu.
+-->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="common.css">
+<style>
+  .grp { background:var(--surface); border:1px solid var(--border); border-radius:12px; margin-bottom:12px; overflow:hidden; }
+  .grp .gh { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:10px 14px; background:#f8fafc; border-bottom:1px solid var(--border); }
+  .grp .gh label { display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:600; color:var(--navy); }
+  table.inv { width:100%; border-collapse:collapse; font-size:13px; }
+  table.inv th { text-align:left; font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.3px; padding:6px 10px; border-bottom:1px solid var(--border); }
+  table.inv td { padding:7px 10px; border-top:1px solid #f1f5f9; vertical-align:middle; }
+  table.inv td.r, table.inv th.r { text-align:right; }
+  table.inv td.cb, table.inv th.cb { width:34px; padding-right:0; }
+  table.inv tr.sel td { background:var(--accent-bg); }
+  table.inv tr.busy td { color:var(--text-muted); }
+  input[type=checkbox] { width:16px; height:16px; cursor:pointer; }
+  .sumbar { position:sticky; bottom:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; background:var(--navy); color:#fff; border-radius:12px; padding:12px 14px; margin-top:12px; box-shadow:0 6px 20px rgba(15,32,68,.25); font-size:13px; }
+  .sumbar .btn { border-color:#fff; }
+</style>
+</head>
+<body>
+<div class="page" id="app"><div class="empty">Loading…</div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="common.js"></script>
+<script>
+  const V = { ships: [], loadOf: new Map(), inv: new Map(), sel: new Set(), date: '', busy: false, poll: null, was: false };
+
+  async function loadAll() {
+    const { data: ships, error } = await sb.from(shipTable()).select(SHIP_COLS)
+      .eq('status', 'Confirmed').eq('operation', 'Issue').order('shipment_date').order('shipment_nbr').range(0, 999);
+    if (error) throw error;
+    const nbrs = (ships || []).map(s => s.shipment_nbr);
+    const loadOf = new Map(), inv = new Map();
+    for (let i = 0; i < nbrs.length; i += 150) {
+      const chunk = nbrs.slice(i, i + 150);
+      const [ls, iv] = await Promise.all([
+        sb.from('load_shipments').select('shipment_nbr, loads(load_nbr, wave, load_date, ship_via, truck_type)').eq('env', D.env).in('shipment_nbr', chunk),
+        sb.from('shipment_invoicing').select('*').eq('env', D.env).in('shipment_nbr', chunk),
+      ]);
+      if (ls.error) throw ls.error;
+      if (iv.error) throw iv.error;
+      (ls.data || []).forEach(r => loadOf.set(r.shipment_nbr, r.loads));
+      (iv.data || []).forEach(r => inv.set(r.shipment_nbr, r));
+    }
+    // Recent results for shipments that have since left Confirmed (invoiced).
+    const since = new Date(Date.now() - 24 * 3600e3).toISOString();
+    const rec = await sb.from('shipment_invoicing').select('*').eq('env', D.env).gte('updated_at', since).order('updated_at', { ascending: false }).limit(200);
+    if (rec.error) throw rec.error;
+    V.recent = rec.data || [];
+    V.ships = ships || []; V.loadOf = loadOf; V.inv = inv;
+    // Drop selections that are no longer selectable.
+    [...V.sel].forEach(n => { if (!selectable(n)) V.sel.delete(n); });
+    const active = [...inv.values()].some(r => ['queued', 'running'].includes(r.state));
+    if (V.was && !active) toast('Invoicing finished. Check any that need attention.');
+    V.was = active;
+  }
+
+  const stateOf = n => (V.inv.get(n) || {}).state;
+  const busyNow = n => ['queued', 'running'].includes(stateOf(n));
+  const selectable = n => V.ships.some(s => s.shipment_nbr === n) && !busyNow(n);
+
+  function statePill(n) {
+    const r = V.inv.get(n);
+    if (!r) return '';
+    return { queued: '<span class="pill warn">Queued</span>', running: '<span class="pill warn">Invoicing…</span>',
+             done: '<span class="pill ok">Prepared</span>', refused: '<span class="pill warn">Refused</span>',
+             failed: '<span class="pill bad">Failed</span>' }[r.state] + (r.detail ? ` <span class="muted">${esc(r.detail)}</span>` : '');
+  }
+
+  function render() {
+    const main = document.getElementById('main');
+    const all = V.ships.filter(s => !V.date || s.shipment_date === V.date);
+    const groups = new Map();
+    all.forEach(s => {
+      const l = V.loadOf.get(s.shipment_nbr);
+      const k = l ? l.load_nbr : '—';
+      if (!groups.has(k)) groups.set(k, { load: l, rows: [] });
+      groups.get(k).rows.push(s);
+    });
+    const order = [...groups.entries()].sort(([a], [b]) => (a === '—') - (b === '—') || a.localeCompare(b));
+    const waiting = [...V.inv.values()].filter(r => ['queued', 'running'].includes(r.state)).length;
+    const selVal = V.ships.filter(s => V.sel.has(s.shipment_nbr)).reduce((t, s) => t + val(s), 0);
+    const doneToday = V.recent.filter(r => r.state === 'done').length;
+    const bad = V.ships.filter(s => ['failed', 'refused'].includes(stateOf(s.shipment_nbr))).length;
+    const dates = [...new Set(V.ships.map(s => s.shipment_date).filter(Boolean))];
+
+    main.innerHTML = `
+      <div class="controls">
+        <select id="datePick" aria-label="Shipment date"><option value="">All dates</option>${dates.map(d => `<option value="${d}" ${V.date === d ? 'selected' : ''}>${esc(niceDate(d))}</option>`).join('')}</select>
+        <span class="spacer"></span>
+        <button class="btn small" data-act="selall">${all.some(s => selectable(s.shipment_nbr) && !V.sel.has(s.shipment_nbr)) ? 'Select all' : 'Clear selection'}</button>
+      </div>
+      <div class="kpis">
+        <div class="kpi"><div class="l">Ready to invoice</div><div class="v">${all.filter(s => !busyNow(s.shipment_nbr)).length}</div><div class="s">confirmed shipments</div></div>
+        <div class="kpi"><div class="l">In the queue</div><div class="v">${waiting}</div><div class="s">being prepared</div></div>
+        <div class="kpi ${bad ? 'warn' : ''}"><div class="l">Need attention</div><div class="v">${bad}</div><div class="s">failed or refused</div></div>
+        <div class="kpi"><div class="l">Prepared (24h)</div><div class="v">${doneToday}</div><div class="s">invoices from here</div></div>
+      </div>
+      ${waiting ? progressBox('Preparing invoices in ' + (D.env === 'test' ? 'Acumatica TEST' : 'Acumatica'), 0, waiting, 'Runs in the background, one shipment at a time. You can leave this page.') : ''}
+      ${order.length ? order.map(([k, g]) => group(k, g)).join('') : '<div class="card"><div class="empty">No confirmed shipments waiting to be invoiced.</div></div>'}
+      ${V.sel.size ? `<div class="sumbar"><span><b>${V.sel.size}</b> selected · ${money(selVal)}</span><span class="spacer"></span>
+        <button class="btn small" data-act="clear">Clear</button>
+        <button class="btn primary small" data-act="invoice">Prepare ${plural(V.sel.size, 'invoice')}</button></div>` : ''}`;
+  }
+
+  function group(k, g) {
+    const sel = g.rows.filter(s => selectable(s.shipment_nbr));
+    const allOn = sel.length && sel.every(s => V.sel.has(s.shipment_nbr));
+    const l = g.load;
+    return `<div class="grp"><div class="gh">
+        <label><input type="checkbox" data-grp="${esc(k)}" ${allOn ? 'checked' : ''} ${sel.length ? '' : 'disabled'}>
+          ${l ? `<span class="lnbr">${esc(k)}</span>` : 'Not on a load'}</label>
+        ${l ? `${waveTag(l.wave)} <b>${esc(l.truck_type || '')}</b> <span class="target">${esc(l.ship_via || '')}</span>` : ''}
+        <span class="muted">${plural(g.rows.length, 'shipment')} · ${money(g.rows.reduce((t, s) => t + val(s), 0))}</span></div>
+      <table class="inv"><thead><tr><th class="cb"></th><th>Shipment</th><th>Customer</th><th class="hide-m">Order</th><th class="hide-m">Date</th><th class="r">Value</th><th>Invoice</th></tr></thead><tbody>
+      ${g.rows.map(s => {
+        const n = s.shipment_nbr, can = selectable(n);
+        return `<tr class="${V.sel.has(n) ? 'sel' : ''} ${busyNow(n) ? 'busy' : ''}"><td class="cb"><input type="checkbox" data-ship="${esc(n)}" ${V.sel.has(n) ? 'checked' : ''} ${can ? '' : 'disabled'} aria-label="Select ${esc(n)}"></td>
+          <td class="num">${esc(n)}</td><td>${esc(s.customer_name || s.customer_id || '')}</td><td class="num hide-m">${esc(s.order_nbr || '')}</td>
+          <td class="hide-m">${esc(s.shipment_date ? niceDate(s.shipment_date) : '')}</td><td class="r num">${s.shipment_value == null ? '<span class="muted">—</span>' : money(s.shipment_value)}</td>
+          <td>${statePill(n)}</td></tr>`;
+      }).join('')}</tbody></table></div>`;
+  }
+
+  async function act(fn) {
+    if (V.busy) return;
+    V.busy = true;
+    try { await fn(); }
+    catch (e) { console.error('[invoicing]', e); toast(errMsg(e), true); }
+    finally { V.busy = false; await refresh(); }
+  }
+
+  document.getElementById('app').addEventListener('click', e => {
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    const a = b.dataset.act;
+    if (a === 'clear') { V.sel.clear(); render(); return; }
+    if (a === 'selall') {
+      const rows = V.ships.filter(s => (!V.date || s.shipment_date === V.date) && selectable(s.shipment_nbr));
+      const every = rows.length && rows.every(s => V.sel.has(s.shipment_nbr));
+      rows.forEach(s => every ? V.sel.delete(s.shipment_nbr) : V.sel.add(s.shipment_nbr));
+      render(); return;
+    }
+    if (a === 'invoice') {
+      const nbrs = [...V.sel];
+      const where = D.env === 'test' ? 'Acumatica TEST' : 'live Acumatica';
+      if (!confirm(`Prepare ${plural(nbrs.length, 'invoice')} in ${where}?\n\nReleasing them stays with Accounts.`)) return;
+      act(async () => {
+        const r = await callAcu('invoice_request', { env: D.env, shipments: nbrs });
+        if (!r.ok) throw new Error(r.error || "Couldn't queue the invoices");
+        V.sel.clear(); V.was = true;
+        toast(`${plural(r.queued, 'shipment')} queued${r.skipped ? `, ${r.skipped} skipped (not confirmed or already queued)` : ''}`);
+      });
+    }
+  });
+  document.getElementById('app').addEventListener('change', e => {
+    const t = e.target;
+    if (t.id === 'datePick') { V.date = t.value; render(); return; }
+    if (t.dataset.ship !== undefined) { t.checked ? V.sel.add(t.dataset.ship) : V.sel.delete(t.dataset.ship); render(); return; }
+    if (t.dataset.grp !== undefined) {
+      V.ships.filter(s => (V.loadOf.get(s.shipment_nbr) || { load_nbr: '—' }).load_nbr === t.dataset.grp && selectable(s.shipment_nbr))
+        .forEach(s => t.checked ? V.sel.add(s.shipment_nbr) : V.sel.delete(s.shipment_nbr));
+      render();
+    }
+  });
+
+  function poll() {
+    if (V.poll || !V.was) return;
+    V.poll = setTimeout(async () => { V.poll = null; if (!V.busy) await refresh(); else poll(); }, 3000);
+  }
+  async function refresh() {
+    try { await loadAll(); render(); poll(); }
+    catch (e) { console.error('[invoicing]', e); document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`; }
+  }
+
+  startPage({
+    page: 'supervisor', role: 'supervisor', title: 'Invoicing',
+    onEnvChange: () => { V.sel.clear(); refresh(); },
+    onReady: () => { refresh(); setInterval(() => { if (!V.busy) refresh(); }, 30 * 1000); },
+  });
+</script>
+</body>
+</html>

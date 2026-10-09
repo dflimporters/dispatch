@@ -19,6 +19,10 @@
 //                             it: sets ShipVia + load number UDF, takes it off hold, reads it back.
 //                             It does NOT confirm: the shipment stays Open for picking, and the
 //                             checker's step confirms it once the pick has been checked.
+//   invoice_request { env, shipments[] } -> supervisor only. Queues Prepare Invoice for Confirmed
+//                             shipments (shipment_invoicing); the drain runs it, one shipment at a
+//                             time, and records the result. Releasing the invoice stays with
+//                             Accounts. Live also needs DISPATCH_LIVE_INVOICE = 'on'.
 //   drain                  -> cron (Vault token) every minute: work through anything queued.
 //
 // Queue: apply and check_confirm only mark the load (write_requested_at /
@@ -96,6 +100,7 @@ const TARGETS: Record<string, Target> = {
 const TEST_TARGET = Deno.env.get('DISPATCH_TEST_TARGET') ?? 'test';
 const LIVE_ON = TARGETS.live.check() === null;
 const LIVE_CHECKER_ON = Deno.env.get('DISPATCH_LIVE_CHECKER') === 'on';
+const LIVE_INVOICE_ON = Deno.env.get('DISPATCH_LIVE_INVOICE') === 'on';
 
 function targetFor(env: string): Target {
   const t = env === 'live' ? TARGETS.live : TARGETS[TEST_TARGET];
@@ -233,20 +238,21 @@ class Acu {
   }
 
   // Contract-based actions answer 202 + Location while running, 204 when done.
-  // Used by check_confirm (the checker's step), not by apply.
-  async confirmShipment(id: string) {
-    const r = await this.call('POST', '/Shipment/ConfirmShipment', { entity: { id } });
+  // Used by check_confirm (ConfirmShipment) and invoicing (PrepareInvoice), not by apply.
+  async shipmentAction(action: string, id: string) {
+    const r = await this.call('POST', `/Shipment/${action}`, { entity: { id } });
     if (r.status === 204 || r.status === 200) return;
-    if (r.status !== 202 || !r.location) throw new Error(`Confirm Shipment refused: ${r.status} ${acuError(r.data)}`);
+    if (r.status !== 202 || !r.location) throw new Error(`${action} refused: ${r.status} ${acuError(r.data)}`);
     const loc = r.location.startsWith('http') ? r.location : `${this.t.base}${r.location}`;
     for (let i = 0; i < 60; i++) {
       await new Promise(res => setTimeout(res, 1000));
       const p = await this.call('GET', loc);
       if (p.status === 204 || p.status === 200) return;
-      if (p.status !== 202) throw new Error(`Confirm Shipment failed: ${p.status} ${acuError(p.data)}`);
+      if (p.status !== 202) throw new Error(`${action} failed: ${p.status} ${acuError(p.data)}`);
     }
-    throw new Error('Confirm Shipment still running after 60s');
+    throw new Error(`${action} still running after 60s`);
   }
+  confirmShipment(id: string) { return this.shipmentAction('ConfirmShipment', id); }
 }
 
 // ------------------------------------------------------------------
@@ -447,6 +453,80 @@ async function checkConfirm(load: any, acu: Acu) {
 }
 
 // ------------------------------------------------------------------
+// invoicing: Prepare Invoice on Confirmed shipments (the supervisor's bulk screen)
+// ------------------------------------------------------------------
+// Per shipment: already invoiced -> done; not Confirmed -> refused; otherwise run
+// Prepare Invoice and read the status back. Releasing the invoice is Accounts' job.
+async function invoiceShipments(env: string, rows: any[], acu: Acu) {
+  const mirror = env === 'test' ? 'shipments_test' : 'shipments';
+  for (const row of rows) {
+    const nbr = row.shipment_nbr as string;
+    let state: 'done' | 'refused' | 'failed' = 'failed';
+    let detail = '';
+    let status: string | null = null;
+    try {
+      await acu.lease();
+      const sh = await acu.getShipment(nbr, false);
+      status = sh.status;
+      if (status === 'Invoiced' || status === 'Completed') { state = 'done'; detail = 'Already invoiced'; }
+      else if (status !== 'Confirmed') { state = 'refused'; detail = `Status is ${status} in Acumatica, not Confirmed`; }
+      else {
+        await acu.shipmentAction('PrepareInvoice', sh.id);
+        const after = await acu.getShipment(nbr, false);
+        status = after.status;
+        if (status === 'Confirmed') throw new Error('Prepare Invoice ran, but the shipment is still Confirmed');
+        state = 'done';
+      }
+    } catch (e: any) {
+      state = 'failed'; detail = String(e?.message ?? e).slice(0, 400);
+    }
+    const now = new Date().toISOString();
+    await admin.from('shipment_invoicing')
+      .update({ state, detail: detail || null, finished_at: now, updated_at: now }).eq('env', env).eq('shipment_nbr', nbr);
+    if (status) await admin.from(mirror).update({ status }).eq('shipment_nbr', nbr);
+  }
+}
+
+// Take up to 20 queued shipments (oldest first) and mark them running.
+async function claimInvoices(env: string): Promise<any[]> {
+  const { data: q, error } = await admin.from('shipment_invoicing').select('shipment_nbr')
+    .eq('env', env).eq('state', 'queued').order('requested_at').limit(20);
+  if (error) throw error;
+  if (!q?.length) return [];
+  const { data, error: e2 } = await admin.from('shipment_invoicing')
+    .update({ state: 'running', updated_at: new Date().toISOString() })
+    .eq('env', env).eq('state', 'queued').in('shipment_nbr', q.map(r => r.shipment_nbr)).select('shipment_nbr');
+  if (e2) throw e2;
+  return data ?? [];
+}
+
+// Mark Confirmed shipments for the drain. Anything else, or already queued, is skipped.
+async function requestInvoices(env: string, nbrs: string[], actorName: string) {
+  if (env === 'live' && !LIVE_INVOICE_ON)
+    return { ok: false, error: 'Invoicing live shipments isn\'t switched on yet (after a TEST run).' };
+  targetFor(env);
+  const mirror = env === 'test' ? 'shipments_test' : 'shipments';
+  const want = [...new Set(nbrs.filter(n => typeof n === 'string' && n))];
+  if (!want.length) return { ok: false, error: 'Pick at least one shipment' };
+  const { data: ok, error } = await admin.from(mirror).select('shipment_nbr').in('shipment_nbr', want).eq('status', 'Confirmed');
+  if (error) throw error;
+  const confirmed = (ok ?? []).map(r => r.shipment_nbr as string);
+  const { data: busy } = await admin.from('shipment_invoicing').select('shipment_nbr')
+    .eq('env', env).in('shipment_nbr', confirmed).in('state', ['queued', 'running']);
+  const busySet = new Set((busy ?? []).map(r => r.shipment_nbr));
+  const go = confirmed.filter(n => !busySet.has(n));
+  if (go.length) {
+    const now = new Date().toISOString();
+    const { error: e2 } = await admin.from('shipment_invoicing').upsert(
+      go.map(n => ({ env, shipment_nbr: n, state: 'queued', detail: null, requested_by: actorName, requested_at: now, finished_at: null, updated_at: now })),
+      { onConflict: 'env,shipment_nbr' });
+    if (e2) throw e2;
+    EdgeRuntime.waitUntil(drain(env).catch(e => console.error('dispatch-acu drain', env, e)));
+  }
+  return { ok: true, queued: go.length, skipped: want.length - go.length };
+}
+
+// ------------------------------------------------------------------
 // Queue: apply / check_confirm requests, worked through by drain()
 // ------------------------------------------------------------------
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void };
@@ -487,10 +567,12 @@ function queued(env: string) {
       .not('write_requested_at', 'is', null).order('write_requested_at').limit(1),
     admin.from('loads').select('id, confirm_requested_at').eq('env', env).in('status', ['done', 'partial'])
       .in('check_status', ['checking', 'partial']).not('confirm_requested_at', 'is', null).order('confirm_requested_at').limit(1),
-  ]).then(([w, c]) => {
+    admin.from('shipment_invoicing').select('shipment_nbr').eq('env', env).eq('state', 'queued').limit(1),
+  ]).then(([w, c, i]) => {
     if (w.error) throw w.error;
     if (c.error) throw c.error;
-    return { w: w.data?.[0] ?? null, c: c.data?.[0] ?? null };
+    if (i.error) throw i.error;
+    return { w: w.data?.[0] ?? null, c: c.data?.[0] ?? null, i: i.data?.[0] ?? null };
   });
 }
 
@@ -525,11 +607,15 @@ async function recoverOrphans(env: string) {
   const cutoff = new Date(Date.now() - 2 * 60e3).toISOString();
   await admin.from('loads').update({ status: 'partial' }).eq('env', env).eq('status', 'writing').lt('updated_at', cutoff);
   await admin.from('loads').update({ check_status: 'partial' }).eq('env', env).eq('check_status', 'confirming').lt('updated_at', cutoff);
+  // Invoicing re-reads the shipment first, so putting a cut-off one back in the queue is safe.
+  await admin.from('shipment_invoicing').update({ state: 'queued' }).eq('env', env).eq('state', 'running').lt('updated_at', cutoff);
 }
 
 // Acumatica wouldn't let us in: tell every waiting load, rather than retrying
 // the sign-in every minute while the pages say "queued".
 async function failQueue(env: string, msg: string) {
+  await admin.from('shipment_invoicing').update({ state: 'failed', detail: msg.slice(0, 400), finished_at: new Date().toISOString() })
+    .eq('env', env).eq('state', 'queued');
   for (;;) {
     const { w, c } = await queued(env);
     if (!w && !c) return;
@@ -549,8 +635,8 @@ async function drain(env: string) {
   const started = Date.now();
   const t = targetFor(env);
   for (;;) {
-    const { w, c } = await queued(env);
-    if (!w && !c) return;
+    const { w, c, i } = await queued(env);
+    if (!w && !c && !i) return;
     const acu = new Acu(t, `queue ${env}`);
     // Busy: the run holding it re-reads the queue after letting go, and the
     // cron drain comes round within a minute either way.
@@ -562,7 +648,13 @@ async function drain(env: string) {
       for (;;) {
         if (Date.now() - started > DRAIN_BUDGET_MS) return;
         const job = await claimNext(env);
-        if (!job) break;
+        if (!job) {
+          // Loads first; invoices once none are waiting.
+          const inv = await claimInvoices(env);
+          if (!inv.length) break;
+          await invoiceShipments(env, inv, acu);
+          continue;
+        }
         if (job.kind === 'apply') await applyLoad(job.load, acu);
         else await checkConfirm(job.load, acu);
       }
@@ -819,6 +911,12 @@ Deno.serve(async (req) => {
         const id = Number(p.load_id);
         if (!id) return json({ ok: false, error: 'load_id is required' }, 400);
         return json(await requestJob('check', id, actorName));
+      }
+      case 'invoice_request': {
+        if (!roles.includes('supervisor')) return json({ ok: false, error: 'Only a supervisor can invoice shipments' }, 403);
+        const env = p.env === 'live' ? 'live' : 'test';
+        if (!Array.isArray(p.shipments) || p.shipments.length > 300) return json({ ok: false, error: 'shipments (up to 300) is required' }, 400);
+        return json(await requestInvoices(env, p.shipments, actorName));
       }
       case 'apply': {
         if (!roles.includes('clerk')) return json({ ok: false, error: 'Only the clerk can write loads to Acumatica' }, 403);
