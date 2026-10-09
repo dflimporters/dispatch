@@ -10,14 +10,24 @@
 //   sync_live_lines        -> read-only: production's Open/On Hold shipments' line items into
 //                             shipment_lines (env 'live') + shipments.shipment_value. Run by
 //                             cron with the Vault token (dispatch_cron_ok), or by any dispatch role.
-//   check_confirm { load_id } -> checker only. For each shipment on a checked load: lower or
-//                             delete the lines the checker reduced (check_lines), set Control Qty
-//                             to the new shipped qty, Confirm Shipment, read it back. Live loads
-//                             also need DISPATCH_LIVE_CHECKER = 'on' (switched on after a pilot).
-//   apply { load_id }      -> clerk only. For each shipment on a confirmed (or partial) load:
-//                             set ShipVia + load number UDF, take it off hold, read it back.
+//   check_confirm { load_id } -> checker only. Queues the load; the drain then, for each
+//                             shipment on it: lowers or deletes the lines the checker reduced
+//                             (check_lines), sets Control Qty to the new shipped qty, Confirm
+//                             Shipment, reads it back. Live loads also need
+//                             DISPATCH_LIVE_CHECKER = 'on' (switched on after a pilot).
+//   apply { load_id }      -> clerk only. Queues the load; the drain then, for each shipment on
+//                             it: sets ShipVia + load number UDF, takes it off hold, reads it back.
 //                             It does NOT confirm: the shipment stays Open for picking, and the
 //                             checker's step confirms it once the pick has been checked.
+//   drain                  -> cron (Vault token) every minute: work through anything queued.
+//
+// Queue: apply and check_confirm only mark the load (write_requested_at /
+// confirm_requested_at) and answer at once, so the pages never wait on
+// Acumatica. The work runs in the background (EdgeRuntime.waitUntil): one
+// drain per target holds the lease and takes queued loads oldest first in one
+// Acumatica session, writing each shipment's result as it goes; the pages poll
+// that for progress. A request that finds another drain running leaves it to
+// that one, which re-reads the queue after letting go of the lease.
 //
 // Guards per shipment (anything else is "refused" and left untouched):
 //   - status is On Hold or Open
@@ -85,6 +95,7 @@ const TARGETS: Record<string, Target> = {
 };
 const TEST_TARGET = Deno.env.get('DISPATCH_TEST_TARGET') ?? 'test';
 const LIVE_ON = TARGETS.live.check() === null;
+const LIVE_CHECKER_ON = Deno.env.get('DISPATCH_LIVE_CHECKER') === 'on';
 
 function targetFor(env: string): Target {
   const t = env === 'live' ? TARGETS.live : TARGETS[TEST_TARGET];
@@ -164,6 +175,14 @@ class Acu {
     }
   }
 
+  // One try, no waiting: true if this run now holds the target.
+  async tryLease() {
+    const { data, error } = await admin.rpc('acu_lease_take', { p_target: this.t.key, p_holder: this.holder, p_job: this.job });
+    if (error) throw new Error(`lease: ${error.message}`);
+    if (data) this.leased = true;
+    return !!data;
+  }
+
   async login() {
     await this.lease();
     await this.pace();
@@ -231,28 +250,19 @@ class Acu {
 }
 
 // ------------------------------------------------------------------
-// apply: write one load
+// apply: write one load (claimed by the drain, in its signed-in session)
 // ------------------------------------------------------------------
-async function applyLoad(loadId: number, actorName: string) {
-  // Claim it, so two clicks can't write the same load twice.
-  const { data: claimed, error: claimErr } = await admin.from('loads')
-    .update({ status: 'writing' }).eq('id', loadId).in('status', ['confirmed', 'partial']).select();
-  if (claimErr) throw claimErr;
-  const load = claimed?.[0];
-  if (!load) return { ok: false, error: 'That load isn\'t waiting to be written (already written, or being written now).' };
-
+async function applyLoad(load: any, acu: Acu) {
+  const loadId = load.id as number;
+  const actorName = load.write_requested_by ?? 'unknown';
   const results: any[] = [];
   let fatal: string | null = null;
   let udfOk = true;
-  let acu: Acu | null = null;
   try {
-    acu = new Acu(targetFor(load.env), `apply ${load.load_nbr}`);
-
     const { data: rows, error } = await admin.from('load_shipments')
       .select('*').eq('load_id', loadId).or('result.is.null,result.neq.applied').order('shipment_nbr');
     if (error) throw error;
 
-    await acu.login();
     const target = load.ship_via as string;
     const mirror = load.env === 'test' ? 'shipments_test' : 'shipments';
 
@@ -306,7 +316,6 @@ async function applyLoad(loadId: number, actorName: string) {
     fatal = String(e?.message ?? e);
     console.error('dispatch-acu apply', loadId, e);
   } finally {
-    if (acu) await acu.logout();
     const { data: all } = await admin.from('load_shipments').select('result').eq('load_id', loadId);
     const done = !!all?.length && all.every(r => r.result === 'applied');
     const nothingWritten = !all?.some(r => r.result);
@@ -335,20 +344,14 @@ async function applyLoad(loadId: number, actorName: string) {
 //     shipment); other lowered lines get the new Shipped Qty. A shipment with
 //     nothing left is refused: cancel it in Acumatica.
 //   - Control Qty = the new shipped total (Acumatica requires it), then Confirm.
-async function checkConfirm(loadId: number, actorName: string) {
-  const { data: claimed, error: claimErr } = await admin.from('loads')
-    .update({ check_status: 'confirming' }).eq('id', loadId).in('check_status', ['checking', 'partial']).in('status', ['done', 'partial']).select();
-  if (claimErr) throw claimErr;
-  const load = claimed?.[0];
-  if (!load) return { ok: false, error: 'That load isn\'t waiting to be confirmed (not checked yet, or already confirming).' };
-
+async function checkConfirm(load: any, acu: Acu) {
+  const loadId = load.id as number;
+  const actorName = load.confirm_requested_by ?? 'unknown';
   const results: any[] = [];
   let fatal: string | null = null;
-  let acu: Acu | null = null;
   try {
-    if (load.env === 'live' && Deno.env.get('DISPATCH_LIVE_CHECKER') !== 'on')
+    if (load.env === 'live' && !LIVE_CHECKER_ON)
       throw new Error('The checker can\'t confirm live shipments yet (switched on after the pilot load).');
-    acu = new Acu(targetFor(load.env), `check_confirm ${load.load_nbr}`);
 
     const [{ data: ships, error: e1 }, { data: checks, error: e2 }] = await Promise.all([
       admin.from('load_shipments').select('*').eq('load_id', loadId).or('check_result.is.null,check_result.neq.applied').order('shipment_nbr'),
@@ -356,7 +359,6 @@ async function checkConfirm(loadId: number, actorName: string) {
     ]);
     if (e1) throw e1;
     if (e2) throw e2;
-    await acu.login();
     const mirror = load.env === 'test' ? 'shipments_test' : 'shipments';
 
     for (const row of ships ?? []) {
@@ -429,7 +431,6 @@ async function checkConfirm(loadId: number, actorName: string) {
     fatal = String(e?.message ?? e);
     console.error('dispatch-acu check_confirm', loadId, e);
   } finally {
-    if (acu) await acu.logout();
     const { data: all } = await admin.from('load_shipments').select('check_result').eq('load_id', loadId);
     const done = !!all?.length && all.every(r => r.check_result === 'applied');
     const nothing = !all?.some(r => r.check_result);
@@ -443,6 +444,132 @@ async function checkConfirm(loadId: number, actorName: string) {
     });
   }
   return { ok: !fatal, error: fatal, results };
+}
+
+// ------------------------------------------------------------------
+// Queue: apply / check_confirm requests, worked through by drain()
+// ------------------------------------------------------------------
+declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void };
+// Stop taking new loads after this; the cron drain carries on. Background
+// work gets 400s wall clock on Pro, and one load can take a minute or two.
+const DRAIN_BUDGET_MS = 240_000;
+
+const NOT_WAITING = {
+  apply: 'That load isn\'t waiting to be written (already written, or being written now).',
+  check: 'That load isn\'t waiting to be confirmed (not checked yet, or already confirming).',
+};
+
+// Mark a load for the drain. Refusals the drain would hit anyway (live
+// switched off, wrong state) come back now, so the page can say so.
+async function requestJob(kind: 'apply' | 'check', loadId: number, actorName: string) {
+  const { data: load, error } = await admin.from('loads').select('id, env').eq('id', loadId).maybeSingle();
+  if (error) throw error;
+  if (!load) return { ok: false, error: 'Load not found' };
+  targetFor(load.env);
+  if (kind === 'check' && load.env === 'live' && !LIVE_CHECKER_ON)
+    return { ok: false, error: 'The checker can\'t confirm live shipments yet (switched on after the pilot load).' };
+  const now = new Date().toISOString();
+  const q = kind === 'apply'
+    ? admin.from('loads').update({ write_requested_at: now, write_requested_by: actorName })
+        .eq('id', loadId).in('status', ['confirmed', 'partial'])
+    : admin.from('loads').update({ confirm_requested_at: now, confirm_requested_by: actorName })
+        .eq('id', loadId).in('status', ['done', 'partial']).in('check_status', ['checking', 'partial']);
+  const { data: marked, error: e2 } = await q.select('id');
+  if (e2) throw e2;
+  if (!marked?.length) return { ok: false, error: NOT_WAITING[kind] };
+  EdgeRuntime.waitUntil(drain(load.env).catch(e => console.error('dispatch-acu drain', load.env, e)));
+  return { ok: true, queued: true };
+}
+
+function queued(env: string) {
+  return Promise.all([
+    admin.from('loads').select('id, write_requested_at').eq('env', env).in('status', ['confirmed', 'partial'])
+      .not('write_requested_at', 'is', null).order('write_requested_at').limit(1),
+    admin.from('loads').select('id, confirm_requested_at').eq('env', env).in('status', ['done', 'partial'])
+      .in('check_status', ['checking', 'partial']).not('confirm_requested_at', 'is', null).order('confirm_requested_at').limit(1),
+  ]).then(([w, c]) => {
+    if (w.error) throw w.error;
+    if (c.error) throw c.error;
+    return { w: w.data?.[0] ?? null, c: c.data?.[0] ?? null };
+  });
+}
+
+// Oldest request first. Claiming clears the request, so it runs once, and
+// clears the results of shipments not yet through, so progress counts up from 0.
+async function claimNext(env: string): Promise<{ kind: 'apply' | 'check'; load: any } | null> {
+  for (let tries = 0; tries < 5; tries++) {
+    const { w, c } = await queued(env);
+    if (!w && !c) return null;
+    const kind = w && (!c || w.write_requested_at <= c.confirm_requested_at) ? 'apply' : 'check';
+    const id = kind === 'apply' ? w!.id : c!.id;
+    const upd = kind === 'apply'
+      ? admin.from('loads').update({ status: 'writing', write_requested_at: null })
+          .eq('id', id).in('status', ['confirmed', 'partial']).not('write_requested_at', 'is', null)
+      : admin.from('loads').update({ check_status: 'confirming', confirm_requested_at: null })
+          .eq('id', id).in('check_status', ['checking', 'partial']).not('confirm_requested_at', 'is', null);
+    const { data: got, error } = await upd.select('*');
+    if (error) throw error;
+    if (!got?.length) continue;   // changed under us (e.g. undone); look again
+    if (kind === 'apply') await admin.from('load_shipments').update({ result: null, result_detail: null })
+      .eq('load_id', id).or('result.is.null,result.neq.applied');
+    else await admin.from('load_shipments').update({ check_result: null, check_detail: null })
+      .eq('load_id', id).or('check_result.is.null,check_result.neq.applied');
+    return { kind, load: got[0] };
+  }
+  return null;
+}
+
+// Only called while holding the target's lease, so no other run is working
+// on this env: anything still marked writing / confirming was cut off.
+async function recoverOrphans(env: string) {
+  const cutoff = new Date(Date.now() - 2 * 60e3).toISOString();
+  await admin.from('loads').update({ status: 'partial' }).eq('env', env).eq('status', 'writing').lt('updated_at', cutoff);
+  await admin.from('loads').update({ check_status: 'partial' }).eq('env', env).eq('check_status', 'confirming').lt('updated_at', cutoff);
+}
+
+// Acumatica wouldn't let us in: tell every waiting load, rather than retrying
+// the sign-in every minute while the pages say "queued".
+async function failQueue(env: string, msg: string) {
+  for (;;) {
+    const { w, c } = await queued(env);
+    if (!w && !c) return;
+    const id = (w ?? c)!.id;
+    const kind = w ? 'writeback' : 'check_confirm';
+    const { data } = await admin.from('loads').update(w ? { write_requested_at: null } : { confirm_requested_at: null })
+      .eq('id', id).select('id, env, load_nbr, ship_via, write_requested_by, confirm_requested_by');
+    const l = data?.[0];
+    if (l) await admin.from('load_events').insert({
+      load_id: l.id, env: l.env, load_nbr: l.load_nbr, kind, ship_via: w ? l.ship_via : null,
+      outcome: 'failed', actor_name: (w ? l.write_requested_by : l.confirm_requested_by) ?? 'unknown', note: msg,
+    });
+  }
+}
+
+async function drain(env: string) {
+  const started = Date.now();
+  const t = targetFor(env);
+  for (;;) {
+    const { w, c } = await queued(env);
+    if (!w && !c) return;
+    const acu = new Acu(t, `queue ${env}`);
+    // Busy: the run holding it re-reads the queue after letting go, and the
+    // cron drain comes round within a minute either way.
+    if (!(await acu.tryLease())) return;
+    try {
+      await recoverOrphans(env);
+      try { await acu.login(); }
+      catch (e: any) { await failQueue(env, String(e?.message ?? e)); return; }
+      for (;;) {
+        if (Date.now() - started > DRAIN_BUDGET_MS) return;
+        const job = await claimNext(env);
+        if (!job) break;
+        if (job.kind === 'apply') await applyLoad(job.load, acu);
+        else await checkConfirm(job.load, acu);
+      }
+    } finally {
+      await acu.logout();
+    }
+  }
 }
 
 // ------------------------------------------------------------------
@@ -654,10 +781,18 @@ Deno.serve(async (req) => {
   let p: any = {};
   try { p = await req.json(); } catch { /* empty */ }
 
-  // Scheduled sync: the Vault cron token, for the read-only live line sync only.
-  if (p.action === 'sync_live_lines' && token && !token.includes('.')) {
+  // Scheduled jobs with the Vault cron token: the read-only live line sync,
+  // and the queue's safety-net drain.
+  if (['sync_live_lines', 'drain'].includes(p.action) && token && !token.includes('.')) {
     const { data: ok } = await admin.rpc('dispatch_cron_ok', { p_token: token });
     if (!ok) return json({ ok: false, error: 'bad cron token' }, 401);
+    if (p.action === 'drain') {
+      for (const env of ['test', 'live']) {
+        try { targetFor(env); } catch { continue; }   // live writeback off: nothing can be queued there
+        EdgeRuntime.waitUntil(drain(env).catch(e => console.error('dispatch-acu drain (cron)', env, e)));
+      }
+      return json({ ok: true });
+    }
     try { return json({ ok: true, ...(await syncLiveLines()) }); }
     catch (e: any) { console.error('dispatch-acu sync_live_lines (cron)', e); return json({ ok: false, error: String(e?.message ?? e) }, 500); }
   }
@@ -683,13 +818,13 @@ Deno.serve(async (req) => {
         if (!roles.includes('checker')) return json({ ok: false, error: 'Only the checker can confirm loads' }, 403);
         const id = Number(p.load_id);
         if (!id) return json({ ok: false, error: 'load_id is required' }, 400);
-        return json(await checkConfirm(id, actorName));
+        return json(await requestJob('check', id, actorName));
       }
       case 'apply': {
         if (!roles.includes('clerk')) return json({ ok: false, error: 'Only the clerk can write loads to Acumatica' }, 403);
         const id = Number(p.load_id);
         if (!id) return json({ ok: false, error: 'load_id is required' }, 400);
-        return json(await applyLoad(id, actorName));
+        return json(await requestJob('apply', id, actorName));
       }
       default:
         return json({ ok: false, error: `unknown action ${p.action}` }, 400);

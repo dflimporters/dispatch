@@ -64,7 +64,7 @@
 <script>
   const C = {
     date: jmDate(0), loads: [], dates: [], sync: null, busy: false,
-    writing: new Set(), drafts: new Map(), returning: new Set(),
+    drafts: new Map(), returning: new Set(), was: new Map(), poll: null,
     open: new Set(), seen: new Set(), wave: loadWaveFilter('clerk'),
   };
 
@@ -76,6 +76,13 @@
     loads.forEach(l => {
       if (!C.seen.has(l.id) && l.status === 'partial') C.open.add(l.id);
       C.seen.add(l.id);
+      const was = C.was.get(l.id), busy = l.status === 'writing' || writeQueued(l);
+      if (was && !busy) {
+        const bad = l.ships.filter(s => ['refused', 'failed'].includes(s.result)).length;
+        if (l.status === 'done') toast(`${l.load_nbr} written to Acumatica`);
+        else { toast(`${l.load_nbr}: ${bad ? plural(bad, 'shipment') + " didn't go through" : 'not written'}`, true); C.open.add(l.id); }
+      }
+      if (busy) C.was.set(l.id, true); else C.was.delete(l.id);
     });
   }
 
@@ -152,7 +159,7 @@
     const bad = l.ships.filter(s => ['refused', 'failed'].includes(s.result)).length;
     return `<div class="lsum" data-toggle>
       <div class="row1">${ICON.chev}<span class="lnbr">${esc(l.load_nbr)}</span>${waveTag(l.wave)}<b style="font-size:13px">${esc(l.truck_type || 'No truck')}</b>
-        <span class="zones" title="${esc(l.zones.join(', '))}">${esc(l.zones.join(', '))}</span>${statusPill(l.status)}</div>
+        <span class="zones" title="${esc(l.zones.join(', '))}">${esc(l.zones.join(', '))}</span>${writeQueued(l) ? '<span class="pill warn">Queued for Acumatica</span>' : statusPill(l.status)}</div>
       <div class="row2"><span>${plural(l.count, 'ship')} · ${l.drops} drop${l.drops === 1 ? '' : 's'}</span>${capBar(l)}<b>${money(l.value)}</b>${who}${bad ? `<span class="pill bad">${bad} not written</span>` : ''}</div>
     </div>`;
   }
@@ -203,12 +210,14 @@
   }
 
   function writtenBody(l) {
-    const writing = l.status === 'writing' || C.writing.has(l.id);
-    const stuck = l.status === 'writing' && !C.writing.has(l.id) && Date.now() - new Date(l.updated_at).getTime() > 5 * 60e3;
+    const queued = writeQueued(l), writing = l.status === 'writing' || queued;
+    const stuck = l.status === 'writing' && Date.now() - new Date(l.updated_at).getTime() > 5 * 60e3;
+    const through = l.ships.filter(s => s.result).length;
     const bad = l.ships.filter(s => ['refused', 'failed'].includes(s.result));
     const refused = bad.filter(s => s.result === 'refused').length;
     return `<div class="lstats"><span>confirmed ${esc(stamp(l.confirmed_at))}</span>${l.notes ? `<span>${esc(l.notes)}</span>` : ''}</div>
-      ${writing ? `<div class="warnbox info">Writing to Acumatica${D.env === 'test' ? ' TEST' : ''}… this takes a few seconds per shipment.</div>` : ''}
+      ${queued ? progressBox('Queued for Acumatica' + (D.env === 'test' ? ' TEST' : ''), 0, l.count, 'Starts as soon as the load ahead of it is done. You can carry on with other loads.') : ''}
+      ${l.status === 'writing' ? progressBox('Writing to Acumatica' + (D.env === 'test' ? ' TEST' : ''), through, l.count, 'A few seconds per shipment. You can carry on with other loads.') : ''}
       ${l.status === 'partial' && !writing ? `<div class="warnbox bad">${plural(bad.length, 'shipment')} didn't go through.${refused ? ` Refused ones changed in Acumatica since the load was built; the coordinator has to move them.` : ''} Failed ones can be retried.</div>` : ''}
       ${shipsTable(l, true)}
       <div class="lactions">
@@ -233,19 +242,19 @@
     if (el) el.textContent = msg || '';
   }
 
+  // Queues the load; dispatch-acu writes it in the background and the card
+  // shows progress from load_shipments.result (see poll()).
   async function apply(id) {
-    C.writing.add(id); C.open.add(id); render();
-    try {
-      const r = await callAcu('apply', { load_id: id });
-      if (!r.ok && r.error && !r.results) throw new Error(r.error);
-      const n = k => (r.results || []).filter(x => x.result === k).length;
-      if (r.error) toast(r.error, true);
-      else if (n('refused') || n('failed')) toast(`${n('applied')} applied, ${n('refused')} refused, ${n('failed')} failed`, true);
-      else { toast(`All ${n('applied')} shipments written (Ship Via + load number)`); C.open.delete(id); }
-      if (r.udf === false) toast('Load number field (UDF) not found in Acumatica; Ship Via was still set.', true);
-    } finally {
-      C.writing.delete(id);
-    }
+    const r = await callAcu('apply', { load_id: id });
+    if (!r.ok) throw new Error(r.error || "Couldn't queue the load");
+    C.was.set(id, true);
+  }
+
+  // While anything is queued or writing, refresh every few seconds.
+  function poll() {
+    const active = C.loads.some(l => l.status === 'writing' || writeQueued(l));
+    if (!active || C.poll) return;
+    C.poll = setTimeout(async () => { C.poll = null; if (!C.busy && !editing()) await refresh(); else poll(); }, 3000);
   }
 
   async function act(id, fn) {
@@ -329,7 +338,6 @@
       act(id, async () => {
         await rpc('dispatch_confirm_load', { p_id: id, p_ship_via: sv, p_contractor: d.contractor, p_notes: d.notes.trim() || l.notes || '' });
         C.drafts.delete(id);
-        await loadAll();   // so the card shows as confirmed while it writes
         await apply(id);
       });
       return;
@@ -345,7 +353,7 @@
   }
 
   async function refresh() {
-    try { await loadAll(); render(); }
+    try { await loadAll(); render(); poll(); }
     catch (e) {
       console.error('[clerk]', e);
       document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`;

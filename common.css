@@ -173,3 +173,13 @@ table.items td { padding:4px 6px; border-top:1px solid #f1f5f9; }
 table.items td.r, table.items th.r { text-align:right; }
 table.items tr.short td { background:var(--bad-bg); }
 @media (max-width:640px) { tr.lines-row > td { padding-left:8px; } table.items .hide-m { display:none; } }
+
+/* Progress while dispatch-acu works through a load in the background */
+.prog { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:10px 12px; margin:8px 0; }
+.prog-top { display:flex; justify-content:space-between; gap:8px; font-size:13.5px; margin-bottom:6px; }
+.prog-top span { color:var(--text-muted); font-variant-numeric:tabular-nums; }
+.prog-bar { height:8px; border-radius:999px; background:#e2e8f0; overflow:hidden; position:relative; }
+.prog-bar i { display:block; height:100%; background:var(--navy); border-radius:999px; transition:width .4s ease; min-width:8px; }
+.prog-bar.wait i { width:30% !important; animation:prog-wait 1.4s ease-in-out infinite; position:absolute; }
+@keyframes prog-wait { from { left:-30%; } to { left:100%; } }
+.prog-note { font-size:12.5px; color:var(--text-muted); margin-top:6px; }

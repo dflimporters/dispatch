@@ -460,6 +460,17 @@ function statusPill(s) {
     partial:   '<span class="pill bad">Partly written</span>',
   }[s] || esc(s);
 }
+// A load waiting in the Acumatica queue (dispatch-acu drains it in the background).
+function writeQueued(l) { return ['confirmed', 'partial'].includes(l.status) && !!l.write_requested_at; }
+function confirmQueued(l) { return ['checking', 'partial'].includes(l.check_status) && !!l.confirm_requested_at; }
+
+// "Writing 3 of 6" with a bar. done = shipments through so far.
+function progressBox(label, done, total, note) {
+  const pct = total ? Math.round(100 * done / total) : 0;
+  return `<div class="prog"><div class="prog-top"><b>${esc(label)}</b><span>${done} of ${total}</span></div>
+    <div class="prog-bar ${done ? '' : 'wait'}"><i style="width:${pct}%"></i></div>${note ? `<div class="prog-note">${esc(note)}</div>` : ''}</div>`;
+}
+
 function resultPill(s) {
   if (!s.result) return '';
   return { applied: '<span class="pill ok">Applied</span>', refused: '<span class="pill warn">Refused</span>', failed: '<span class="pill bad">Failed</span>' }[s.result];

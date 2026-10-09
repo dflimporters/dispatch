@@ -27,12 +27,13 @@ picks the trucker but can't change what's on a load (it can send a load back wit
 
 1. **Batcher** builds loads (`draft`) and sends them to the clerk (`ready`).
 2. **Clerk** calls truckers, logs the calls, and locks one in (`confirmed`).
-3. That immediately runs the **`dispatch-acu`** edge function (`writing`). For each shipment it:
+3. That queues the load for the **`dispatch-acu`** edge function and returns at once, so the liaison
+   can lock in the next load straight away (see **Acumatica write queue**). For each shipment it:
    - checks it's still On Hold/Open with the ShipVia it had at confirmation,
    - sets **ShipVia** and the **load number** (UDF, default `LOADNBR`), takes it off hold,
    - reads it back (it should now be **Open**),
    - and stops. It does **not** confirm. The shipment stays Open for picking, and the
-     checker step (being built) confirms it once the pick has been checked.
+     checker step confirms it once the pick has been checked.
 4. The load ends `done`, or `partial` if any shipment was refused (changed in Acumatica) or
    failed. Failed ones can be retried by the clerk; refused ones are moved by the batcher.
 
@@ -46,12 +47,24 @@ BATCHnn placeholders are no longer needed: a shipment still carrying one counts 
 1. A load can be picked once its trucker is locked in (`done`/`partial`). The pick list is
    consolidated per item across the load's shipments (`dispatch_pick_list`), split by area
    (`pick_area_of`: per-item list, else a placeholder by item class).
-2. Pickers record what they picked (`pick_lines`) and mark each area done (`pick_area_status`).
-3. The checker sets what goes out on each shipment line (`check_lines`; only lowering is allowed).
+2. Pickers record what they picked (`pick_lines`, never more than the load needs) and mark each
+   area done (`pick_area_status`).
+3. The checker sees each item with its customers beneath and sets what goes out on each
+   shipment line (`check_lines`; only lowering is allowed).
    The default splits a short pick over the shipments in order, shortfall on the last ones.
-4. **Confirm in Acumatica** runs `dispatch-acu` `check_confirm`: lowers or deletes lines, sets
+4. **Confirm in Acumatica** queues `dispatch-acu` `check_confirm` (a progress bar shows it
+   working; the checker can leave the screen): lowers or deletes lines, sets
    Control Qty, Confirm Shipment, reads it back. `loads.check_status` ends `confirmed` or `partial`.
    Live loads need `DISPATCH_LIVE_CHECKER=on` as well as `DISPATCH_LIVE_WRITEBACK=on`.
+
+## Acumatica write queue
+
+`apply` and `check_confirm` only mark the load (`loads.write_requested_at` /
+`confirm_requested_at`) and start a background drain. One drain per Acumatica target holds the
+lease and works through the queue oldest first in one Acumatica session, writing each
+shipment's result as it goes; the pages poll that for their progress bars. Cron job
+`dispatch-acu-drain-1min` drains anything left over (and does nothing when the queue is empty).
+A load cut off mid-write is set to `partial` by the next drain so it can be retried.
 
 ## Transfers
 

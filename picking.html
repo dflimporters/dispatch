@@ -154,7 +154,7 @@
       <div class="need">${fmt(x.required)}<small>to pick</small></div>
       <div class="acts">
         <button class="btn ${got && !short ? 'primary' : ''}" data-all ${dis}>All ${fmt(x.required)}</button>
-        <input type="number" inputmode="numeric" min="0" step="1" data-qty value="${got ? Number(x.picked_qty) : ''}" placeholder="Qty" aria-label="Picked quantity for ${esc(x.inventory_id)}" ${dis}>
+        <input type="number" inputmode="numeric" min="0" max="${Number(x.required)}" step="1" data-qty value="${got ? Number(x.picked_qty) : ''}" placeholder="Qty" aria-label="Picked quantity for ${esc(x.inventory_id)}" ${dis}>
         <button class="btn small" data-save ${dis}>Save</button>
         ${got ? `<button class="btn small link" data-clear ${dis}>Clear</button>` : ''}
         <span class="got">${got ? `${short ? `<b style="color:var(--warn-text)">Short ${fmt(Number(x.required) - Number(x.picked_qty))}</b> · ` : ''}${esc(x.picker_name || '')} ${esc(stamp(x.picked_at))}` : ''}</span>
@@ -198,6 +198,16 @@
     const row = e.target.closest('.item[data-item]');
     saveQty(row, (P.lists.get(P.open) || []).find(x => x.inventory_id === row.dataset.item));
   });
+  // The box can't go above what the load needs: anything higher snaps back.
+  document.getElementById('app').addEventListener('input', e => {
+    const t = e.target;
+    if (!t.dataset || t.dataset.qty === undefined) return;
+    const max = Number(t.max);
+    if (t.value !== '' && Number(t.value) > max) {
+      t.value = max;
+      toast(`Only ${fmt(max)} needed. You can't pick more than that.`, true);
+    }
+  });
   document.getElementById('app').addEventListener('change', e => {
     if (e.target.id === 'datePick' && e.target.value) { P.date = e.target.value; P.open = null; refresh(); }
   });
@@ -206,7 +216,7 @@
     if (v === '') { toast('Enter the quantity picked, or tap All', true); return; }
     const n = Math.round(Number(v));
     if (!(n >= 0)) { toast('That isn\'t a quantity', true); return; }
-    if (n > Number(line.required)) { toast(`Only ${fmt(line.required)} needed; picking extra isn't allowed (that's a new order)`, true); return; }
+    if (n > Number(line.required)) { toast(`Only ${fmt(line.required)} needed. You can't pick more than that.`, true); return; }
     act(() => rpc('dispatch_pick_set', { p_load_id: P.open, p_inventory_id: line.inventory_id, p_picked: n }));
   }
 
