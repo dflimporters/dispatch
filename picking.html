@@ -8,7 +8,7 @@
 <title>Picking — DFL Dispatch</title>
 <!--
   Picking, by load (consolidated: one line per item across the load's
-  shipments), split by area 1-4. Built for phones and tablets first: one
+  shipments), split by area 1-7. Built for phones and tablets first: one
   tablet per area today, maybe a phone per picker later.
 
   A load appears once its trucker is locked in (status done/partial) and stays
@@ -58,7 +58,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="common.js"></script>
 <script>
-  const AREAS = [[1, 'Area 1'], [2, 'Area 2'], [3, 'Area 3'], [4, 'Area 4'], [0, 'Unassigned']];
+  const AREAS = [[1, 'Area 1'], [2, 'Area 2'], [3, 'Area 3'], [4, 'Area 4'], [5, 'Area 5'], [6, 'Area 6'], [7, 'Area 7'], [0, 'Unassigned']];
   const P = { date: jmDate(0), loads: [], lists: new Map(), done: [], open: null, busy: false, area: 'all' };
   try { const a = localStorage.getItem('dispatch-pick-area'); if (a) P.area = a; } catch (e) {}
   function areaName(a) { return (AREAS.find(x => x[0] === Number(a)) || [0, 'Unassigned'])[1]; }
