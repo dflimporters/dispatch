@@ -32,6 +32,25 @@
   input[type=checkbox] { width:16px; height:16px; cursor:pointer; }
   .sumbar { position:sticky; bottom:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; background:var(--navy); color:#fff; border-radius:12px; padding:12px 14px; margin-top:12px; box-shadow:0 6px 20px rgba(15,32,68,.25); font-size:13px; }
   .sumbar .btn { border-color:#fff; }
+  .sumbar .hid { color:#fcd34d; }
+  .filt { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px; margin-bottom:14px; }
+  .filt .frow { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:8px; }
+  .filt .fsearch { margin-bottom:8px; }
+  .filt label { display:block; font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:.3px; margin-bottom:3px; }
+  .filt input, .filt select { width:100%; box-sizing:border-box; }
+  .filt .fmeta { display:flex; align-items:center; gap:10px; margin-top:8px; min-height:26px; }
+  .grp .gh .gsel { color:var(--accent); font-size:12px; font-weight:600; }
+  .grp .gh .gval { margin-left:auto; font-weight:600; color:var(--navy); }
+  table.inv tr.bad td { background:var(--bad-bg); }
+  @media (max-width:900px) { .filt .frow { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+  @media (max-width:640px) {
+    table.inv .hide-m { display:none; }
+    table.inv td, table.inv th { padding:8px 6px; }
+    .filt input, .filt select { font-size:16px; }
+    .grp .gh .gval { margin-left:0; }
+    .sumbar { bottom:0; border-radius:12px 12px 0 0; }
+    .sumbar .btn { padding:9px 14px; }
+  }
 </style>
 </head>
 <body>
@@ -87,9 +106,64 @@
              failed: '<span class="pill bad">Failed</span>' }[r.state] + (r.detail ? ` <span class="muted">${esc(r.detail)}</span>` : '');
   }
 
-  function render() {
+  const F = { q: '', load: '', via: '', cust: '', ship: '', status: '' };
+  const norm = x => String(x == null ? '' : x).toLowerCase();
+  const hasFilter = () => Object.values(F).some(Boolean);
+  const loadKey = s => { const l = V.loadOf.get(s.shipment_nbr); return l ? l.load_nbr : '—'; };
+  const stateKind = n => busyNow(n) ? 'queue' : ['failed', 'refused'].includes(stateOf(n)) ? 'bad' : 'ready';
+
+  // Rows after the date + filter panel are applied. Select-all and the group
+  // boxes work on these only.
+  function visible() {
+    const terms = norm(F.q).split(/\s+/).filter(Boolean);
+    const load = norm(F.load).trim(), cust = norm(F.cust).trim(), ship = norm(F.ship).trim();
+    return V.ships.filter(s => {
+      if (V.date && s.shipment_date !== V.date) return false;
+      const l = V.loadOf.get(s.shipment_nbr) || {};
+      if (F.status && stateKind(s.shipment_nbr) !== F.status) return false;
+      if (F.via && (l.ship_via || '') !== F.via) return false;
+      if (load && !norm(l.load_nbr).includes(load)) return false;
+      if (cust && !(norm(s.customer_name) + ' ' + norm(s.customer_id)).includes(cust)) return false;
+      if (ship && !norm(s.shipment_nbr).includes(ship)) return false;
+      if (terms.length) {
+        const hay = [l.load_nbr, l.ship_via, l.truck_type, s.customer_name, s.customer_id, s.shipment_nbr, s.order_nbr].map(norm).join(' ');
+        if (!terms.every(t => hay.includes(t))) return false;
+      }
+      return true;
+    });
+  }
+
+  function ensureShell() {
     const main = document.getElementById('main');
-    const all = V.ships.filter(s => !V.date || s.shipment_date === V.date);
+    if (main.querySelector('#invTop')) return;
+    main.innerHTML = `<div id="invTop"></div>
+      <div class="filt" id="invFilt">
+        <div class="fsearch"><label for="fq">Search</label><input class="txt" id="fq" type="search" autocomplete="off" placeholder="Load, trucker, customer, shipment or order…"></div>
+        <div class="frow">
+          <div><label for="fload">Load</label><input class="txt" id="fload" data-f="load" type="search" autocomplete="off" placeholder="Load number"></div>
+          <div><label for="fvia">Trucker</label><select id="fvia" data-f="via"></select></div>
+          <div><label for="fcust">Customer</label><input class="txt" id="fcust" data-f="cust" type="search" autocomplete="off" placeholder="Name or ID"></div>
+          <div><label for="fship">Shipment</label><input class="txt" id="fship" data-f="ship" type="search" autocomplete="off" placeholder="Shipment no."></div>
+          <div><label for="fstatus">Status</label><select id="fstatus" data-f="status">
+            <option value="">All</option><option value="ready">Ready</option><option value="queue">In the queue</option><option value="bad">Need attention</option></select></div>
+        </div>
+        <div class="fmeta"><span class="muted" id="fcount"></span><span class="spacer"></span><button class="btn small" data-act="resetf" id="fclear" hidden>Clear filters</button></div>
+      </div>
+      <div id="invProg"></div><div id="invList"></div><div id="invBar"></div>`;
+  }
+
+  function syncFilterBox(shown) {
+    const vias = [...new Set(V.ships.map(s => (V.loadOf.get(s.shipment_nbr) || {}).ship_via).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    if (F.via && !vias.includes(F.via)) F.via = '';
+    document.getElementById('fvia').innerHTML = '<option value="">All truckers</option>' + vias.map(v => `<option value="${esc(v)}" ${F.via === v ? 'selected' : ''}>${esc(v)}</option>`).join('');
+    document.getElementById('fcount').textContent = hasFilter() || V.date
+      ? `Showing ${shown} of ${V.ships.length} shipments` : `${plural(V.ships.length, 'shipment')} on checked loads`;
+    document.getElementById('fclear').hidden = !hasFilter();
+  }
+
+  function render() {
+    ensureShell();
+    const all = visible();
     const groups = new Map();
     all.forEach(s => {
       const l = V.loadOf.get(s.shipment_nbr);
@@ -98,44 +172,59 @@
       groups.get(k).rows.push(s);
     });
     const order = [...groups.entries()].sort(([a], [b]) => (a === '—') - (b === '—') || a.localeCompare(b));
-    const waiting = [...V.inv.values()].filter(r => ['queued', 'running'].includes(r.state)).length;
-    const selVal = V.ships.filter(s => V.sel.has(s.shipment_nbr)).reduce((t, s) => t + val(s), 0);
+    const waiting = V.ships.filter(s => busyNow(s.shipment_nbr)).length;
     const doneToday = V.recent.filter(r => r.state === 'done').length;
     const bad = V.ships.filter(s => ['failed', 'refused'].includes(stateOf(s.shipment_nbr))).length;
+    const ready = V.ships.filter(s => !busyNow(s.shipment_nbr)).length;
     const dates = [...new Set(V.ships.map(s => s.shipment_date).filter(Boolean))];
+    const shownIds = new Set(all.map(s => s.shipment_nbr));
+    const selShips = V.ships.filter(s => V.sel.has(s.shipment_nbr));
+    const selVal = selShips.reduce((t, s) => t + val(s), 0);
+    const hidden = selShips.filter(s => !shownIds.has(s.shipment_nbr)).length;
+    const anyPick = all.some(s => selectable(s.shipment_nbr) && !V.sel.has(s.shipment_nbr));
 
-    main.innerHTML = `
+    document.getElementById('invTop').innerHTML = `
       <div class="controls">
         <select id="datePick" aria-label="Shipment date"><option value="">All dates</option>${dates.map(d => `<option value="${d}" ${V.date === d ? 'selected' : ''}>${esc(niceDate(d))}</option>`).join('')}</select>
         <span class="spacer"></span>
-        <button class="btn small" data-act="selall">${all.some(s => selectable(s.shipment_nbr) && !V.sel.has(s.shipment_nbr)) ? 'Select all' : 'Clear selection'}</button>
+        <button class="btn small" data-act="selall" ${all.some(s => selectable(s.shipment_nbr)) ? '' : 'disabled'}>${anyPick ? (hasFilter() || V.date ? 'Select all shown' : 'Select all') : 'Clear shown'}</button>
       </div>
       <div class="kpis">
-        <div class="kpi"><div class="l">Ready to invoice</div><div class="v">${all.filter(s => !busyNow(s.shipment_nbr)).length}</div><div class="s">confirmed shipments</div></div>
+        <div class="kpi"><div class="l">Ready to invoice</div><div class="v">${ready}</div><div class="s">confirmed shipments</div></div>
         <div class="kpi"><div class="l">In the queue</div><div class="v">${waiting}</div><div class="s">being prepared</div></div>
         <div class="kpi ${bad ? 'warn' : ''}"><div class="l">Need attention</div><div class="v">${bad}</div><div class="s">failed or refused</div></div>
         <div class="kpi"><div class="l">Prepared (24h)</div><div class="v">${doneToday}</div><div class="s">invoices from here</div></div>
-      </div>
-      ${waiting ? progressBox('Preparing invoices in ' + (D.env === 'test' ? 'Acumatica TEST' : 'Acumatica'), 0, waiting, 'Runs in the background, one shipment at a time. You can leave this page.') : ''}
-      ${order.length ? order.map(([k, g]) => group(k, g)).join('') : '<div class="card"><div class="empty">No checked and confirmed loads waiting to be invoiced.</div></div>'}
-      ${V.sel.size ? `<div class="sumbar"><span><b>${V.sel.size}</b> selected · ${money(selVal)}</span><span class="spacer"></span>
+      </div>`;
+    syncFilterBox(all.length);
+    document.getElementById('invProg').innerHTML = waiting
+      ? progressBox('Preparing invoices in ' + (D.env === 'test' ? 'Acumatica TEST' : 'Acumatica'), 0, waiting, 'Runs in the background, one shipment at a time. You can leave this page.') : '';
+
+    let body;
+    if (order.length) body = order.map(([k, g]) => group(k, g)).join('');
+    else if (V.ships.length) body = `<div class="card"><div class="empty">No shipments match the filters.<br><button class="btn small" data-act="resetf" style="margin-top:10px">Clear filters</button></div></div>`;
+    else body = `<div class="card"><div class="empty">${doneToday ? `All caught up — ${plural(doneToday, 'invoice')} prepared in the last 24 hours.` : 'No checked and confirmed loads waiting to be invoiced.'}</div></div>`;
+    document.getElementById('invList').innerHTML = body;
+
+    document.getElementById('invBar').innerHTML = V.sel.size
+      ? `<div class="sumbar"><span><b>${V.sel.size}</b> selected · ${money(selVal)}${hidden ? ` <span class="hid">(${hidden} hidden by filters)</span>` : ''}</span><span class="spacer"></span>
         <button class="btn small" data-act="clear">Clear</button>
-        <button class="btn primary small" data-act="invoice">Prepare ${plural(V.sel.size, 'invoice')}</button></div>` : ''}`;
+        <button class="btn primary small" data-act="invoice">Prepare ${plural(V.sel.size, 'invoice')}</button></div>` : '';
   }
 
   function group(k, g) {
     const sel = g.rows.filter(s => selectable(s.shipment_nbr));
     const allOn = sel.length && sel.every(s => V.sel.has(s.shipment_nbr));
-    const l = g.load;
+    const l = g.load, nSel = g.rows.filter(s => V.sel.has(s.shipment_nbr)).length;
     return `<div class="grp"><div class="gh">
         <label><input type="checkbox" data-grp="${esc(k)}" ${allOn ? 'checked' : ''} ${sel.length ? '' : 'disabled'}>
           ${l ? `<span class="lnbr">${esc(k)}</span>` : 'Not on a load'}</label>
         ${l ? `${waveTag(l.wave)} <b>${esc(l.truck_type || '')}</b> <span class="target">${esc(l.ship_via || '')}</span>` : ''}
-        <span class="muted">${plural(g.rows.length, 'shipment')} · ${money(g.rows.reduce((t, s) => t + val(s), 0))}</span></div>
+        <span class="muted">${plural(g.rows.length, 'shipment')}</span>${nSel ? `<span class="gsel">${nSel} selected</span>` : ''}
+        <span class="gval">${money(g.rows.reduce((t, s) => t + val(s), 0))}</span></div>
       <table class="inv"><thead><tr><th class="cb"></th><th>Shipment</th><th>Customer</th><th class="hide-m">Order</th><th class="hide-m">Date</th><th class="r">Value</th><th>Invoice</th></tr></thead><tbody>
       ${g.rows.map(s => {
         const n = s.shipment_nbr, can = selectable(n);
-        return `<tr class="${V.sel.has(n) ? 'sel' : ''} ${busyNow(n) ? 'busy' : ''}"><td class="cb"><input type="checkbox" data-ship="${esc(n)}" ${V.sel.has(n) ? 'checked' : ''} ${can ? '' : 'disabled'} aria-label="Select ${esc(n)}"></td>
+        return `<tr class="${V.sel.has(n) ? 'sel' : ''} ${busyNow(n) ? 'busy' : ''} ${stateKind(n) === 'bad' ? 'bad' : ''}"><td class="cb"><input type="checkbox" data-ship="${esc(n)}" ${V.sel.has(n) ? 'checked' : ''} ${can ? '' : 'disabled'} aria-label="Select ${esc(n)}"></td>
           <td class="num">${esc(n)}</td><td>${esc(s.customer_name || s.customer_id || '')}</td><td class="num hide-m">${esc(s.order_nbr || '')}</td>
           <td class="hide-m">${esc(s.shipment_date ? niceDate(s.shipment_date) : '')}</td><td class="r num">${s.shipment_value == null ? '<span class="muted">—</span>' : money(s.shipment_value)}</td>
           <td>${statePill(n)}</td></tr>`;
@@ -156,15 +245,23 @@
     const a = b.dataset.act;
     if (a === 'clear') { V.sel.clear(); render(); return; }
     if (a === 'selall') {
-      const rows = V.ships.filter(s => (!V.date || s.shipment_date === V.date) && selectable(s.shipment_nbr));
+      const rows = visible().filter(s => selectable(s.shipment_nbr));
       const every = rows.length && rows.every(s => V.sel.has(s.shipment_nbr));
       rows.forEach(s => every ? V.sel.delete(s.shipment_nbr) : V.sel.add(s.shipment_nbr));
       render(); return;
     }
+    if (a === 'resetf') {
+      Object.keys(F).forEach(k => F[k] = '');
+      ['fq', 'fload', 'fcust', 'fship'].forEach(id => document.getElementById(id).value = '');
+      document.getElementById('fstatus').value = '';
+      render(); return;
+    }
     if (a === 'invoice') {
       const nbrs = [...V.sel];
+      const shown = new Set(visible().map(s => s.shipment_nbr));
+      const hid = nbrs.filter(n => !shown.has(n)).length;
       const where = D.env === 'test' ? 'Acumatica TEST' : 'live Acumatica';
-      if (!confirm(`Prepare ${plural(nbrs.length, 'invoice')} in ${where}?\n\nReleasing them stays with Accounts.`)) return;
+      if (!confirm(`Prepare ${plural(nbrs.length, 'invoice')} in ${where}?${hid ? `\n\n${hid} of them are hidden by your current filters.` : ''}\n\nReleasing them stays with Accounts.`)) return;
       act(async () => {
         const r = await callAcu('invoice_request', { env: D.env, shipments: nbrs });
         if (!r.ok) throw new Error(r.error || "Couldn't queue the invoices");
@@ -177,11 +274,21 @@
     const t = e.target;
     if (t.id === 'datePick') { V.date = t.value; render(); return; }
     if (t.dataset.ship !== undefined) { t.checked ? V.sel.add(t.dataset.ship) : V.sel.delete(t.dataset.ship); render(); return; }
+    if (t.dataset.f !== undefined) { F[t.dataset.f] = t.value; render(); return; }
     if (t.dataset.grp !== undefined) {
-      V.ships.filter(s => (V.loadOf.get(s.shipment_nbr) || { load_nbr: '—' }).load_nbr === t.dataset.grp && selectable(s.shipment_nbr))
+      visible().filter(s => loadKey(s) === t.dataset.grp && selectable(s.shipment_nbr))
         .forEach(s => t.checked ? V.sel.add(s.shipment_nbr) : V.sel.delete(s.shipment_nbr));
       render();
     }
+  });
+
+  // Filters apply as you type; debounced so a few hundred rows stay snappy.
+  let fTimer = null;
+  document.getElementById('app').addEventListener('input', e => {
+    const t = e.target;
+    if (t.id !== 'fq' && !(t.dataset.f && t.tagName === 'INPUT')) return;
+    if (t.id === 'fq') F.q = t.value; else F[t.dataset.f] = t.value;
+    clearTimeout(fTimer); fTimer = setTimeout(render, 120);
   });
 
   function poll() {
