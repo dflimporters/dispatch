@@ -5,10 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#0f2044">
 <meta name="robots" content="noindex, nofollow">
-<title>DFL Dispatch</title>
+<title>Logistics Management System — DFL Importers</title>
+<link rel="icon" type="image/png" href="assets/dfl-logo-color.png">
 <!--
   Landing page for dflimporters.github.io/dispatch/. Signs in, then
-  shows a tile for each page the user's roles allow. Someone with only one
+  shows a tile for each page the user's roles allow, grouped by where it
+  sits in the day (plan, dispatch, warehouse, finish). Someone with only one
   page (e.g. a picker) goes straight there.
 
   This replaced the old anon load board (2026-10-07); its overview now lives
@@ -17,11 +19,34 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="common.css">
 <style>
-  .tiles { display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:12px; margin-top:16px; }
-  .tile { display:block; text-decoration:none; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:16px 18px; color:var(--text); }
-  .tile:hover { border-color:var(--navy); }
-  .tile b { display:block; font-size:16px; color:var(--navy); margin-bottom:4px; }
-  .tile span { font-size:13.5px; color:var(--text-muted); line-height:1.4; }
+  .hero { position:relative; overflow:hidden; border-radius:16px; padding:26px 28px; margin-bottom:22px; color:#fff;
+    background:linear-gradient(135deg,#326BD3 0%,#16337A 100%); box-shadow:0 8px 24px rgba(22,51,122,.25); }
+  .hero::before { content:''; position:absolute; top:-70px; right:-50px; width:240px; height:240px;
+    background:radial-gradient(circle, rgba(245,166,35,.28) 0%, transparent 70%); }
+  .hero > * { position:relative; }
+  .hero .date { font-size:11px; font-weight:800; letter-spacing:1px; text-transform:uppercase; color:rgba(255,255,255,.7); }
+  .hero h2 { font-family:'Montserrat','Inter',sans-serif; font-size:26px; font-weight:800; letter-spacing:-0.4px; margin:6px 0 4px; }
+  .hero p { font-size:13.5px; color:rgba(255,255,255,.8); max-width:560px; line-height:1.5; }
+  .hero .roles { display:flex; gap:6px; flex-wrap:wrap; margin-top:14px; }
+  .hero .roles span { font-size:11.5px; font-weight:600; padding:3px 10px; border-radius:999px; background:rgba(255,255,255,.16); border:1px solid rgba(255,255,255,.25); }
+
+  .glabel { font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted); margin:22px 0 10px 2px; display:flex; align-items:center; gap:8px; }
+  .glabel i { font-style:normal; width:18px; height:18px; border-radius:5px; background:var(--navy); color:#fff; font-size:10.5px; display:inline-flex; align-items:center; justify-content:center; letter-spacing:0; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:14px; }
+  .tile { position:relative; overflow:hidden; display:flex; gap:14px; align-items:flex-start; text-decoration:none; color:var(--text);
+    background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:16px 18px; box-shadow:var(--shadow);
+    transition:transform .15s, box-shadow .15s, border-color .15s; }
+  .tile::before { content:''; position:absolute; left:0; right:0; top:0; height:4px; background:var(--tc, var(--accent)); }
+  .tile:hover { transform:translateY(-2px); box-shadow:0 6px 16px rgba(15,32,68,.12); border-color:var(--border2); }
+  .tile:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .tile .ic { width:40px; height:40px; border-radius:10px; display:flex; align-items:center; justify-content:center; flex:none; background:var(--tb, var(--accent-bg)); color:var(--tc, var(--accent)); }
+  .tile .ic svg { width:21px; height:21px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+  .tile b { display:block; font-family:'Montserrat','Inter',sans-serif; font-size:15px; font-weight:800; color:var(--navy); margin-bottom:3px; }
+  .tile span.d { font-size:13px; color:var(--text-muted); line-height:1.4; }
+  .tile .go { margin-left:auto; color:var(--text-dim); align-self:center; flex:none; }
+  .tile .go svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+  .tile:hover .go { color:var(--accent); }
+  @media (max-width:640px) { .hero { padding:20px 18px; } .hero h2 { font-size:21px; } }
 </style>
 </head>
 <body>
@@ -30,45 +55,81 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="common.js"></script>
 <script>
-const PAGES = [
-  ['batcher.html',   'Coordinator',     'batcher', 'Build the day’s loads from open shipments.'],
-  ['transfers.html', 'Transfers',       'batcher', 'Transfer lists from Ashenheim to 71 for bumped items.'],
-  ['clerk.html',     'Trucker Liaison', 'clerk',   'Book truckers and lock loads in.'],
-  ['picking.html',   'Picking',         'picker',  'Pick locked-in loads by area.'],
-  ['checker.html',   'Checker',         'checker', 'Check picked against shipped, then confirm.'],
-  ['invoicing.html', 'Invoicing',       'supervisor', 'Convert confirmed shipments to invoices in bulk.'],
-  ['dashboard.html', 'Dashboard',       ['manager', 'supervisor'], 'Orders, shipments, picking and checking at a glance.'],
+const SVG = {
+  plan:     '<svg viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12h6M9 16h4"/></svg>',
+  transfer: '<svg viewBox="0 0 24 24"><path d="M4 8h14l-3-3M20 16H6l3 3"/></svg>',
+  phone:    '<svg viewBox="0 0 24 24"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z"/></svg>',
+  pick:     '<svg viewBox="0 0 24 24"><path d="M21 8l-9-5-9 5v8l9 5 9-5zM3 8l9 5 9-5M12 13v8"/></svg>',
+  check:    '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l3 3 5-6"/></svg>',
+  invoice:  '<svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6zM14 3v5h5M9 13h7M9 17h5"/></svg>',
+  chart:    '<svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
+  go:       '<svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>',
+};
+// [href, label, role(s), blurb, icon, colour, tint]
+const GROUPS = [
+  ['Plan', [
+    ['batcher.html',   'Coordinator',     'batcher', 'Build the day’s loads from open shipments.', 'plan', '#2563eb', '#eff6ff'],
+    ['transfers.html', 'Transfers',       'batcher', 'Transfer lists from Ashenheim to 71 for bumped items.', 'transfer', '#7c3aed', '#f5f3ff'],
+  ]],
+  ['Dispatch', [
+    ['clerk.html',     'Trucker Liaison', 'clerk',   'Book truckers and lock loads in.', 'phone', '#0d9488', '#ccfbf1'],
+  ]],
+  ['Warehouse', [
+    ['picking.html',   'Picking',         'picker',  'Pick locked-in loads by area.', 'pick', '#f59e0b', '#fffbeb'],
+    ['checker.html',   'Checker',         'checker', 'Check picked against shipped, then confirm.', 'check', '#0f9f6e', '#ecfdf5'],
+  ]],
+  ['Finish and monitor', [
+    ['invoicing.html', 'Invoicing',       'supervisor', 'Convert confirmed shipments to invoices in bulk.', 'invoice', '#16337a', '#e0e7ff'],
+    ['dashboard.html', 'Dashboard',       ['manager', 'supervisor'], 'Orders, shipments, picking and checking at a glance.', 'chart', '#dc2626', '#fef2f2'],
+  ]],
 ];
 
 (async function () {
   const { data: { session } } = await sb.auth.getSession();
   if (!session) {
-    gate(`<h2>DFL Dispatch</h2>
+    gate(`<h2>Welcome</h2>
       <p>Sign in with your DFL Microsoft account.</p>
-      <button class="btn primary" id="signin">Sign in with Microsoft</button>`);
+      <button class="btn primary ms" id="signin">${MS_LOGO}Sign in with Microsoft</button>`);
     document.getElementById('signin').onclick = signIn;
     return;
   }
   const { data: me, error } = await sb.rpc('dispatch_me');
   if (error) { gate(`<h2>Something went wrong</h2><p>${esc(errMsg(error))}</p><button class="btn" onclick="signOut()">Sign out</button>`); return; }
 
-  const mine = PAGES.filter(([, , role]) => [].concat(role).some(r => me.roles.includes(r)));
-  if (!mine.length) {
-    gate(`<h2>No dispatch access</h2>
-      <p>You're signed in as <b>${esc(session.user.email)}</b>, but this account has no dispatch roles yet. Ask Joel to add them.</p>
+  const allowed = ([, , role]) => [].concat(role).some(r => me.roles.includes(r));
+  const groups = GROUPS.map(([g, items]) => [g, items.filter(allowed)]).filter(([, items]) => items.length);
+  const count = groups.reduce((n, [, items]) => n + items.length, 0);
+  if (!count) {
+    gate(`<h2>No access yet</h2>
+      <p>You're signed in as <b>${esc(session.user.email)}</b>, but this account has no logistics roles yet. Ask Joel to add them.</p>
       <button class="btn" onclick="signOut()">Sign out</button>`);
     return;
   }
-  if (mine.length === 1) { location.replace(mine[0][0]); return; }
+  if (count === 1) { location.replace(groups[0][1][0][0]); return; }
 
+  const name = me.name || session.user.email;
+  const first = String(name).split(/[\s@]/)[0];
+  const hour = new Date().getHours();
+  const hello = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+  const today = new Date().toLocaleDateString('en-JM', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+
+  drawChrome({ title: '', nav: [], name });
   document.getElementById('app').innerHTML = `
-    <div class="hdr">
-      <div class="brand"><h1>DFL Dispatch</h1></div>
-      <div class="who"><span>${esc(me.name || session.user.email)}</span><button class="btn small" id="signout">Sign out</button></div>
+    <div class="hero">
+      <div class="date">${esc(today)}</div>
+      <h2>${hello}, ${esc(first)}</h2>
+      <p>Pick up where the day is. Your pages are below, in the order a load moves through the warehouse.</p>
+      <div class="roles">${me.roles.map(r => `<span>${esc(ROLE_NAMES[r] || r)}</span>`).join('')}</div>
     </div>
-    <div class="tiles">${mine.map(([href, label, , blurb]) =>
-      `<a class="tile" href="${href}"><b>${esc(label)}</b><span>${esc(blurb)}</span></a>`).join('')}</div>`;
-  document.getElementById('signout').onclick = signOut;
+    ${groups.map(([g, items], i) => `
+      <div class="glabel"><i>${i + 1}</i>${esc(g)}</div>
+      <div class="tiles">${items.map(([href, label, , blurb, icon, c, t]) => `
+        <a class="tile" href="${href}" style="--tc:${c};--tb:${t}">
+          <div class="ic">${SVG[icon]}</div>
+          <div><b>${esc(label)}</b><span class="d">${esc(blurb)}</span></div>
+          <div class="go">${SVG.go}</div>
+        </a>`).join('')}</div>`).join('')}
+    <div class="lms-foot"><b>DFL Importers &amp; Distributors</b> · The Team That Cares</div>`;
 })();
 </script>
 </body>

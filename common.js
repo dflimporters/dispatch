@@ -121,8 +121,43 @@ function shipTable() { return D.env === 'test' ? 'shipments_test' : 'shipments';
 // ------------------------------------------------------------------
 // Sign-in gate + header
 // ------------------------------------------------------------------
+const LMS_NAME = 'Logistics Management System';
+const MS_LOGO = '<svg class="ms-logo" viewBox="0 0 21 21" aria-hidden="true"><path fill="#f25022" d="M1 1h9v9H1z"/><path fill="#7fba00" d="M11 1h9v9h-9z"/><path fill="#00a4ef" d="M1 11h9v9H1z"/><path fill="#ffb900" d="M11 11h9v9h-9z"/></svg>';
+
+// Full-screen card: DFL logo above the system name, then the message.
 function gate(html) {
-  document.getElementById('app').innerHTML = `<div class="gate">${html}</div>`;
+  document.body.classList.add('is-gate');
+  const old = document.getElementById('chrome'); if (old) old.remove();
+  document.getElementById('app').innerHTML = `<div class="gate-wrap"><div class="gate">
+    <div class="gbrand"><img src="assets/dfl-logo-color.png" alt="DFL Importers"><span>${LMS_NAME}</span></div>
+    ${html}</div></div>`;
+}
+
+function initials(name) {
+  const p = String(name || '?').split(/[\s@.]+/).filter(Boolean);
+  return ((p[0] || '?')[0] + (p.length > 1 ? p[1][0] : '')).toUpperCase();
+}
+
+// Top bar (logo over system name), tab strip, page title. Drawn into #chrome,
+// a sibling above .page, so it spans the full width. `nav` is [[href, label, on]].
+function drawChrome({ title, nav, name }) {
+  let el = document.getElementById('chrome');
+  if (!el) { el = document.createElement('div'); el.id = 'chrome'; el.className = 'hdr'; document.body.insertBefore(el, document.body.firstChild); }
+  document.body.classList.remove('is-gate');
+  const tabs = nav && nav.length ? `<div class="lms-tabs"><nav class="lms-tabs-in" aria-label="Pages">${
+    nav.map(([href, label, on]) => `<a href="${href}" class="${on ? 'on' : ''}"${on ? ' aria-current="page"' : ''}>${esc(label)}</a>`).join('')}</nav></div>` : '';
+  const crumb = title ? `<div class="crumb"><a href="index.html">${LMS_NAME}</a> / ${esc(title)}</div>` : '';
+  el.innerHTML = `
+    <div class="lms-top"><div class="lms-top-in">
+      <a class="lms-brand" href="index.html" title="${LMS_NAME}"><img src="assets/dfl-logo-white.png" alt="DFL Importers"><span>${LMS_NAME}</span></a>
+      <div class="lms-who"><div class="av">${esc(initials(name))}</div><div class="nm"><b>${esc(name)}</b></div><button class="btn small" id="signout">Sign out</button></div>
+    </div></div>
+    ${tabs}
+    ${title ? `<div class="lms-title">${crumb}<h1>${esc(title)}</h1></div>` : ''}`;
+  document.getElementById('signout').onclick = signOut;
+  // On a phone the strip scrolls sideways; keep the current page's tab in view.
+  const on = el.querySelector('.lms-tabs a.on'), strip = el.querySelector('.lms-tabs-in');
+  if (on && strip) strip.scrollLeft = on.offsetLeft - (strip.clientWidth - on.offsetWidth) / 2;
 }
 
 async function signIn() {
@@ -141,9 +176,9 @@ async function startPage({ page, role, title, onReady, onEnvChange }) {
   loadEnv();
   const { data: { session } } = await sb.auth.getSession();
   if (!session) {
-    gate(`<h2>DFL Dispatch · ${esc(title)}</h2>
+    gate(`<h2>${esc(title)}</h2>
       <p>Sign in with your DFL Microsoft account.</p>
-      <button class="btn primary" id="signin">Sign in with Microsoft</button>`);
+      <button class="btn primary ms" id="signin">${MS_LOGO}Sign in with Microsoft</button>`);
     document.getElementById('signin').onclick = signIn;
     return;
   }
@@ -164,15 +199,11 @@ async function startPage({ page, role, title, onReady, onEnvChange }) {
                  ['clerk.html', 'Trucker Liaison', 'clerk'], ['picking.html', 'Picking', 'picker'], ['checker.html', 'Checker', 'checker'],
                  ['invoicing.html', 'Invoicing', 'supervisor'], ['dashboard.html', 'Dashboard', ['manager', 'supervisor'], 'dashboard']]
     .filter(([, , r]) => [].concat(r).some(x => me.roles.includes(x)))
-    .map(([href, label, r, key]) => `<a href="${href}" class="${(key || r) === page ? 'on' : ''}">${label}</a>`).join('');
+    .map(([href, label, r, key]) => [href, label, (key || r) === page]);
+  drawChrome({ title, nav: links, name: me.name || session.user.email });
   document.getElementById('app').innerHTML = `
-    <div class="hdr">
-      <div class="brand"><h1>${esc(title)}</h1><nav>${links}</nav></div>
-      <div class="who"><span>${esc(me.name || session.user.email)}</span><button class="btn small" id="signout">Sign out</button></div>
-    </div>
     <div id="envbar"></div>
     <div id="main"><div class="empty">Loading…</div></div>`;
-  document.getElementById('signout').onclick = signOut;
   renderEnvBar(onEnvChange);
 
   try { await Promise.all([loadTruckTypes(), loadCodes()]); }

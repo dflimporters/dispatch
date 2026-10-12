@@ -1,4 +1,4 @@
-# DFL Dispatch — Load Board
+# DFL Logistics Management System (dispatch)
 
 Live at **https://dflimporters.github.io/dispatch/** (GitHub Pages, `main` branch, repo root).
 Pushing to `main` deploys; there is no build step.
@@ -17,7 +17,7 @@ portal's pull-request flow. Both use the same Supabase project (`hzagwndglwhceps
 | `picking.html` | **Picking** by load, split by area 1–4, phone/tablet first. Records picked qty per item. | Microsoft, `picker` role |
 | `checker.html` | **Checker**: picked vs shipped per shipment line, lowers/zeroes lines, then Confirm Shipment in Acumatica. | Microsoft, `checker` role |
 
-`common.js` / `common.css` are shared by the signed-in pages. Role keys in the database stay
+`common.js` / `common.css` are shared by the signed-in pages (top bar with the DFL logo over the system name, tab strip, page title, sign-in gate; logos in `assets/`). Role keys in the database stay
 `batcher` / `clerk`; only the visible names changed.
 
 Duties are split on purpose: the batcher builds loads but never picks the trucker; the clerk
