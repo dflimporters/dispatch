@@ -51,7 +51,7 @@
     for (let i = 0; i < nbrs.length; i += 150) {
       const chunk = nbrs.slice(i, i + 150);
       const [ls, iv] = await Promise.all([
-        sb.from('load_shipments').select('shipment_nbr, loads(load_nbr, wave, load_date, ship_via, truck_type)').eq('env', D.env).in('shipment_nbr', chunk),
+        sb.from('load_shipments').select('shipment_nbr, loads(load_nbr, wave, load_date, ship_via, truck_type, check_status)').eq('env', D.env).in('shipment_nbr', chunk),
         sb.from('shipment_invoicing').select('*').eq('env', D.env).in('shipment_nbr', chunk),
       ]);
       if (ls.error) throw ls.error;
@@ -64,7 +64,10 @@
     const rec = await sb.from('shipment_invoicing').select('*').eq('env', D.env).gte('updated_at', since).order('updated_at', { ascending: false }).limit(200);
     if (rec.error) throw rec.error;
     V.recent = rec.data || [];
-    V.ships = ships || []; V.loadOf = loadOf; V.inv = inv;
+    // Only shipments on a load the checker has confirmed in full. Confirmed
+    // shipments that aren't on a checked load (older ones, other routes) stay off.
+    V.ships = (ships || []).filter(s => { const l = loadOf.get(s.shipment_nbr); return l && l.check_status === 'confirmed'; });
+    V.loadOf = loadOf; V.inv = inv;
     // Drop selections that are no longer selectable.
     [...V.sel].forEach(n => { if (!selectable(n)) V.sel.delete(n); });
     const active = [...inv.values()].some(r => ['queued', 'running'].includes(r.state));
@@ -114,7 +117,7 @@
         <div class="kpi"><div class="l">Prepared (24h)</div><div class="v">${doneToday}</div><div class="s">invoices from here</div></div>
       </div>
       ${waiting ? progressBox('Preparing invoices in ' + (D.env === 'test' ? 'Acumatica TEST' : 'Acumatica'), 0, waiting, 'Runs in the background, one shipment at a time. You can leave this page.') : ''}
-      ${order.length ? order.map(([k, g]) => group(k, g)).join('') : '<div class="card"><div class="empty">No confirmed shipments waiting to be invoiced.</div></div>'}
+      ${order.length ? order.map(([k, g]) => group(k, g)).join('') : '<div class="card"><div class="empty">No checked and confirmed loads waiting to be invoiced.</div></div>'}
       ${V.sel.size ? `<div class="sumbar"><span><b>${V.sel.size}</b> selected · ${money(selVal)}</span><span class="spacer"></span>
         <button class="btn small" data-act="clear">Clear</button>
         <button class="btn primary small" data-act="invoice">Prepare ${plural(V.sel.size, 'invoice')}</button></div>` : ''}`;
