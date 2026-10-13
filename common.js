@@ -317,6 +317,27 @@ async function callAcu(action, body) {
   return json;
 }
 
+// Pull production's shipments and their line items now, rather than waiting for
+// the 5-minute cron: sync-shipments (headers, ~10s), then dispatch-acu
+// sync_live_lines (items for Open / On Hold shipments). Both are the same jobs
+// cron runs. Returns { shipments, lines } counts; throws if the shipment pull fails.
+async function syncLiveNow() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) throw new Error('Signed out; reload and sign in again');
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/sync-shipments`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', apikey: SUPABASE_PUBLISHABLE_KEY, Authorization: `Bearer ${session.access_token}` },
+    body: '{}',
+  });
+  let j = null;
+  try { j = await res.json(); } catch (e) {}
+  if (!res.ok || !(j && j.success)) throw new Error((j && j.error) || `Shipment pull failed (${res.status})`);
+  let lines = null;
+  try { const r = await callAcu('sync_live_lines'); lines = r.ok ? r.lines : null; if (!r.ok) toast("Shipments refreshed, but items didn't: " + (r.error || ''), true); }
+  catch (e) { toast("Shipments refreshed, but items didn't: " + errMsg(e), true); }
+  return { shipments: j.upserted, lines };
+}
+
 // ------------------------------------------------------------------
 // Shipment line items (expandable shipment rows)
 // ------------------------------------------------------------------

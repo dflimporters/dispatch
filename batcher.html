@@ -117,7 +117,9 @@
         </div>
         <input type="date" id="datePick" value="${B.date}" aria-label="Load date">
         ${syncText(B.sync)}
-        ${D.env === 'test' ? '<button class="btn small" data-act="sync_test">Pull fresh TEST data</button>' : ''}
+        ${D.env === 'test'
+          ? '<button class="btn small" data-act="sync_test">Pull fresh TEST data</button>'
+          : '<button class="btn small" data-act="sync_live" title="Pull the latest shipments and items from Acumatica now">↻ Refresh shipments</button>'}
         <span class="spacer"></span>
         ${waveFilterHtml(B.wave)}
         <button class="btn primary" data-act="suggest" ${free.length ? '' : 'disabled'}>Suggest loads${B.sel.size && [...B.sel].every(freeByNbr) ? ' for selected' : B.wave !== 'all' ? ' (' + B.wave + ')' : ''}</button>
@@ -290,6 +292,11 @@
     if (a === 'sync_test') {
       btn.disabled = true; btn.textContent = 'Pulling from TEST…';
       act(async () => { const r = await callAcu('sync_test'); if (!r.ok) throw new Error(r.error); toast(`${fmt(r.upserted)} TEST shipments pulled`); });
+      return;
+    }
+    if (a === 'sync_live') {
+      btn.disabled = true; btn.textContent = 'Refreshing from Acumatica…';
+      act(async () => { const r = await syncLiveNow(); toast(`${fmt(r.shipments)} shipments refreshed${r.lines != null ? `, ${fmt(r.lines)} items` : ''}`); });
       return;
     }
     if (a === 'move') {
