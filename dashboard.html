@@ -49,12 +49,48 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
 <script src="common.js"></script>
 <script>
-  const M = { date: jmDate(0), data: null, at: null };
+  const M = { date: jmDate(0), month: jmDate(0).slice(0, 7) + '-01', data: null, detail: null, at: null };
 
   async function loadAll() {
-    const { data, error } = await sb.rpc('dispatch_ops_summary', { p_env: D.env, p_date: M.date });
-    if (error) throw error;
-    M.data = data; M.at = new Date();
+    const [a, b] = await Promise.all([
+      sb.rpc('dispatch_ops_summary', { p_env: D.env, p_date: M.date }),
+      sb.rpc('dispatch_ops_detail', { p_env: D.env, p_date: M.date, p_month: M.month }),
+    ]);
+    if (a.error) throw a.error;
+    if (b.error) throw b.error;
+    M.data = a.data; M.detail = b.data; M.at = new Date();
+  }
+  function monthShift(iso, n) {
+    const [y, m] = iso.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().split('T')[0];
+  }
+  function monthName(iso) {
+    const [y, m] = iso.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  }
+  // Minutes between two timestamps, or null when either is missing / out of order.
+  function mins(a, b) {
+    if (!a || !b) return null;
+    const d = (new Date(b) - new Date(a)) / 60000;
+    return d >= 0 ? d : null;
+  }
+  function dur(m) {
+    if (m == null) return '<span class="muted">—</span>';
+    return m < 60 ? `${Math.round(m)}m` : `${Math.floor(m / 60)}h ${String(Math.round(m % 60)).padStart(2, '0')}m`;
+  }
+
+  // Where a load is in the day, in order.
+  const STAGES = ['Draft', 'With liaison', 'Booking trucker', 'Ready to pick', 'Picking', 'Picked', 'Checking', 'Confirmed', 'Invoiced'];
+  function stageOf(l) {
+    if (l.status === 'draft') return 'Draft';
+    if (l.status === 'ready') return 'With liaison';
+    if (!['done', 'partial'].includes(l.status)) return 'Booking trucker';   // confirmed / writing
+    if (l.shipments > 0 && l.invoiced >= l.shipments) return 'Invoiced';
+    if (l.check_status === 'confirmed') return 'Confirmed';
+    if (l.check_status) return 'Checking';
+    if (l.items > 0 && l.picked >= l.items && l.areas_done >= l.areas) return 'Picked';
+    if (l.picked > 0 || l.areas_done > 0) return 'Picking';
+    return 'Ready to pick';
   }
 
   const ORDER_TONE = { 'On Hold': 'warnrow', 'Credit Hold': 'badrow', 'Back Order': 'warnrow', Completed: 'okrow' };
@@ -78,8 +114,98 @@
     return ['Not checked', ''];
   }
 
+  // ---- Load pipeline: how many loads are at each stage ----
+  function pipelineHtml(loads) {
+    const n = Object.fromEntries(STAGES.map(s => [s, loads.filter(l => stageOf(l) === s).length]));
+    return `<div class="box"><h3>Load pipeline <span>· ${plural(loads.length, 'load')} on ${esc(niceDate(M.date))}</span></h3>
+      <div class="kpis">${STAGES.map(s => `<div class="kpi ${n[s] && ['Booking trucker', 'Checking'].includes(s) ? 'warn' : ''}"><div class="l">${s}</div><div class="v">${n[s]}</div></div>`).join('')}</div></div>`;
+  }
+
+  // ---- Needs attention ----
+  const MIN_STUCK = 3, MIN_WAIT = 30, MIN_STALE = 15;
+  function attentionItems(d, det) {
+    const out = [];   // [tone, text]
+    const nowMin = t => t ? (Date.now() - new Date(t)) / 60000 : null;
+    det.issues.forEach(i => out.push(['bad', `<b>${esc(({ write: 'Lock-in', confirm: 'Confirm', invoice: 'Invoice' })[i.kind])}</b> · ${esc(i.load_nbr || '')} ${esc(i.shipment_nbr)}: ${esc(i.detail || '')}`]));
+    d.loads.forEach(l => {
+      if (l.status === 'partial') out.push(['bad', `<b>${esc(l.load_nbr)}</b> partly written to Acumatica`]);
+      if (l.check_status === 'partial') out.push(['bad', `<b>${esc(l.load_nbr)}</b> partly confirmed`]);
+      if (l.short) out.push(['warn', `<b>${esc(l.load_nbr)}</b> has ${plural(l.short, 'short pick')}`]);
+      const t = det.loads.find(x => x.id === l.id) || {};
+      const locked = ['done', 'partial'].includes(l.status) && !l.check_status;
+      if (locked && !t.first_pick_at && nowMin(t.locked_at) > MIN_WAIT) out.push(['warn', `<b>${esc(l.load_nbr)}</b> locked in ${dur(nowMin(t.locked_at))} ago, picking not started`]);
+      else if (locked && l.picked >= l.items && l.items && nowMin(t.last_pick_at) > MIN_WAIT) out.push(['warn', `<b>${esc(l.load_nbr)}</b> picked ${dur(nowMin(t.last_pick_at))} ago, waiting for the checker`]);
+      if (l.check_status === 'confirmed' && l.invoiced < l.shipments && nowMin(t.confirmed_at) > MIN_WAIT) out.push(['warn', `<b>${esc(l.load_nbr)}</b> confirmed ${dur(nowMin(t.confirmed_at))} ago, not invoiced yet`]);
+    });
+    const q = det.queue;
+    if (q.oldest && nowMin(q.oldest) > MIN_STUCK) out.push(['bad', `Acumatica queue has been waiting ${dur(nowMin(q.oldest))} (${q.writes} lock-in, ${q.confirms} confirm, ${q.invoices} invoice)`]);
+    if (D.env === 'live') {
+      const s = nowMin(det.syncs.shipments_at);
+      if (s == null || s > MIN_STALE) out.push(['warn', `Shipments last synced ${s == null ? 'never' : dur(s) + ' ago'}`]);
+    }
+    if (d.free) out.push(['warn', `${plural(d.free, 'open shipment')} not on a load`]);
+    const holds = d.orders.by_status.filter(r => ['On Hold', 'Credit Hold'].includes(r.status));
+    if (holds.length) out.push(['warn', holds.map(r => `${r.orders} ${r.status.toLowerCase()}`).join(', ') + ' (orders)']);
+    return out;
+  }
+  function attentionHtml(d, det) {
+    const items = attentionItems(d, det);
+    return `<div class="box"><h3>Needs attention <span>· ${items.length ? plural(items.length, 'item') : 'all clear'}</span></h3>
+      ${items.length ? `<ul class="evs">${items.map(([tone, t]) => `<li><span class="pill ${tone === 'bad' ? 'bad' : 'warn'}">${tone === 'bad' ? 'Problem' : 'Watch'}</span> ${t}</li>`).join('')}</ul>` : '<div class="muted">Nothing needs attention.</div>'}</div>`;
+  }
+
+  // ---- Warehouse: workload by area, and who picked ----
+  function warehouseHtml(det) {
+    const areas = det.areas;
+    return `<div class="box"><h3>Warehouse <span>· locked-in loads on ${esc(niceDate(M.date))}</span></h3>
+      ${areas.length ? `<div class="scroll"><table class="ops"><thead><tr><th>Area</th><th>Items picked</th><th>Units</th><th>Loads</th><th>Short</th></tr></thead><tbody>
+        ${areas.map(a => `<tr><td>${a.area ? 'Area ' + a.area : 'Unassigned'}</td>
+          <td>${stage(a.picked, a.items, `${a.picked}/${a.items}`)}</td><td class="num">${fmt(a.units_picked)} / ${fmt(a.units)}</td>
+          <td class="num">${a.loads}</td><td class="num">${a.short ? `<b style="color:var(--warn-text)">${a.short}</b>` : '<span class="muted">0</span>'}</td></tr>`).join('')}
+        </tbody></table></div>` : '<div class="empty">No locked-in loads to pick.</div>'}
+      ${det.pickers.length ? `<h3 style="margin-top:12px">Pickers</h3><ul class="evs">${det.pickers.map(p =>
+        `<li><b>${esc(p.name)}</b> · ${plural(p.items, 'item')}, ${fmt(p.units)} units <span style="float:right">last ${esc(stamp(p.last_at))}</span></li>`).join('')}</ul>` : ''}
+    </div>`;
+  }
+
+  // ---- Timing: how long each stage takes ----
+  function timingHtml(loads, det) {
+    const rows = loads.map(l => {
+      const t = det.loads.find(x => x.id === l.id) || {};
+      return { l, v: [mins(t.locked_at, t.first_pick_at), mins(t.first_pick_at, t.last_pick_at), mins(t.last_pick_at, t.checked_at),
+                      mins(t.checked_at, t.confirmed_at), mins(t.confirmed_at, t.invoiced_at), mins(t.locked_at, t.invoiced_at)] };
+    });
+    const avg = i => { const xs = rows.map(r => r.v[i]).filter(x => x != null); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null; };
+    const heads = ['Locked in → picking starts', 'Picking', 'Picked → checked', 'Checked → confirmed', 'Confirmed → invoiced', 'Lock-in → invoiced'];
+    return `<div class="box"><h3>Timing <span>· time in each stage, ${esc(niceDate(M.date))}</span></h3>
+      ${rows.length ? `<div class="scroll"><table class="ops"><thead><tr><th>Load</th>${heads.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>
+        ${rows.map(r => `<tr><td><span class="lnbr">${esc(r.l.load_nbr)}</span></td>${r.v.map(x => `<td class="num">${dur(x)}</td>`).join('')}</tr>`).join('')}
+        <tr><td><b>Average</b></td>${heads.map((h, i) => `<td class="num"><b>${dur(avg(i))}</b></td>`).join('')}</tr>
+        </tbody></table></div>` : '<div class="empty">No loads for this date.</div>'}</div>`;
+  }
+
+  // ---- Loads by trucker, monthly tally ----
+  function truckersHtml(det) {
+    const t = det.truckers;
+    const sum = k => t.reduce((a, r) => a + Number(r[k] || 0), 0);
+    const thisMonth = jmDate(0).slice(0, 7) + '-01';
+    return `<div class="box"><h3>Loads by trucker <span>· ${esc(monthName(M.month))}${D.env === 'test' ? ' · TEST' : ''}</span></h3>
+      <div class="controls"><div class="seg" id="monthSeg">
+        <button data-month="-1">‹ ${esc(monthName(monthShift(M.month, -1)))}</button>
+        <button data-month="0" class="${M.month === thisMonth ? 'on' : ''}">This month</button>
+        <button data-month="1" ${M.month >= thisMonth ? 'disabled' : ''}>${esc(monthName(monthShift(M.month, 1)))} ›</button></div></div>
+      ${t.length ? `<div class="scroll"><table class="ops"><thead><tr><th>Ship Via</th><th>Trucker</th><th>Loads (portal)</th><th>Shipments</th><th>Customers</th><th>Volume</th><th>Value</th></tr></thead><tbody>
+        ${t.map(r => `<tr><td><span class="target">${esc(r.ship_via)}</span></td><td>${esc(r.description || '')}</td><td class="num">${r.loads}</td><td class="num">${r.shipments}</td>
+          <td class="num">${r.customers}</td><td class="num">${fmt(r.volume)}</td><td class="num">${money(r.value)}</td></tr>`).join('')}
+        <tr><td colspan="2"><b>Total · ${plural(t.length, 'trucker')}</b></td><td class="num"><b>${sum('loads')}</b></td><td class="num"><b>${sum('shipments')}</b></td>
+          <td></td><td class="num"><b>${fmt(sum('volume'))}</b></td><td class="num"><b>${money(sum('value'))}</b></td></tr>
+        </tbody></table></div>
+        <div class="muted" style="margin-top:6px">Shipments are counted from Acumatica by Ship Via (history from 21 Aug 2026). "Loads (portal)" counts loads locked in through this system.</div>`
+        : '<div class="empty">No shipments for this month.</div>'}</div>`;
+  }
+
   function render() {
-    const d = M.data;
+    const d = M.data, det = M.detail;
     const main = document.getElementById('main');
     const ord = d.orders.by_status, shp = d.shipments.by_status;
     const cnt = (list, k, f) => (list.find(r => r.status === k) || {})[f] || 0;
@@ -105,6 +231,8 @@
         <div class="kpi ${d.free ? 'warn' : ''}"><div class="l">Not on a load</div><div class="v">${fmt(d.free)}</div><div class="s">open shipments to assign</div></div>
         <div class="kpi ${stuck ? 'warn' : ''}"><div class="l">Loads with problems</div><div class="v">${stuck}</div><div class="s">partly written or confirmed</div></div>
       </div>
+      ${pipelineHtml(loads)}
+      ${attentionHtml(d, det)}
       <div class="cols">
         <div class="box"><h3>Sales orders by status <span>· production, open plus today's</span></h3>${bars(ord, 'status', 'orders', ORDER_TONE)}</div>
         <div class="box"><h3>Shipments by status <span>· ${esc(niceDate(M.date))}${D.env === 'test' ? ' · TEST' : ''}</span></h3>${bars(shp, 'status', 'n', SHIP_TONE)}</div>
@@ -122,7 +250,10 @@
             <td>${stage(l.confirmed, l.shipments, `${l.confirmed}/${l.shipments}`)}</td>
             <td>${stage(l.invoiced, l.shipments, `${l.invoiced}/${l.shipments}${l.invoice_queued ? ` · ${l.invoice_queued} queued` : ''}`)}</td></tr>`;
         }).join('')}</tbody></table></div>` : '<div class="empty">No loads for this date.</div>'}
-      </div>`;
+      </div>
+      ${warehouseHtml(det)}
+      ${timingHtml(loads, det)}
+      ${truckersHtml(det)}`;
   }
 
   async function refresh() {
@@ -133,7 +264,13 @@
 
   document.getElementById('app').addEventListener('click', e => {
     const day = e.target.closest('#daySeg button');
-    if (day) { M.date = jmDate(Number(day.dataset.day)); refresh(); }
+    if (day) { M.date = jmDate(Number(day.dataset.day)); refresh(); return; }
+    const mb = e.target.closest('#monthSeg button');
+    if (mb && !mb.disabled) {
+      const n = Number(mb.dataset.month);
+      M.month = n === 0 ? jmDate(0).slice(0, 7) + '-01' : monthShift(M.month, n);
+      refresh();
+    }
   });
   document.getElementById('app').addEventListener('change', e => {
     if (e.target.id === 'datePick' && e.target.value) { M.date = e.target.value; refresh(); }
