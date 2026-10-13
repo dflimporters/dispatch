@@ -59,7 +59,7 @@
 <body>
 <div class="page" id="app"><div class="empty">Loading…</div></div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
 <script src="common.js"></script>
 <script>
   const T = { lists: [], view: 'next', preview: [], lines: [], extra: 10, edits: new Map(), skip: new Set(), tick: new Set(), synced: null, busy: false };
@@ -68,11 +68,11 @@
   async function loadAll() {
     const [lists, sync] = await Promise.all([
       sb.from('transfer_lists').select('*').eq('env', D.env).order('built_at', { ascending: false }).limit(20),
-      sb.from('so_ordered_items').select('synced_at').order('synced_at', { ascending: false }).limit(1),
+      sb.rpc('dispatch_so_synced_at'),
     ]);
     if (lists.error) throw lists.error;
     T.lists = lists.data || [];
-    T.synced = sync.data && sync.data[0] ? new Date(sync.data[0].synced_at) : null;
+    T.synced = sync.data ? new Date(sync.data) : null;
     if (T.view !== 'next' && !T.lists.some(l => l.id === T.view)) T.view = 'next';
     if (T.view === 'next') {
       const { data, error } = await sb.rpc('dispatch_transfer_preview', { p_env: D.env, p_extra_pct: T.extra });
