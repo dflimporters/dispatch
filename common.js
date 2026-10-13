@@ -239,7 +239,8 @@ async function loadTruckTypes() {
   D.truckTypes = (data || []).map(t => ({ ...t, capacity_volume: Number(t.capacity_volume) }));
 }
 async function loadCodes() {
-  const { data, error } = await sb.from('ship_via_codes').select('ship_via, description').order('ship_via').range(0, 999);
+  // Most active truckers over the last year first (dispatch_ship_via_ranked).
+  const { data, error } = await sb.rpc('dispatch_ship_via_ranked');
   if (error) throw error;
   D.codes = (data || []).filter(c => !isBatch(c.ship_via));
 }
