@@ -349,7 +349,7 @@
 
   function setDate(iso) { C.date = iso; refresh(); }
   function fillShipVias() {
-    document.getElementById('shipViaList').innerHTML = shipViaChoices().map(c => `<option value="${esc(c.ship_via)}">${esc(c.description || '')}${c.ships ? ` · ${c.ships} shipments in the last year` : ''}</option>`).join('');
+    document.getElementById('shipViaList').innerHTML = shipViaChoices().map(c => `<option value="${esc(c.ship_via)}">${esc(c.description || '')}${c.ships ? ` · ${c.ships} orders in the last year` : ''}</option>`).join('');
   }
 
   async function refresh() {
