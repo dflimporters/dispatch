@@ -1,0 +1,6 @@
+# Reference documents and working spreadsheets live in this folder but not in the repo.
+*.docx
+*.xlsx
+*.pdf
+*.png
+dll file.txt
