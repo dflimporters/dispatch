@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f2044">
+<meta name="robots" content="noindex, nofollow">
+<title>Sales Orders — Logistics Management System</title>
+<!--
+  Sales Orders, for the Logistics Coordinator: the orders still waiting to be put on a shipment.
+  READ-ONLY for now. Create Shipments (which will set the shipment date from the date box,
+  default today) is added once it has been tested on TEST.
+
+  Reads dispatch_sales_orders(): production sales orders (SO type), Open and Back Order by
+  default, with what is still to ship, its volume, and whether stock at 71 covers it. Orders
+  on Credit Hold or On Hold can be shown but can't be selected: Acumatica won't ship them.
+  This page always shows production orders, whatever the Test / Live switch says.
+-->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="common.css">
+<style>
+  .so-ctl { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+  .so-ctl input[type=search], .so-ctl select, .so-ctl input[type=date] { font:inherit; font-size:13px; padding:6px 10px; border:1px solid var(--border2); border-radius:8px; background:#fff; }
+  .so-ctl input[type=search] { min-width:200px; flex:1; max-width:320px; }
+  .so-chips { display:flex; gap:6px; flex-wrap:wrap; }
+  .so-chips button { font:inherit; font-size:12.5px; font-weight:600; padding:5px 11px; border-radius:999px; border:1px solid var(--border2); background:#fff; color:var(--text-muted); cursor:pointer; }
+  .so-chips button.on { background:var(--navy); border-color:var(--navy); color:#fff; }
+  .so-wrap { overflow-x:auto; }
+  table.so { width:100%; border-collapse:collapse; font-size:13px; min-width:760px; }
+  table.so th { text-align:left; font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:.3px; padding:8px; border-bottom:1px solid var(--border); background:#f8fafc; white-space:nowrap; }
+  table.so td { padding:7px 8px; border-top:1px solid #f1f5f9; vertical-align:middle; }
+  table.so th.r, table.so td.r { text-align:right; font-variant-numeric:tabular-nums; }
+  table.so tr.blocked td { opacity:.55; }
+  table.so tr.sel td { background:var(--accent-bg); }
+  table.so td.nbr { font-weight:600; white-space:nowrap; }
+  table.so .cust { max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .so-bar { position:sticky; bottom:0; display:flex; gap:12px; flex-wrap:wrap; align-items:center; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:10px 14px; margin-top:12px; box-shadow:0 -2px 8px rgba(15,32,68,.06); }
+  .so-bar .spacer { flex:1; }
+  .so-bar label { display:flex; align-items:center; gap:6px; font-size:13px; color:var(--text-muted); font-weight:500; }
+</style>
+</head>
+<body>
+<div class="page" id="app"><div class="empty">Loading…</div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
+<script src="common.js"></script>
+<script>
+  const STATUSES = ['Open', 'Back Order', 'Shipping', 'Credit Hold', 'On Hold'];
+  const CANT_SHIP = ['Credit Hold', 'On Hold'];
+  const S = { rows: [], statuses: ['Open', 'Back Order'], q: '', zone: 'all', sel: new Set(), date: jmDate(0), synced: null };
+  try {
+    const f = JSON.parse(localStorage.getItem('dispatch-so-filter') || '{}');
+    if (Array.isArray(f.statuses) && f.statuses.every(x => STATUSES.includes(x)) && f.statuses.length) S.statuses = f.statuses;
+  } catch (e) {}
+  function saveFilter() { try { localStorage.setItem('dispatch-so-filter', JSON.stringify({ statuses: S.statuses })); } catch (e) {} }
+
+  async function loadAll() {
+    const [rows, sync] = await Promise.all([
+      sb.rpc('dispatch_sales_orders', { p_statuses: S.statuses, p_days: 90 }),
+      sb.rpc('dispatch_so_synced_at'),
+    ]);
+    if (rows.error) throw rows.error;
+    S.rows = (rows.data || []).map(r => ({ ...r, order_total: Number(r.order_total) || 0, open_qty: Number(r.open_qty) || 0, open_volume: Number(r.open_volume) || 0 }));
+    S.synced = sync.data ? new Date(sync.data) : null;
+    const have = new Set(S.rows.map(r => r.order_nbr));
+    S.sel = new Set([...S.sel].filter(n => have.has(n)));
+  }
+
+  const canShip = r => !CANT_SHIP.includes(r.status) && r.open_qty > 0;
+  function visible() {
+    const q = S.q.trim().toLowerCase();
+    return S.rows.filter(r => (S.zone === 'all' || r.shipping_zone === S.zone)
+      && (!q || [r.order_nbr, r.customer_name, r.customer_id].some(v => String(v || '').toLowerCase().includes(q))));
+  }
+  function statusPill(s) {
+    const cls = { 'Open': 'ok', 'Back Order': 'warn', 'Shipping': 'info', 'Credit Hold': 'bad', 'On Hold': 'bad' }[s] || 'done';
+    return `<span class="pill ${cls}">${esc(s)}</span>`;
+  }
+
+  function render() {
+    const rows = visible();
+    const zones = [...new Set(S.rows.map(r => r.shipping_zone).filter(Boolean))].sort();
+    const picked = S.rows.filter(r => S.sel.has(r.order_nbr));
+    const ready = rows.filter(canShip);
+    document.getElementById('main').innerHTML = `
+      <div class="warnbox info" style="margin-bottom:12px">Read-only for now. Creating shipments from this page is switched on after it has been tested. Orders here are production orders${D.env === 'test' ? ', whatever the Test switch says' : ''}.</div>
+      <div class="so-ctl">
+        <div class="so-chips" id="stChips" role="group" aria-label="Order status">
+          ${STATUSES.map(s => `<button data-st="${esc(s)}" class="${S.statuses.includes(s) ? 'on' : ''}">${esc(s)}</button>`).join('')}
+        </div>
+        <input type="search" id="q" placeholder="Search order or customer" value="${esc(S.q)}" aria-label="Search orders">
+        <select id="zone" aria-label="Shipping zone">
+          <option value="all">All zones</option>
+          ${zones.map(z => `<option ${S.zone === z ? 'selected' : ''}>${esc(z)}</option>`).join('')}
+        </select>
+        ${S.synced ? syncText(S.synced) : ''}
+      </div>
+      <div class="kpis">
+        <div class="kpi"><div class="l">Orders</div><div class="v">${rows.length}</div><div class="s">${plural(ready.length, 'order')} can ship</div></div>
+        <div class="kpi"><div class="l">Open qty</div><div class="v">${fmt(rows.reduce((t, r) => t + r.open_qty, 0))}</div><div class="s">cases to ship</div></div>
+        <div class="kpi"><div class="l">Volume</div><div class="v">${fmt(rows.reduce((t, r) => t + r.open_volume, 0))}</div><div class="s">open volume</div></div>
+        <div class="kpi"><div class="l">Value</div><div class="v">${money(rows.reduce((t, r) => t + r.order_total, 0))}</div><div class="s">order totals</div></div>
+      </div>
+      <div class="card"><div class="so-wrap">
+        ${rows.length ? `<table class="so"><thead><tr>
+          <th><input type="checkbox" id="all" aria-label="Select all orders that can ship" ${ready.length && ready.every(r => S.sel.has(r.order_nbr)) ? 'checked' : ''} ${ready.length ? '' : 'disabled'}></th>
+          <th>Order</th><th>Customer</th><th>Zone</th><th>Status</th><th>Ordered</th><th class="r">Open qty</th><th class="r">Volume</th><th class="r">Value</th><th>Notes</th></tr></thead>
+          <tbody>${rows.map(r => `<tr class="${canShip(r) ? '' : 'blocked'} ${S.sel.has(r.order_nbr) ? 'sel' : ''}">
+            <td><input type="checkbox" data-pick="${esc(r.order_nbr)}" aria-label="Select order ${esc(r.order_nbr)}" ${S.sel.has(r.order_nbr) ? 'checked' : ''} ${canShip(r) ? '' : 'disabled'}></td>
+            <td class="nbr">${esc(r.order_nbr)}</td>
+            <td class="cust" title="${esc(r.customer_name || '')}">${esc(r.customer_name || r.customer_id || '')}</td>
+            <td>${esc(r.shipping_zone || '')}</td>
+            <td>${statusPill(r.status)}</td>
+            <td>${esc(r.order_date ? niceDate(r.order_date) : '')}</td>
+            <td class="r">${fmt(r.open_qty)}</td><td class="r">${fmt(r.open_volume)}</td><td class="r">${money(r.order_total)}</td>
+            <td>${r.open_shipments ? `<span class="tag" title="Already on an open shipment">On shipment${r.open_shipments > 1 ? ' ×' + r.open_shipments : ''}</span> ` : ''}${r.short_lines ? `<span class="tag old" title="Open qty is more than on hand at 71 on these lines">Short ${r.short_lines}</span>` : ''}${CANT_SHIP.includes(r.status) ? '<span class="tag old">Can\'t ship</span>' : ''}</td>
+          </tr>`).join('')}</tbody></table>` : `<div class="empty">No ${esc(S.statuses.join(' / '))} orders${S.q || S.zone !== 'all' ? ' match that search' : ''}.</div>`}
+      </div></div>
+      <div class="so-bar">
+        <span><b>${plural(picked.length, 'order')}</b> selected · volume ${fmt(picked.reduce((t, r) => t + r.open_volume, 0))} · ${money(picked.reduce((t, r) => t + r.order_total, 0))}</span>
+        <span class="spacer"></span>
+        <label>Shipment date <input type="date" id="shipDate" min="${jmDate(0)}" value="${esc(S.date)}"></label>
+        <button class="btn primary" disabled title="Switched on after it has been tested on TEST">Create shipments</button>
+      </div>`;
+  }
+
+  document.getElementById('app').addEventListener('click', async e => {
+    const st = e.target.closest('[data-st]');
+    if (!st) return;
+    const s = st.dataset.st;
+    S.statuses = S.statuses.includes(s) ? S.statuses.filter(x => x !== s) : [...S.statuses, s];
+    if (!S.statuses.length) S.statuses = [s];
+    saveFilter();
+    await refresh();
+  });
+  document.getElementById('app').addEventListener('change', e => {
+    const t = e.target;
+    if (t.id === 'zone') { S.zone = t.value; render(); return; }
+    if (t.id === 'shipDate') { S.date = t.value || jmDate(0); return; }
+    if (t.id === 'all') { visible().filter(canShip).forEach(r => t.checked ? S.sel.add(r.order_nbr) : S.sel.delete(r.order_nbr)); render(); return; }
+    if (t.dataset.pick) { t.checked ? S.sel.add(t.dataset.pick) : S.sel.delete(t.dataset.pick); render(); }
+  });
+  document.getElementById('app').addEventListener('input', e => {
+    if (e.target.id !== 'q') return;
+    S.q = e.target.value;
+    const pos = e.target.selectionStart;
+    render();
+    const el = document.getElementById('q'); el.focus(); el.setSelectionRange(pos, pos);
+  });
+
+  async function refresh() {
+    try { await loadAll(); render(); }
+    catch (e) { console.error('[salesorders]', e); document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`; }
+  }
+  function editing() { const a = document.activeElement; return a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName); }
+
+  startPage({
+    page: 'salesorders', role: 'batcher', title: 'Sales Orders',
+    onEnvChange: () => render(),
+    onReady: () => { refresh(); setInterval(() => { if (!editing()) refresh(); }, 60 * 1000); },
+  });
+</script>
+</body>
+</html>
