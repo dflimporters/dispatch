@@ -90,8 +90,27 @@ const ICON = {
   chev:   '<svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
 };
 function waveTag(w, title) {
+  if (w === 'ACU') return '<span class="tag acu" title="Ship Via was set in Acumatica; pick AM or PM">No wave</span>';
   return `<span class="tag ${w === 'PM' ? 'pm' : 'am'}" title="${esc(title || (w === 'PM' ? 'Evening run' : 'Morning run'))}">${w === 'PM' ? ICON.moon : ICON.sun}${w}</span>`;
 }
+// Extra tags for loads that didn't come from the clerk, or are left over from an earlier day.
+function loadOriginTags(l) {
+  return (l.source === 'acumatica' ? '<span class="tag" title="The Ship Via was set directly in Acumatica">From Acumatica</span> ' : '') +
+    (l.carried ? `<span class="tag old" title="Not finished on its own day">Carried over from ${esc(niceDate(l.load_date))}</span> ` : '');
+}
+// AM / PM buttons for an auto-load that hasn't been given a wave (or got the wrong one).
+function setWaveHtml(l) {
+  if (l.source !== 'acumatica' || ['confirming', 'confirmed'].includes(l.check_status)) return '';
+  return `<div class="warnbox${l.wave === 'ACU' ? '' : ' info'}" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <span>${l.wave === 'ACU' ? 'Which run is this load on?' : 'Wave'}</span>
+    <button class="btn small ${l.wave === 'AM' ? 'primary' : ''}" data-setwave="AM" data-load="${l.id}">${ICON.sun}AM</button>
+    <button class="btn small ${l.wave === 'PM' ? 'primary' : ''}" data-setwave="PM" data-load="${l.id}">${ICON.moon}PM</button></div>`;
+}
+async function setWave(id, wave) {
+  const { error } = await sb.rpc('dispatch_set_wave', { p_id: id, p_wave: wave });
+  if (error) throw error;
+}
+
 // All / AM / PM filter, remembered per device and page.
 function waveFilterHtml(cur) {
   return `<div class="seg wavef" role="group" aria-label="Filter by run"><span class="seg-ico" title="Filter">${ICON.filter}</span>${
@@ -269,9 +288,19 @@ async function shipmentsByNbr(nbrs) {
 }
 
 // Loads for a date with their shipments, shipment rows and history.
-async function fetchLoads(date) {
-  const { data: loads, error } = await sb.from('loads').select('*').eq('env', D.env).eq('load_date', date).order('wave').order('seq');
+// opts.carry: when `date` is today or earlier, also include unconfirmed loads from the
+// previous 7 days (l.carried = true), so a load not finished by midnight doesn't vanish.
+async function fetchLoads(date, opts) {
+  let { data: loads, error } = await sb.from('loads').select('*').eq('env', D.env).eq('load_date', date).order('wave').order('seq');
   if (error) throw error;
+  if (opts && opts.carry && date <= jmDate(0)) {
+    const from = new Date(Date.parse(date + 'T00:00:00Z') - 7 * 86400e3).toISOString().split('T')[0];
+    const old = await sb.from('loads').select('*').eq('env', D.env).gte('load_date', from).lt('load_date', date)
+      .in('status', ['done', 'partial']).or('check_status.is.null,check_status.neq.confirmed')
+      .order('load_date').order('wave').order('seq');
+    if (old.error) throw old.error;
+    loads = (old.data || []).map(l => ({ ...l, carried: true })).concat(loads || []);
+  }
   const ids = (loads || []).map(l => l.id);
   let ls = [], evs = [];
   if (ids.length) {

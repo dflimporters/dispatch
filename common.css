@@ -99,6 +99,7 @@ select, .field input, .field textarea, input.txt {
 .tag { display:inline-block; font-size:10.5px; font-weight:700; padding:1px 6px; border-radius:4px; background:#f1f5f9; color:var(--text-muted); vertical-align:1px; }
 .tag.am { background:#fef3c7; color:#92400e; }
 .tag.pm { background:#e0e7ff; color:#3730a3; }
+.tag.acu { background:var(--warn-bg, #ffedd5); color:var(--warn-text, #9a3412); }
 .tag.old { background:var(--bad-bg); color:var(--bad-text); }
 
 .num { font-variant-numeric:tabular-nums; }

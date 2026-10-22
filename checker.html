@@ -58,7 +58,7 @@
   const key = (nbr, ln) => nbr + '|' + ln;
 
   async function loadAll() {
-    const loads = (await fetchLoads(K.date)).filter(l => ['done', 'partial'].includes(l.status));
+    const loads = (await fetchLoads(K.date, { carry: true })).filter(l => ['done', 'partial'].includes(l.status));
     const ids = loads.map(l => l.id);
     await loadLines(loads.flatMap(l => l.ships.map(s => s.shipment_nbr)));
     const [lists, done, checks] = await Promise.all([
@@ -153,7 +153,7 @@
   function loadCard(l) {
     const p = pickState(l);
     return `<button class="cload" data-open="${l.id}">
-      <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${waveTag(l.wave)}<b>${esc(l.truck_type || '')}</b><span class="target">${esc(l.ship_via || '')}</span>
+      <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${waveTag(l.wave)}${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b><span class="target">${esc(l.ship_via || '')}</span>
         <span class="spacer"></span>${checkPill(l)}</div>
       <div class="sub">${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} ·
         picking ${p.areas ? `${p.done}/${p.areas} areas done` : 'not started'}${p.unpicked ? ` · ${p.unpicked} not picked` : ''}${p.short ? ` · <b style="color:var(--warn-text)">${p.short} short</b>` : ''}</div>
@@ -182,8 +182,9 @@
     const anyResult = res.some(s => s.check_result);
     return `
       <button class="back" data-back>← All loads</button>
-      <div class="lhead"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${waveTag(l.wave)} <b>${esc(l.truck_type || '')}</b> <span class="target">${esc(l.ship_via || '')}</span>
+      <div class="lhead"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${waveTag(l.wave)} ${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b> <span class="target">${esc(l.ship_via || '')}</span>
         <span class="muted">${esc(l.contractor || '')}</span></div>${checkPill(l)}</div>
+      ${setWaveHtml(l)}
       <div class="lstats"><span>${plural(l.count, 'shipment')}</span><span>${plural(items.length, 'item')}</span><span>${esc(l.zones.join(', '))}</span>
         <span>picking ${p.areas ? `${p.done}/${p.areas} areas done` : 'not started'}</span></div>
       ${queued ? progressBox('Queued for ' + where, 0, l.count, 'Starts as soon as the load ahead of it is done. You can go back and check other loads.') : ''}
@@ -250,6 +251,8 @@
     const op = t.closest('[data-open]');
     if (op) { K.open = Number(op.dataset.open); K.final = new Map(); render(); window.scrollTo(0, 0); return; }
     if (t.closest('[data-back]')) { K.open = null; K.final = new Map(); render(); return; }
+    const sw = t.closest('[data-setwave]');
+    if (sw) { act(() => setWave(Number(sw.dataset.load), sw.dataset.setwave)); return; }
     const b = t.closest('[data-act]');
     if (!b) return;
     const l = K.loads.find(x => x.id === K.open);

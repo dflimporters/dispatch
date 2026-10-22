@@ -65,7 +65,7 @@
   function inArea(line) { return P.area === 'all' || line.area === Number(P.area); }
 
   async function loadAll() {
-    const loads = (await fetchLoads(P.date)).filter(l => ['done', 'partial'].includes(l.status) && l.check_status !== 'confirmed');
+    const loads = (await fetchLoads(P.date, { carry: true })).filter(l => ['done', 'partial'].includes(l.status) && l.check_status !== 'confirmed');
     const lists = await Promise.all(loads.map(l => sb.rpc('dispatch_pick_list', { p_load_id: l.id })));
     lists.forEach((r, i) => { if (r.error) throw r.error; });
     const ids = loads.map(l => l.id);
@@ -112,7 +112,7 @@
       return `<span class="achip ${cls}">${areaName(a)} · ${areaDone(l.id, a) ? 'done' : `${got}/${al.length}`}</span>`;
     }).join('');
     return `<button class="pload" data-open="${l.id}">
-      <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${waveTag(l.wave)}<b>${esc(l.truck_type || '')}</b>
+      <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${waveTag(l.wave)}${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b>
         <span class="target">${esc(l.ship_via || '')}</span>${l.check_status ? '<span class="pill info">Being checked</span>' : ''}</div>
       <div class="sub">${esc(l.contractor || '')}${l.contractor ? ' · ' : ''}${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} · ${plural(lines.filter(inArea).length, 'item')}</div>
       <div class="achips">${chips}</div>
@@ -127,8 +127,9 @@
     const locked = l.check_status === 'confirming';
     return `
       <button class="back" data-back>← All loads</button>
-      <div class="lhead" style="margin-bottom:6px"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${waveTag(l.wave)} <b>${esc(l.truck_type || '')}</b></div>
+      <div class="lhead" style="margin-bottom:6px"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${waveTag(l.wave)} ${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b></div>
         <span class="target">${esc(l.ship_via || '')}</span></div>
+      ${setWaveHtml(l)}
       <div class="muted" style="margin-bottom:10px">${esc(l.zones.join(', '))} · ${P.area === 'all' ? 'all areas' : areaName(P.area)} · ${plural(lines.length, 'item')}</div>
       ${l.check_status ? '<div class="warnbox info">The checker has started on this load. Changes here still count until it\'s confirmed.</div>' : ''}
       ${areas.map(a => {
@@ -181,6 +182,8 @@
     const op = t.closest('[data-open]');
     if (op) { P.open = Number(op.dataset.open); render(); window.scrollTo(0, 0); return; }
     if (t.closest('[data-back]')) { P.open = null; render(); return; }
+    const sw = t.closest('[data-setwave]');
+    if (sw) { act(() => setWave(Number(sw.dataset.load), sw.dataset.setwave)); return; }
     const done = t.closest('[data-areadone]');
     if (done) { act(() => rpc('dispatch_pick_area_done', { p_load_id: P.open, p_area: Number(done.dataset.areadone), p_done: true })); return; }
     const re = t.closest('[data-reopen]');
