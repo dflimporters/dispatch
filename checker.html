@@ -61,13 +61,16 @@
     const loads = (await fetchLoads(K.date, { carry: true })).filter(l => ['done', 'partial'].includes(l.status));
     const ids = loads.map(l => l.id);
     await loadLines(loads.flatMap(l => l.ships.map(s => s.shipment_nbr)));
-    const [lists, done, checks] = await Promise.all([
+    const [lists, done, checks, staged] = await Promise.all([
       Promise.all(loads.map(l => sb.rpc('dispatch_pick_list', { p_load_id: l.id }))),
       ids.length ? sb.from('pick_area_status').select('*').in('load_id', ids) : { data: [] },
       ids.length ? sb.from('check_lines').select('*').in('load_id', ids) : { data: [] },
+      ids.length ? sb.from('stage_area_status').select('*').in('load_id', ids) : { data: [] },
     ]);
     lists.forEach(r => { if (r.error) throw r.error; });
     if (done.error) throw done.error;
+    if (staged.error) throw staged.error;
+    K.staged = staged.data || [];
     if (checks.error) throw checks.error;
     K.loads = loads;
     K.picks = new Map(loads.map((l, i) => [l.id, lists[i].data || []]));
@@ -99,6 +102,7 @@
     const lines = loadLinesOf(l);
     const saved = K.checks.filter(c => c.load_id === l.id);
     const m = new Map();
+    K.notes = new Map(saved.filter(c => c.note).map(c => [key(c.shipment_nbr, c.line_nbr), c.note]));
     if (saved.length) {
       lines.forEach(x => { const c = saved.find(s => s.shipment_nbr === x.nbr && s.line_nbr === x.line_nbr); m.set(key(x.nbr, x.line_nbr), c ? Number(c.final_qty) : x.shipped); });
       return m;
@@ -118,7 +122,8 @@
     const picks = K.picks.get(l.id) || [];
     const areas = [...new Set(picks.map(p => p.area))];
     const done = areas.filter(a => K.areaDone.some(d => d.load_id === l.id && d.area === a)).length;
-    return { areas: areas.length, done, unpicked: picks.filter(p => p.picked_qty == null).length,
+    const staged = areas.filter(a => (K.staged || []).some(d => d.load_id === l.id && d.area === a)).length;
+    return { areas: areas.length, done, staged, unpicked: picks.filter(p => p.picked_qty == null).length,
              short: picks.filter(p => p.picked_qty != null && Number(p.picked_qty) < Number(p.required)).length };
   }
   function checkPill(l) {
@@ -156,7 +161,7 @@
       <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${waveTag(l.wave)}${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b><span class="target">${esc(l.ship_via || '')}</span>
         <span class="spacer"></span>${checkPill(l)}</div>
       <div class="sub">${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} ·
-        picking ${p.areas ? `${p.done}/${p.areas} areas done` : 'not started'}${p.unpicked ? ` · ${p.unpicked} not picked` : ''}${p.short ? ` · <b style="color:var(--warn-text)">${p.short} short</b>` : ''}</div>
+        picking ${p.areas ? `${p.done}/${p.areas} areas picked, ${p.staged} staged` : 'not started'}${p.unpicked ? ` · ${p.unpicked} not picked` : ''}${p.short ? ` · <b style="color:var(--warn-text)">${p.short} short</b>` : ''}</div>
     </button>`;
   }
 
@@ -186,7 +191,9 @@
         <span class="muted">${esc(l.contractor || '')}</span></div>${checkPill(l)}</div>
       ${setWaveHtml(l)}
       <div class="lstats"><span>${plural(l.count, 'shipment')}</span><span>${plural(items.length, 'item')}</span><span>${esc(l.zones.join(', '))}</span>
-        <span>picking ${p.areas ? `${p.done}/${p.areas} areas done` : 'not started'}</span></div>
+        <span>picking ${p.areas ? `${p.done}/${p.areas} areas picked` : 'not started'}</span>
+        <span>${p.areas ? `${p.staged}/${p.areas} staged` : ''}</span></div>
+      ${p.areas && p.staged < p.areas ? `<div class="warnbox info">${p.areas - p.staged} of ${p.areas} area(s) not staged yet.</div>` : ''}
       ${queued ? progressBox('Queued for ' + where, 0, l.count, 'Starts as soon as the load ahead of it is done. You can go back and check other loads.') : ''}
       ${confirming ? progressBox('Confirming in ' + where, through, l.count, 'Lowering lines and confirming, shipment by shipment. You can go back and check other loads.') : ''}
       ${p.unpicked ? `<div class="warnbox">${plural(p.unpicked, 'item')} on this load ${p.unpicked === 1 ? 'has' : 'have'} no picked quantity. They default to the shipment's quantity; lower them if they're not going.</div>` : ''}
@@ -208,7 +215,9 @@
             ${xs.map(x => {
               const fv = K.final.get(key(x.nbr, x.line_nbr));
               const cls = fv === 0 ? 'zero' : fv < x.shipped ? 'low' : '';
-              return `<tr class="cust ${cls}"><td>${esc(x.customer)} <span class="muted num">${esc(x.nbr)}</span></td><td class="hide-m"></td>
+              const nk = key(x.nbr, x.line_nbr);
+              return `<tr class="cust ${cls}"><td>${esc(x.customer)} <span class="muted num">${esc(x.nbr)}</span>
+                ${fv < x.shipped ? `<div><input type="text" maxlength="200" data-note="${esc(nk)}" value="${esc((K.notes && K.notes.get(nk)) || '')}" placeholder="${fv === 0 ? 'Why removed? e.g. substituted with item…' : 'Why lowered?'}" style="width:100%;margin-top:4px" ${locked ? 'disabled' : ''} aria-label="Reason for ${esc(item)} to ${esc(x.customer)}"></div>` : ''}</td><td class="hide-m"></td>
                 <td class="r num">${fmt(x.shipped)}</td><td class="hide-m"></td>
                 <td class="r"><input type="number" min="0" max="${x.shipped}" step="1" data-final="${esc(key(x.nbr, x.line_nbr))}" value="${fv}" ${locked ? 'disabled' : ''} aria-label="Going out for ${esc(item)} to ${esc(x.customer)}"></td></tr>`;
             }).join('')}</tbody>`;
@@ -230,7 +239,10 @@
 
   // ------------------------------------------------------------------
   function payload(l) {
-    return loadLinesOf(l).map(x => ({ shipment_nbr: x.nbr, line_nbr: x.line_nbr, final_qty: K.final.get(key(x.nbr, x.line_nbr)) }));
+    return loadLinesOf(l).map(x => {
+      const k = key(x.nbr, x.line_nbr), fv = K.final.get(k);
+      return { shipment_nbr: x.nbr, line_nbr: x.line_nbr, final_qty: fv, note: fv < x.shipped ? ((K.notes && K.notes.get(k)) || null) : null };
+    });
   }
   async function save(l) {
     const { error } = await sb.rpc('dispatch_check_save', { p_load_id: l.id, p_lines: payload(l) });
@@ -273,6 +285,7 @@
   document.getElementById('app').addEventListener('change', e => {
     const t = e.target;
     if (t.id === 'datePick' && t.value) { K.date = t.value; K.open = null; refresh(); return; }
+    if (t.dataset.note !== undefined) { if (!K.notes) K.notes = new Map(); K.notes.set(t.dataset.note, t.value.trim()); return; }
     if (t.dataset.final === undefined) return;
     const l = K.loads.find(x => x.id === K.open);
     const x = loadLinesOf(l).find(y => key(y.nbr, y.line_nbr) === t.dataset.final);

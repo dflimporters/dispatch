@@ -684,6 +684,20 @@ const SYNC_FIELDS = 'ShipmentNbr,Type,Operation,Status,ShipmentDate,CustomerID,W
   'Details/OrderType,Details/OrderNbr,Details/OrderLineNbr,Details/OrderedQty,Details/ShippedQty';
 const SYNC_PAGE = 500;
 
+// Order lines for these orders. One response is capped (1000 rows), and 200 orders carry more
+// than that, so page through it; otherwise the later orders get no price and show 0 value.
+async function orderItemRows(nbrs: string[]) {
+  const out: any[] = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await admin.from('so_ordered_items')
+      .select('order_type, order_nbr, line_nbr, order_qty, ext_price, unit_price').in('order_nbr', nbrs)
+      .order('order_nbr').order('line_nbr').range(from, from + 999);
+    if (error) throw new Error(`so_ordered_items read: ${error.message}`);
+    out.push(...(data ?? []));
+    if ((data ?? []).length < 1000) return out;
+  }
+}
+
 function num(val: any): number | null {
   if (val == null || val === '') return null;
   const n = Number(val); return isNaN(n) ? null : n;
@@ -719,8 +733,7 @@ async function syncTest() {
   const orderNbrs = [...new Set(raw.flatMap(s => lines(s).map(l => l.nbr)).filter(Boolean))];
   const price = new Map<string, number>();
   for (let i = 0; i < orderNbrs.length; i += 200) {
-    const { data } = await admin.from('so_ordered_items')
-      .select('order_type, order_nbr, line_nbr, order_qty, ext_price, unit_price').in('order_nbr', orderNbrs.slice(i, i + 200));
+    const data = await orderItemRows(orderNbrs.slice(i, i + 200));
     (data ?? []).forEach(o => {
       const q = Number(o.order_qty), ext = Number(o.ext_price);
       const unit = q > 0 && !isNaN(ext) ? ext / q : Number(o.unit_price) || 0;
@@ -825,8 +838,7 @@ async function syncLiveLines() {
   const orderNbrs = [...new Set(raw.flatMap(sh => lines(sh).map(l => l.nbr)).filter(Boolean))];
   const price = new Map<string, number>();
   for (let i = 0; i < orderNbrs.length; i += 200) {
-    const { data } = await admin.from('so_ordered_items')
-      .select('order_type, order_nbr, line_nbr, order_qty, ext_price, unit_price').in('order_nbr', orderNbrs.slice(i, i + 200));
+    const data = await orderItemRows(orderNbrs.slice(i, i + 200));
     (data ?? []).forEach(o => {
       const q = Number(o.order_qty), ext = Number(o.ext_price);
       price.set(`${o.order_type}|${o.order_nbr}|${o.line_nbr}`, q > 0 && !isNaN(ext) ? ext / q : Number(o.unit_price) || 0);

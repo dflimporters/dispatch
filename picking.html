@@ -69,13 +69,19 @@
     const lists = await Promise.all(loads.map(l => sb.rpc('dispatch_pick_list', { p_load_id: l.id })));
     lists.forEach((r, i) => { if (r.error) throw r.error; });
     const ids = loads.map(l => l.id);
-    const done = ids.length ? await sb.from('pick_area_status').select('*').in('load_id', ids) : { data: [] };
+    const [done, staged] = ids.length ? await Promise.all([
+      sb.from('pick_area_status').select('*').in('load_id', ids),
+      sb.from('stage_area_status').select('*').in('load_id', ids),
+    ]) : [{ data: [] }, { data: [] }];
     if (done.error) throw done.error;
+    if (staged.error) throw staged.error;
+    P.staged = staged.data || [];
     P.loads = loads;
     P.lists = new Map(loads.map((l, i) => [l.id, lists[i].data || []]));
     P.done = done.data || [];
   }
   function areaDone(loadId, area) { return P.done.find(d => d.load_id === loadId && d.area === area); }
+  function areaStaged(loadId, area) { return (P.staged || []).find(d => d.load_id === loadId && d.area === area); }
   function areasOf(loadId) { return [...new Set((P.lists.get(loadId) || []).map(x => x.area))].sort((a, b) => (a || 9) - (b || 9)); }
 
   function render() {
@@ -108,8 +114,8 @@
     const lines = P.lists.get(l.id) || [];
     const chips = areasOf(l.id).filter(a => P.area === 'all' || a === Number(P.area)).map(a => {
       const al = lines.filter(x => x.area === a), got = al.filter(x => x.picked_qty != null).length;
-      const cls = areaDone(l.id, a) ? 'done' : got ? 'part' : '';
-      return `<span class="achip ${cls}">${areaName(a)} · ${areaDone(l.id, a) ? 'done' : `${got}/${al.length}`}</span>`;
+      const cls = areaStaged(l.id, a) ? 'done' : areaDone(l.id, a) || got ? 'part' : '';
+      return `<span class="achip ${cls}">${areaName(a)} · ${areaStaged(l.id, a) ? 'staged' : areaDone(l.id, a) ? 'picked, not staged' : `${got}/${al.length}`}</span>`;
     }).join('');
     return `<button class="pload" data-open="${l.id}">
       <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${waveTag(l.wave)}${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b>
@@ -134,13 +140,16 @@
       ${l.check_status ? '<div class="warnbox info">The checker has started on this load. Changes here still count until it\'s confirmed.</div>' : ''}
       ${areas.map(a => {
         const al = lines.filter(x => x.area === a);
-        return `<div class="section-h" style="font-size:13px;font-weight:700;color:var(--navy);margin:14px 2px 6px">${areaName(a)}${areaDone(l.id, a) ? ' · <span class="pill ok">done</span>' : ''}</div>
+        return `<div class="section-h" style="font-size:13px;font-weight:700;color:var(--navy);margin:14px 2px 6px">${areaName(a)}${areaDone(l.id, a) ? ' · <span class="pill ok">picked</span>' : ''}${areaStaged(l.id, a) ? ' <span class="pill ok">staged</span>' : ''}</div>
           ${al.map(x => itemRow(l, x, locked)).join('')}`;
       }).join('')}
       ${lines.length ? `<div class="donebar">
         <span>${missing ? `${plural(missing, 'item')} still to pick` : 'Everything has a quantity'}</span><span class="spacer"></span>
         ${areas.map(a => areaDone(l.id, a)
-          ? `<button class="btn small" data-reopen="${a}" ${locked ? 'disabled' : ''}>Reopen ${areaName(a)}</button>`
+          ? (areaStaged(l.id, a)
+              ? `<button class="btn small" data-unstage="${a}" ${locked ? 'disabled' : ''}>Unstage ${areaName(a)}</button>`
+              : `<button class="btn primary" data-stage="${a}" ${locked ? 'disabled' : ''}>${areaName(a)} staged</button>`)
+            + `<button class="btn small" data-reopen="${a}" ${locked ? 'disabled' : ''}>Reopen ${areaName(a)}</button>`
           : `<button class="btn primary" data-areadone="${a}" ${locked || lines.some(x => x.area === a && x.picked_qty == null) ? 'disabled' : ''}>${areaName(a)} done</button>`).join('')}
       </div>` : '<div class="empty">Nothing to pick in this area on this load.</div>'}`;
   }
@@ -186,6 +195,8 @@
     if (sw) { act(() => setWave(Number(sw.dataset.load), sw.dataset.setwave)); return; }
     const done = t.closest('[data-areadone]');
     if (done) { act(() => rpc('dispatch_pick_area_done', { p_load_id: P.open, p_area: Number(done.dataset.areadone), p_done: true })); return; }
+    const st = t.closest('[data-stage]'), un = t.closest('[data-unstage]');
+    if (st || un) { act(() => rpc('dispatch_stage_area', { p_load_id: P.open, p_area: Number((st || un).dataset[st ? 'stage' : 'unstage']), p_staged: !!st })); return; }
     const re = t.closest('[data-reopen]');
     if (re) { act(() => rpc('dispatch_pick_area_done', { p_load_id: P.open, p_area: Number(re.dataset.reopen), p_done: false })); return; }
     const row = t.closest('.item[data-item]');
