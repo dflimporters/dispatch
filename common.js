@@ -214,7 +214,7 @@ async function startPage({ page, role, title, onReady, onEnvChange }) {
   }
 
   // index.html is just a landing page that links to these, so it isn't in the nav.
-  const links = [['batcher.html', 'Coordinator', 'batcher'], ['transfers.html', 'Transfers', 'batcher', 'transfers'],
+  const links = [['batcher.html', 'Coordinator', 'batcher'], ['salesorders.html', 'Sales Orders', 'batcher', 'salesorders'], ['transfers.html', 'Transfers', 'batcher', 'transfers'],
                  ['clerk.html', 'Trucker Liaison', 'clerk'], ['picking.html', 'Picking', 'picker'], ['checker.html', 'Checker', 'checker'],
                  ['invoicing.html', 'Invoicing', 'supervisor'], ['dashboard.html', 'Dashboard', ['manager', 'supervisor'], 'dashboard']]
     .filter(([, , r]) => [].concat(r).some(x => me.roles.includes(x)))
