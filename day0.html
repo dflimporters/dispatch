@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f2044">
+<meta name="robots" content="noindex, nofollow">
+<title>Day 0 Plan — Logistics Management System</title>
+<!--
+  Day 0 backlog plan: a standalone planning page, deliberately NOT linked from the hub (index.html)
+  or the nav in common.js. Open it by address: day0.html.
+
+  Reads dispatch_day0_lines() (live production, Open and Back Order lines still to ship) and works out,
+  in the browser and read-only:
+    - which orders 71's stock covers now (oldest orders get stock first) and which wait for a transfer
+    - the Ashenheim -> 71 transfer: per item, demand less stock at 71
+    - trucks per zone (the batcher's best-fit rule: fewest trucks for volume and 10 drops, then least
+      capacity), grouped into the near run (Day 2) and the far run (Day 3)
+  Nothing is written anywhere. Near / far per zone can be changed on the page (remembered per device).
+-->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="common.css">
+<style>
+  .d0-wrap { overflow-x:auto; }
+  table.d0 { width:100%; border-collapse:collapse; font-size:13px; min-width:640px; }
+  table.d0 th { text-align:left; font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:.3px; padding:8px; border-bottom:1px solid var(--border); background:#f8fafc; white-space:nowrap; }
+  table.d0 td { padding:6px 8px; border-top:1px solid #f1f5f9; vertical-align:middle; }
+  table.d0 th.r, table.d0 td.r { text-align:right; font-variant-numeric:tabular-nums; }
+  table.d0 tr.tot td { font-weight:700; background:#f8fafc; }
+  .d0-h { display:flex; align-items:center; gap:10px; margin:22px 0 8px; flex-wrap:wrap; }
+  .d0-h h2 { font-size:16px; margin:0; color:var(--navy); }
+  .d0-h .sp { flex:1; }
+  .d0-seg { display:inline-flex; border:1px solid var(--border2); border-radius:8px; overflow:hidden; }
+  .d0-seg button { font:inherit; font-size:12px; font-weight:600; padding:3px 10px; border:0; background:#fff; color:var(--text-muted); cursor:pointer; }
+  .d0-seg button.on { background:var(--navy); color:#fff; }
+  .d0-ctl { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+  .d0-chips button { font:inherit; font-size:12.5px; font-weight:600; padding:5px 11px; border-radius:999px; border:1px solid var(--border2); background:#fff; color:var(--text-muted); cursor:pointer; margin-right:6px; }
+  .d0-chips button.on { background:var(--navy); border-color:var(--navy); color:#fff; }
+  @media (max-width:760px) { .kpis { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+</style>
+</head>
+<body>
+<div class="page" id="app"><div class="empty">Loading…</div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
+<script src="common.js"></script>
+<script>
+  const STATUSES = ['Open', 'Back Order'];
+  // Near = Kingston and close by (loads Day 2 morning); everything else is far country (Day 3).
+  const NEAR_DEFAULT = ['KINGSTON', 'DOWNTOWN', 'OCHORIOS', 'RUNAWAYBAY', 'STANNSBAY', 'MAYPEN', 'OLDHARBOUR',
+                        'PORTMORE', 'SPANISHTOWN', 'LINSTEAD', 'YALLAHS'];
+  const NOZONE = '(no zone)';
+  const S = { lines: [], statuses: STATUSES.slice(), near: new Set(NEAR_DEFAULT), synced: null, tab: 'plan' };
+  try {
+    const n = JSON.parse(localStorage.getItem('dispatch-day0-near') || 'null');
+    if (Array.isArray(n)) S.near = new Set(n);
+  } catch (e) {}
+  const saveNear = () => { try { localStorage.setItem('dispatch-day0-near', JSON.stringify([...S.near])); } catch (e) {} };
+
+  async function load() {
+    const { data, error } = await sb.rpc('dispatch_day0_lines', { p_statuses: S.statuses });
+    if (error) throw error;
+    S.lines = (data || []).map(l => ({ ...l, open_qty: +l.open_qty || 0, volume: +l.volume || 0, on_hand_71: +l.on_hand_71 || 0 }));
+    S.synced = S.lines.reduce((m, l) => (l.synced_at && (!m || l.synced_at < m)) ? l.synced_at : m, null);
+  }
+
+  // ---------- the maths ----------
+  function analyse() {
+    const orders = new Map();
+    for (const l of S.lines) {
+      let o = orders.get(l.order_nbr);
+      if (!o) orders.set(l.order_nbr, o = { nbr: l.order_nbr, status: l.status, date: l.order_date, cust: l.customer, name: l.customer_name || l.customer,
+                                            zone: l.zone || NOZONE, city: l.city || '', lines: [], vol: 0, qty: 0, ready: true, short: 0 });
+      o.lines.push(l); o.vol += l.open_qty * l.volume; o.qty += l.open_qty;
+    }
+    // Stock at 71 goes to the oldest orders first; an order is ready when every line is covered.
+    const left = new Map();
+    const byAge = [...orders.values()].sort((a, b) => String(a.date).localeCompare(String(b.date)) || a.nbr.localeCompare(b.nbr, undefined, { numeric: true }));
+    for (const o of byAge) {
+      for (const l of o.lines) {
+        if (!left.has(l.item)) left.set(l.item, l.on_hand_71);
+        const have = left.get(l.item), take = Math.min(have, l.open_qty);
+        left.set(l.item, have - take);
+        if (take < l.open_qty) { o.ready = false; o.short++; }
+      }
+    }
+    // Transfer: demand less stock at 71, per item.
+    const items = new Map();
+    for (const l of S.lines) {
+      let it = items.get(l.item);
+      if (!it) items.set(l.item, it = { item: l.item, descr: l.descr, dem: 0, oh: l.on_hand_71, vol: l.volume, orders: new Set() });
+      it.dem += l.open_qty; it.orders.add(l.order_nbr);
+    }
+    const transfer = [...items.values()].map(it => ({ ...it, orders: it.orders.size, need: Math.max(0, it.dem - it.oh) }))
+      .map(it => ({ ...it, needVol: it.need * it.vol })).filter(it => it.need > 0).sort((a, b) => b.needVol - a.needVol);
+    // Zones and trucks.
+    const zones = new Map();
+    for (const o of orders.values()) {
+      let z = zones.get(o.zone);
+      if (!z) zones.set(o.zone, z = { zone: o.zone, orders: 0, custs: new Set(), vol: 0, readyVol: 0, readyOrders: 0 });
+      z.orders++; z.custs.add(o.cust); z.vol += o.vol;
+      if (o.ready) { z.readyVol += o.vol; z.readyOrders++; }
+    }
+    const zl = [...zones.values()].map(z => {
+      const wave = z.zone === NOZONE ? 'none' : (S.near.has(z.zone) ? 'near' : 'far');
+      const drops = z.custs.size;
+      return { ...z, drops, wave, fit: z.vol > 0 ? bestFit(z.vol, drops) : null };
+    }).sort((a, b) => b.vol - a.vol);
+    const wave = w => {
+      const zs = zl.filter(z => z.wave === w);
+      const vol = zs.reduce((t, z) => t + z.vol, 0), custs = new Set();
+      orders.forEach(o => { if (zs.some(z => z.zone === o.zone)) custs.add(o.cust); });
+      const counts = {};
+      zs.forEach(z => (z.fit || []).forEach(f => { counts[f.type.name] = (counts[f.type.name] || 0) + f.count; }));
+      const trucks = Object.values(counts).reduce((t, n) => t + n, 0);
+      const cap = zs.reduce((t, z) => t + (z.fit || []).reduce((c, f) => c + f.count * f.type.capacity_volume, 0), 0);
+      return { zones: zs.length, orders: zs.reduce((t, z) => t + z.orders, 0), drops: custs.size, vol, counts, trucks, cap,
+               pooled: vol ? bestFit(vol, custs.size) : null, ready: zs.reduce((t, z) => t + z.readyVol, 0) };
+    };
+    const tot = { orders: orders.size, vol: [...orders.values()].reduce((t, o) => t + o.vol, 0),
+                  qty: [...orders.values()].reduce((t, o) => t + o.qty, 0),
+                  readyOrders: [...orders.values()].filter(o => o.ready).length,
+                  readyVol: [...orders.values()].filter(o => o.ready).reduce((t, o) => t + o.vol, 0) };
+    const tr = { items: transfer.length, cases: transfer.reduce((t, i) => t + i.need, 0), vol: transfer.reduce((t, i) => t + i.needVol, 0) };
+    return { orders: [...orders.values()], zones: zl, near: wave('near'), far: wave('far'), none: wave('none'), transfer, tot, tr };
+  }
+
+  const countsText = c => Object.entries(c).length ? Object.entries(c).sort((a, b) => b[1] - a[1]).map(([n, k]) => `${k} × ${n}`).join(', ') : '—';
+  const fitText = f => f && f.length ? f.map(x => `${x.count} × ${x.type.name}`).join(' + ') : '—';
+  const maxCap = () => D.truckTypes.length ? D.truckTypes[D.truckTypes.length - 1].capacity_volume : 900;
+
+  // ---------- CSV ----------
+  function csv(name, rows) {
+    const q = v => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    const blob = new Blob(['﻿' + rows.map(r => r.map(q).join(',')).join('\r\n')], { type: 'text/csv' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+  function exportTransfer(A) {
+    csv(`day0-transfer-${jmDate(0)}.csv`, [['Item', 'Description', 'Orders', 'Demand (cases)', 'On hand at 71', 'Transfer (cases)', 'Case volume', 'Transfer volume'],
+      ...A.transfer.map(i => [i.item, i.descr, i.orders, i.dem, i.oh, i.need, i.vol, Math.round(i.needVol * 10) / 10])]);
+  }
+  function exportOrders(A) {
+    csv(`day0-orders-${jmDate(0)}.csv`, [['Order', 'Status', 'Order date', 'Customer', 'Zone', 'City', 'Run', 'Cases', 'Volume', 'Short lines', 'Ready from 71 stock'],
+      ...A.orders.map(o => [o.nbr, o.status, o.date, o.name, o.zone, o.city, o.zone === NOZONE ? 'no zone' : (S.near.has(o.zone) ? 'near (Day 2)' : 'far (Day 3)'),
+        o.qty, Math.round(o.vol * 10) / 10, o.short, o.ready ? 'yes' : 'no'])]);
+  }
+  function exportZones(A) {
+    csv(`day0-zones-${jmDate(0)}.csv`, [['Zone', 'Run', 'Orders', 'Drops', 'Volume', 'Ready volume', 'Trucks'],
+      ...A.zones.map(z => [z.zone, z.wave, z.orders, z.drops, Math.round(z.vol), Math.round(z.readyVol), fitText(z.fit)])]);
+  }
+
+  // ---------- rendering ----------
+  function waveCard(title, sub, w) {
+    return `<div class="card" style="padding:14px 16px;flex:1;min-width:260px">
+      <div style="font-weight:700;color:var(--navy)">${esc(title)}</div><div class="muted" style="margin-bottom:8px">${esc(sub)}</div>
+      <div style="font-size:26px;font-weight:800;font-family:Montserrat,Inter,sans-serif;color:var(--navy)">${w.trucks} <span style="font-size:14px;font-weight:600">trucks</span></div>
+      <div>${esc(countsText(w.counts))}</div>
+      <div class="muted" style="margin-top:6px">${plural(w.orders, 'order')} · ${plural(w.drops, 'drop')} · volume ${fmt(w.vol)} in ${plural(w.zones, 'zone')}</div>
+      <div class="muted">${w.vol ? `${Math.round(100 * w.vol / (w.cap || 1))}% full on average` : ''}${w.pooled ? ` · if zones could be mixed: ${esc(fitText(w.pooled))}` : ''}</div>
+    </div>`;
+  }
+
+  function render() {
+    const A = analyse(), mc = maxCap();
+    const staleDays = S.synced ? Math.floor((Date.now() - new Date(S.synced)) / 864e5) : 0;
+    const planTrucks = A.near.trucks + A.far.trucks;
+    const trLoads = Math.ceil(A.tr.vol / mc);
+    document.getElementById('main').innerHTML = `
+      <div class="warnbox info" style="margin-bottom:12px"><b>Day 0 plan (read-only).</b> Live production data: nothing here writes to Acumatica or creates shipments. Orders on hold and credit hold are left out until they are released.
+        ${S.synced ? syncText(new Date(S.synced)) : ''}${staleDays >= 2 ? ` <b>Some lines were last synced ${staleDays} days ago.</b>` : ''}</div>
+      <div class="d0-ctl">
+        <div class="d0-chips" id="stChips">${STATUSES.map(s => `<button data-st="${esc(s)}" class="${S.statuses.includes(s) ? 'on' : ''}">${esc(s)}</button>`).join('')}</div>
+        <span class="sp" style="flex:1"></span>
+        <button class="btn small" data-exp="orders">Orders CSV</button>
+        <button class="btn small" data-exp="zones">Zones CSV</button>
+        <button class="btn small" data-exp="transfer">Transfer CSV</button>
+      </div>
+      <div class="kpis">
+        <div class="kpi"><div class="l">Orders to ship</div><div class="v">${fmt(A.tot.orders)}</div><div class="s">${fmt(A.tot.qty)} cases · volume ${fmt(A.tot.vol)}</div></div>
+        <div class="kpi"><div class="l">Ready from 71 stock</div><div class="v">${fmt(A.tot.readyOrders)}</div><div class="s">volume ${fmt(A.tot.readyVol)} · the rest wait for the transfer</div></div>
+        <div class="kpi"><div class="l">Transfer from Ashenheim</div><div class="v">${fmt(A.tr.cases)}</div><div class="s">cases · ${plural(A.tr.items, 'item')} · volume ${fmt(A.tr.vol)} (about ${trLoads} × ${fmt(mc)}-volume loads)</div></div>
+        <div class="kpi"><div class="l">Delivery trucks</div><div class="v">${planTrucks}</div><div class="s">${A.near.trucks} near + ${A.far.trucks} far${A.none.orders ? ` · ${plural(A.none.orders, 'order')} have no zone` : ''}</div></div>
+      </div>
+
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
+        ${waveCard('Near run — Day 2 morning', 'Kingston and close by', A.near)}
+        ${waveCard('Far run — Day 3 evening', 'Far country, out on Wednesday', A.far)}
+      </div>
+      <div class="muted" style="margin-top:8px">Trucks are sized zone by zone with the Coordinator's best-fit rule (fewest trucks that hold the volume and ${MAX_DROPS} drops, then least spare capacity), so a zone's last truck is often part-full. Zones next to each other will share trucks in practice; the "if zones could be mixed" figure is the floor.</div>
+
+      <div class="d0-h"><h2>Areas</h2><span class="muted">Click Near / Far to move a zone between the runs.</span></div>
+      <div class="card"><div class="d0-wrap"><table class="d0"><thead><tr><th>Zone</th><th>Run</th><th class="r">Orders</th><th class="r">Drops</th><th class="r">Volume</th><th class="r">Ready now</th><th>Trucks</th></tr></thead><tbody>
+        ${A.zones.map(z => `<tr><td><b>${esc(z.zone)}</b></td>
+          <td>${z.wave === 'none' ? '<span class="tag old">Needs a zone</span>' : `<span class="d0-seg" data-zone="${esc(z.zone)}"><button data-w="near" class="${z.wave === 'near' ? 'on' : ''}">Near</button><button data-w="far" class="${z.wave === 'far' ? 'on' : ''}">Far</button></span>`}</td>
+          <td class="r">${z.orders}</td><td class="r">${z.drops}</td><td class="r">${fmt(z.vol)}</td><td class="r">${fmt(z.readyVol)}</td><td>${z.wave === 'none' ? 'not planned' : esc(fitText(z.fit))}</td></tr>`).join('')}
+      </tbody></table></div></div>
+      ${A.none.orders ? noZoneHtml(A) : ''}
+
+      <div class="d0-h"><h2>Transfer list: Ashenheim to 71</h2><span class="muted">Demand on these orders less stock at 71. Ashenheim decides what it can send; ${fmt(A.tr.cases)} cases is the ask. Largest volume first.</span></div>
+      <div class="card"><div class="d0-wrap"><table class="d0"><thead><tr><th>Item</th><th>Description</th><th class="r">Orders</th><th class="r">Demand</th><th class="r">At 71</th><th class="r">Transfer</th><th class="r">Volume</th></tr></thead><tbody>
+        ${A.transfer.slice(0, 60).map(i => `<tr><td><b>${esc(i.item)}</b></td><td>${esc(i.descr || '')}</td><td class="r">${i.orders}</td><td class="r">${fmt(i.dem)}</td><td class="r">${fmt(i.oh)}</td><td class="r"><b>${fmt(i.need)}</b></td><td class="r">${fmt(i.needVol)}</td></tr>`).join('')}
+        ${A.transfer.length > 60 ? `<tr><td colspan="7" class="muted">Top 60 of ${A.transfer.length} items by volume. The Transfer CSV has them all.</td></tr>` : ''}
+        <tr class="tot"><td colspan="5">Total, ${plural(A.tr.items, 'item')}</td><td class="r">${fmt(A.tr.cases)}</td><td class="r">${fmt(A.tr.vol)}</td></tr>
+      </tbody></table></div></div>`;
+  }
+
+  function noZoneHtml(A) {
+    const rows = A.orders.filter(o => o.zone === NOZONE).sort((a, b) => b.vol - a.vol);
+    return `<div class="d0-h"><h2>Orders with no shipping zone</h2><span class="muted">These can't be placed on a run until the customer has a zone. They are ${fmt(A.none.vol)} of volume and are left out of the truck counts.</span></div>
+      <div class="card"><div class="d0-wrap"><table class="d0"><thead><tr><th>Order</th><th>Customer</th><th>City</th><th>Status</th><th class="r">Volume</th></tr></thead><tbody>
+      ${rows.map(o => `<tr><td><b>${esc(o.nbr)}</b></td><td>${esc(o.name || '')}</td><td>${esc(o.city)}</td><td>${esc(o.status)}</td><td class="r">${fmt(o.vol)}</td></tr>`).join('')}
+      </tbody></table></div></div>`;
+  }
+
+  document.getElementById('app').addEventListener('click', async e => {
+    const st = e.target.closest('[data-st]');
+    if (st) {
+      const s = st.dataset.st;
+      S.statuses = S.statuses.includes(s) ? S.statuses.filter(x => x !== s) : [...S.statuses, s];
+      if (!S.statuses.length) S.statuses = [s];
+      await refresh(); return;
+    }
+    const w = e.target.closest('[data-w]');
+    if (w) {
+      const z = w.closest('[data-zone]').dataset.zone;
+      w.dataset.w === 'near' ? S.near.add(z) : S.near.delete(z);
+      saveNear(); render(); return;
+    }
+    const ex = e.target.closest('[data-exp]');
+    if (ex) { const A = analyse(); ({ orders: exportOrders, zones: exportZones, transfer: exportTransfer })[ex.dataset.exp](A); }
+  });
+
+  async function refresh() {
+    try { await load(); render(); }
+    catch (e) { console.error('[day0]', e); document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`; }
+  }
+
+  startPage({
+    page: 'day0', role: 'batcher', title: 'Day 0 Plan',
+    onReady: () => { const eb = document.getElementById('envbar'); if (eb) eb.style.display = 'none'; refresh(); },
+  });
+</script>
+</body>
+</html>
