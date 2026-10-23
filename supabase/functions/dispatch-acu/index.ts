@@ -436,7 +436,8 @@ async function checkConfirm(load: any, acu: Acu) {
         const mine = (checks ?? []).filter(c => c.shipment_nbr === nbr);
         const lines = (sh.Details ?? []).map((d: any) => ({ id: d.id, line: num(v(d.LineNbr)), qty: num(v(d.ShippedQty)) ?? 0, item: v(d.InventoryID) }));
 
-        if (status === 'Confirmed') { result = 'applied'; detail = 'Already confirmed'; }
+        // Confirmed, or taken further in Acumatica since (e.g. fixed by hand, then Completed/Invoiced).
+        if (['Confirmed', 'Completed', 'Invoiced'].includes(status ?? '')) { result = 'applied'; detail = `Already ${String(status).toLowerCase()} in Acumatica`; }
         else if (!EDITABLE.includes(status!)) { result = 'refused'; detail = `Status is ${status} in Acumatica`; }
         else if (!v(sh.ShipVia)) { result = 'refused'; detail = 'No Ship Via on the shipment (lock in the trucker first)'; }
         else {
