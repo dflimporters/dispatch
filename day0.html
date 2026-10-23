@@ -50,7 +50,22 @@
   const NEAR_DEFAULT = ['KINGSTON', 'DOWNTOWN', 'OCHORIOS', 'RUNAWAYBAY', 'STANNSBAY', 'MAYPEN', 'OLDHARBOUR',
                         'PORTMORE', 'SPANISHTOWN', 'LINSTEAD', 'YALLAHS'];
   const NOZONE = '(no zone)';
-  const S = { lines: [], statuses: STATUSES.slice(), near: new Set(NEAR_DEFAULT), synced: null, tab: 'plan' };
+  const S = { lines: [], statuses: STATUSES.slice(), near: new Set(NEAR_DEFAULT), synced: null, preset: 'all', from: '', to: '' };
+  const PRESETS = [['all', 'All dates'], ['week', 'This week'], ['7', 'Last 7 days'], ['14', 'Last 14 days'], ['30', 'Last 30 days'], ['month', 'This month'], ['custom', 'Custom']];
+  // The order-date window (Jamaica dates, inclusive). Orders outside it are left out of every figure.
+  function range() {
+    const today = jmDate(0);
+    switch (S.preset) {
+      case 'week': { const dow = (new Date(today + 'T00:00:00Z').getUTCDay() + 6) % 7; return [addDays(today, -dow), today]; }   // Monday on
+      case '7': return [addDays(today, -6), today];
+      case '14': return [addDays(today, -13), today];
+      case '30': return [addDays(today, -29), today];
+      case 'month': return [today.slice(0, 8) + '01', today];
+      case 'custom': return [S.from || '', S.to || ''];
+      default: return ['', ''];
+    }
+  }
+  const inRange = d => { const [a, b] = range(); const x = String(d || '').slice(0, 10); return (!a || x >= a) && (!b || x <= b); };
   try {
     const n = JSON.parse(localStorage.getItem('dispatch-day0-near') || 'null');
     if (Array.isArray(n)) S.near = new Set(n);
@@ -67,7 +82,8 @@
   // ---------- the maths ----------
   function analyse() {
     const orders = new Map();
-    for (const l of S.lines) {
+    const lines = S.lines.filter(l => inRange(l.order_date));
+    for (const l of lines) {
       let o = orders.get(l.order_nbr);
       if (!o) orders.set(l.order_nbr, o = { nbr: l.order_nbr, status: l.status, date: l.order_date, cust: l.customer, name: l.customer_name || l.customer,
                                             zone: l.zone || NOZONE, city: l.city || '', lines: [], vol: 0, qty: 0, ready: true, short: 0 });
@@ -86,7 +102,7 @@
     }
     // Transfer: demand less stock at 71, per item.
     const items = new Map();
-    for (const l of S.lines) {
+    for (const l of lines) {
       let it = items.get(l.item);
       if (!it) items.set(l.item, it = { item: l.item, descr: l.descr, dem: 0, oh: l.on_hand_71, vol: l.volume, orders: new Set() });
       it.dem += l.open_qty; it.orders.add(l.order_nbr);
@@ -122,7 +138,8 @@
                   readyOrders: [...orders.values()].filter(o => o.ready).length,
                   readyVol: [...orders.values()].filter(o => o.ready).reduce((t, o) => t + o.vol, 0) };
     const tr = { items: transfer.length, cases: transfer.reduce((t, i) => t + i.need, 0), vol: transfer.reduce((t, i) => t + i.needVol, 0) };
-    return { orders: [...orders.values()], zones: zl, near: wave('near'), far: wave('far'), none: wave('none'), transfer, tot, tr };
+    return { orders: [...orders.values()], zones: zl, near: wave('near'), far: wave('far'), none: wave('none'), transfer, tot, tr,
+             outside: new Set(S.lines.filter(l => !inRange(l.order_date)).map(l => l.order_nbr)).size };
   }
 
   const countsText = c => Object.entries(c).length ? Object.entries(c).sort((a, b) => b[1] - a[1]).map(([n, k]) => `${k} × ${n}`).join(', ') : '—';
@@ -171,11 +188,14 @@
         ${S.synced ? syncText(new Date(S.synced)) : ''}${staleDays >= 2 ? ` <b>Some lines were last synced ${staleDays} days ago.</b>` : ''}</div>
       <div class="d0-ctl">
         <div class="d0-chips" id="stChips">${STATUSES.map(s => `<button data-st="${esc(s)}" class="${S.statuses.includes(s) ? 'on' : ''}">${esc(s)}</button>`).join('')}</div>
+        <div class="d0-chips" id="rgChips">${PRESETS.map(([k, t]) => `<button data-rg="${k}" class="${S.preset === k ? 'on' : ''}">${t}</button>`).join('')}</div>
+        ${S.preset === 'custom' ? `<input type="date" id="rgFrom" value="${esc(S.from)}" aria-label="From order date"> to <input type="date" id="rgTo" value="${esc(S.to)}" aria-label="To order date">` : ''}
         <span class="sp" style="flex:1"></span>
         <button class="btn small" data-exp="orders">Orders CSV</button>
         <button class="btn small" data-exp="zones">Zones CSV</button>
         <button class="btn small" data-exp="transfer">Transfer CSV</button>
       </div>
+      ${S.preset !== 'all' ? `<div class="muted" style="margin:-4px 0 10px">Order dates ${esc(range()[0] ? niceDate(range()[0]) : 'any')} to ${esc(range()[1] ? niceDate(range()[1]) : 'any')}${A.outside ? `: <b>${plural(A.outside, 'order')} outside this range left out</b> (old orders still open in Acumatica)` : ''}.</div>` : ''}
       <div class="kpis">
         <div class="kpi"><div class="l">Orders to ship</div><div class="v">${fmt(A.tot.orders)}</div><div class="s">${fmt(A.tot.qty)} cases · volume ${fmt(A.tot.vol)}</div></div>
         <div class="kpi"><div class="l">Ready from 71 stock</div><div class="v">${fmt(A.tot.readyOrders)}</div><div class="s">volume ${fmt(A.tot.readyVol)} · the rest wait for the transfer</div></div>
@@ -221,6 +241,8 @@
       if (!S.statuses.length) S.statuses = [s];
       await refresh(); return;
     }
+    const rg = e.target.closest('[data-rg]');
+    if (rg) { S.preset = rg.dataset.rg; if (S.preset === 'custom' && !S.from && !S.to) S.from = addDays(jmDate(0), -29); render(); return; }
     const w = e.target.closest('[data-w]');
     if (w) {
       const z = w.closest('[data-zone]').dataset.zone;
@@ -229,6 +251,11 @@
     }
     const ex = e.target.closest('[data-exp]');
     if (ex) { const A = analyse(); ({ orders: exportOrders, zones: exportZones, transfer: exportTransfer })[ex.dataset.exp](A); }
+  });
+
+  document.getElementById('app').addEventListener('change', e => {
+    if (e.target.id === 'rgFrom') { S.from = e.target.value; render(); }
+    if (e.target.id === 'rgTo') { S.to = e.target.value; render(); }
   });
 
   async function refresh() {
