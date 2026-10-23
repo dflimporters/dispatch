@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f2044">
+<meta name="robots" content="noindex, nofollow">
+<title>Returns — Logistics Management System</title>
+<!--
+  Returns (OMS last mile). The digital return sheet the driver's app builds as it goes:
+  every stop that ended partly delivered or not delivered, with the items that are coming
+  back, how many, why, and the driver's damage photos. It appears here the moment the
+  driver finishes (or abandons) a stop, before the truck is back.
+
+    Read-only in this phase. The clerk still checks the goods against the sheet and
+    raises the credit memo in Acumatica; receiving and the memo draft come in Phase 2.
+    Print gives one combined sheet per load for the clerk's desk.
+
+  Reads lm_returns, lm_return_lines, lm_stops, lm_loads (named columns) and the lm-pod
+  photos through signed links.
+-->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="common.css">
+<style>
+  .dctl { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:14px; }
+  .cust { border-top:1px solid var(--border); padding:10px 0 4px; }
+  .cust:first-of-type { border-top:0; }
+  .cust h3 { font-size:14px; font-weight:700; color:var(--navy); display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .cust .why { font-size:12.5px; color:var(--text-muted); margin:2px 0 4px; }
+  table.rl { width:100%; border-collapse:collapse; font-size:12.5px; margin-bottom:6px; }
+  table.rl th { text-align:left; font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:.3px; padding:5px 6px; border-bottom:1px solid var(--border); }
+  table.rl td { padding:5px 6px; border-top:1px solid #f1f5f9; vertical-align:top; }
+  table.rl td.r, table.rl th.r { text-align:right; }
+  .cause { font-size:10.5px; font-weight:700; padding:1px 6px; border-radius:4px; margin-left:4px; }
+  .cause.customer { background:#e0e7ff; color:#3730a3; }
+  .cause.internal { background:var(--warn-bg); color:var(--warn-text); }
+  .cause.damaged { background:var(--bad-bg); color:var(--bad-text); }
+
+  /* The printed sheet: hidden on screen, the only thing shown when printing. */
+  #sheetwrap { display:none; }
+  .sheet { font-family:'Inter',Arial,sans-serif; color:#000; max-width:190mm; margin:0 auto; }
+  .sheet .sh { display:flex; justify-content:space-between; align-items:flex-start; border-bottom:3px solid #000; padding-bottom:8px; margin-bottom:12px; gap:16px; }
+  .sheet .sh img { height:46px; }
+  .sheet .sh .t { font-size:13px; font-weight:800; letter-spacing:1.5px; text-transform:uppercase; text-align:right; }
+  .sheet .sh .t b { display:block; font-size:24px; letter-spacing:0; margin-top:2px; font-family:ui-monospace,Consolas,monospace; }
+  .sheet .meta { font-size:12.5px; margin-bottom:12px; display:flex; gap:18px; flex-wrap:wrap; }
+  .sheet h3 { font-size:14px; margin:14px 0 2px; }
+  .sheet .why { font-size:11.5px; color:#333; margin-bottom:4px; }
+  .sheet table { width:100%; border-collapse:collapse; font-size:12px; margin-bottom:6px; }
+  .sheet th { text-align:left; font-size:10px; letter-spacing:.6px; text-transform:uppercase; border-bottom:2px solid #000; padding:4px 5px; }
+  .sheet td { border-bottom:1px solid #999; padding:6px 5px; vertical-align:top; }
+  .sheet td.r, .sheet th.r { text-align:right; }
+  .sheet .box { width:26mm; }
+  .sheet .sign { display:flex; gap:30px; margin-top:26px; font-size:12px; }
+  .sheet .sign div { flex:1; border-top:1px solid #000; padding-top:4px; }
+  .sheet .foot { margin-top:10px; font-size:10.5px; color:#444; }
+  @media print {
+    @page { margin:12mm; }
+    body { background:#fff; }
+    #chrome, #app, .toast { display:none !important; }
+    #sheetwrap { display:block !important; }
+  }
+</style>
+</head>
+<body>
+<div class="page" id="app"><div class="empty">Loading…</div></div>
+<div id="sheetwrap"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
+<script src="common.js"></script>
+<script>
+  const R = { date: /^\d{4}-\d{2}-\d{2}$/.test(new URLSearchParams(location.search).get('date') || '') ? new URLSearchParams(location.search).get('date') : jmDate(0), loads: [], returns: [], lines: [], stops: new Map(), files: new Map(), lm: new Map(), reasons: new Map(), busy: false };
+  const num = n => { n = Number(n) || 0; return Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100); };
+  const reasonName = c => (R.reasons.get(c) || {}).label || c || '';
+  const causeOf = c => (R.reasons.get(c) || {}).cause || '';
+  const CAUSE = { customer: 'Customer', internal: 'Our side', damaged: 'Damaged' };
+
+  async function loadAll() {
+    const { data: loads, error } = await sb.from('loads')
+      .select('id,load_nbr,load_date,wave,seq,ship_via,contractor,truck_type')
+      .eq('env', D.env).eq('load_date', R.date).order('wave').order('seq');
+    if (error) throw error;
+    R.returns = []; R.lines = []; R.stops = new Map(); R.files = new Map(); R.lm = new Map();
+    const all = loads || [];
+    if (!R.reasons.size) {
+      const rc = await sb.from('lm_reason_codes').select('code,label,cause');
+      if (rc.error) throw rc.error;
+      (rc.data || []).forEach(r => R.reasons.set(r.code, r));
+    }
+    if (!all.length) { R.loads = []; return; }
+    const ids = all.map(l => l.id);
+    const [rt, lm] = await Promise.all([
+      sb.from('lm_returns').select('id,load_id,stop_id,status,raised_at').in('load_id', ids),
+      sb.from('lm_loads').select('load_id,status,claimed_name,aborted_at,abort_reason,abort_note').in('load_id', ids),
+    ]);
+    if (rt.error) throw rt.error;
+    if (lm.error) throw lm.error;
+    R.returns = rt.data || [];
+    (lm.data || []).forEach(r => R.lm.set(r.load_id, r));
+    R.loads = all.filter(l => R.returns.some(x => x.load_id === l.id));
+    if (!R.returns.length) return;
+    const retIds = R.returns.map(x => x.id), stopIds = R.returns.map(x => x.stop_id);
+    const [ln, st] = await Promise.all([
+      sb.from('lm_return_lines').select('id,return_id,stop_line_id,shipment_nbr,line_nbr,inventory_id,description,uom,qty,reason_code,file_id,received_qty').in('return_id', retIds).order('shipment_nbr').order('line_nbr'),
+      sb.from('lm_stops').select('id,load_id,customer_id,customer_name,status,fail_reason,fail_note,seq_final,receiver_name').in('id', stopIds),
+    ]);
+    if (ln.error) throw ln.error;
+    if (st.error) throw st.error;
+    R.lines = ln.data || [];
+    (st.data || []).forEach(s => R.stops.set(s.id, s));
+    const fileIds = [...new Set(R.lines.map(l => l.file_id).filter(Boolean))];
+    if (fileIds.length) {
+      const f = await sb.from('lm_files').select('id,storage_path,uploaded_at,kind').in('id', fileIds);
+      if (f.error) throw f.error;
+      (f.data || []).forEach(x => R.files.set(x.id, x));
+    }
+  }
+
+  const sheetsOf = load => R.returns.filter(x => x.load_id === load.id).map(x => ({ ret: x, stop: R.stops.get(x.stop_id) }))
+    .filter(x => x.stop).sort((a, b) => a.stop.seq_final - b.stop.seq_final);
+  const linesOf = ret => R.lines.filter(l => l.return_id === ret.id);
+
+  function lineRow(l) {
+    const f = l.file_id ? R.files.get(l.file_id) : null;
+    const photo = !f ? '' : f.uploaded_at ? `<button class="btn small" data-act="photo" data-path="${esc(f.storage_path)}">📷 Damage</button>`
+      : '<span class="tag old">photo not uploaded yet</span>';
+    const c = causeOf(l.reason_code);
+    return `<tr><td class="num">${esc(l.shipment_nbr)}</td><td>${esc(l.description || l.inventory_id || '')}</td>
+      <td class="r num"><b>${num(l.qty)}</b>${l.uom ? ' ' + esc(l.uom) : ''}</td>
+      <td>${esc(reasonName(l.reason_code))}${c ? `<span class="cause ${esc(c)}">${esc(CAUSE[c] || c)}</span>` : ''}</td><td>${photo}</td></tr>`;
+  }
+
+  function loadCard(load) {
+    const sheets = sheetsOf(load);
+    const m = R.lm.get(load.id) || {};
+    const items = sheets.reduce((n, s) => n + linesOf(s.ret).length, 0);
+    return `<div class="lcard st-partial" data-load="${load.id}">
+      <div class="lhead"><div><span class="lnbr">${esc(load.load_nbr)}</span> ${waveTag(load.wave)}
+          ${m.aborted_at ? '<span class="pill bad">Load stopped by driver</span>' : ''}</div>
+        <div class="lactions" style="margin:0"><button class="btn small primary" data-act="print">Print return sheet</button></div></div>
+      <div class="lstats"><span><b>${esc(load.ship_via || '—')}</b>${load.contractor ? ' · ' + esc(load.contractor) : ''}</span>
+        <span>${plural(sheets.length, 'stop')} with returns</span><span>${plural(items, 'item')} coming back</span>
+        ${m.claimed_name ? `<span>driver: ${esc(m.claimed_name)}</span>` : ''}</div>
+      ${m.aborted_at ? `<div class="warnbox bad"><b>${esc(reasonName(m.abort_reason))}</b>${m.abort_note ? ' · ' + esc(m.abort_note) : ''} · ${esc(stamp(m.aborted_at))}</div>` : ''}
+      ${sheets.map(({ ret, stop }) => `<div class="cust"><h3>${esc(stop.customer_name || stop.customer_id)}
+          ${stop.status === 'failed' ? '<span class="pill bad">Not delivered</span>' : '<span class="pill warn">Partly delivered</span>'}
+          <span class="pill info">${esc(({ raised: 'Raised', on_truck: 'On truck', received: 'Received', credit_drafted: 'Credit memo drafted', released: 'Released' })[ret.status] || ret.status)}</span></h3>
+        ${stop.status === 'failed' && stop.fail_reason ? `<div class="why">${esc(reasonName(stop.fail_reason))}${stop.fail_note ? ' · ' + esc(stop.fail_note) : ''}</div>` : ''}
+        <table class="rl"><thead><tr><th>Invoice</th><th>Item</th><th class="r">Qty back</th><th>Reason</th><th></th></tr></thead>
+          <tbody>${linesOf(ret).map(lineRow).join('')}</tbody></table></div>`).join('')}
+    </div>`;
+  }
+
+  function render() {
+    const lines = R.lines;
+    const byCause = c => lines.filter(l => causeOf(l.reason_code) === c).length;
+    document.getElementById('main').innerHTML = `
+      <div class="dctl">
+        <input type="date" id="day" value="${R.date}">
+        <button class="btn small" data-act="today">Today</button>
+        <span class="muted">${niceDate(R.date)}</span>
+        <span class="spacer"></span>
+        <button class="btn small" data-act="refresh">Refresh</button>
+      </div>
+      <div class="kpis">
+        <div class="kpi"><div class="l">Stops with returns</div><div class="v">${R.returns.length}</div><div class="s">${plural(R.loads.length, 'load')}</div></div>
+        <div class="kpi"><div class="l">Items coming back</div><div class="v">${lines.length}</div><div class="s">lines on the sheets</div></div>
+        <div class="kpi ${byCause('internal') ? 'warn' : ''}"><div class="l">Our side</div><div class="v">${byCause('internal')}</div><div class="s">wrong item, short picked, breakdown…</div></div>
+        <div class="kpi"><div class="l">Customer · Damaged</div><div class="v">${byCause('customer')} · ${byCause('damaged')}</div><div class="s">lines by cause</div></div>
+      </div>
+      ${R.loads.length ? R.loads.map(loadCard).join('') : '<div class="card"><div class="empty">No returns on this day. A sheet appears here the moment a driver finishes a stop that was not delivered in full.</div></div>'}`;
+  }
+
+  // Printed sheet, one per load -------------------------------------
+  function sheetHtml(load) {
+    const sheets = sheetsOf(load);
+    const m = R.lm.get(load.id) || {};
+    return `<div class="sheet">
+      <div class="sh"><img src="assets/dfl-logo-color.png" alt="DFL Importers"><div class="t">Return sheet<b>${esc(load.load_nbr)}</b></div></div>
+      <div class="meta"><span><b>${esc(load.ship_via || '')}</b>${load.contractor ? ' · ' + esc(load.contractor) : ''}</span>
+        <span>${esc(niceDate(load.load_date))}</span>${m.claimed_name ? `<span>Driver: ${esc(m.claimed_name)}</span>` : ''}
+        ${m.aborted_at ? `<span><b>Load stopped:</b> ${esc(reasonName(m.abort_reason))}${m.abort_note ? ' · ' + esc(m.abort_note) : ''}</span>` : ''}</div>
+      ${sheets.map(({ ret, stop }) => `<h3>${esc(stop.customer_name || stop.customer_id)} — ${stop.status === 'failed' ? 'not delivered' : 'partly delivered'}</h3>
+        ${stop.status === 'failed' && stop.fail_reason ? `<div class="why">${esc(reasonName(stop.fail_reason))}${stop.fail_note ? ' · ' + esc(stop.fail_note) : ''}</div>` : ''}
+        <table><thead><tr><th>Invoice</th><th>Item</th><th class="r">Qty back</th><th>Reason</th><th class="box">Counted</th></tr></thead>
+          <tbody>${linesOf(ret).map(l => `<tr><td>${esc(l.shipment_nbr)}</td><td>${esc(l.description || l.inventory_id || '')}</td>
+            <td class="r"><b>${num(l.qty)}</b>${l.uom ? ' ' + esc(l.uom) : ''}</td><td>${esc(reasonName(l.reason_code))}</td><td class="box"></td></tr>`).join('')}</tbody></table>`).join('')}
+      <div class="sign"><div>Driver</div><div>Returns clerk</div><div>Date and time</div></div>
+      <div class="foot">Raised by the driver's app as each stop finished. Printed ${esc(stamp(new Date().toISOString()))}.</div>
+    </div>`;
+  }
+  async function printSheet(id) {
+    const load = R.loads.find(l => l.id === id);
+    document.getElementById('sheetwrap').innerHTML = sheetHtml(load);
+    await new Promise(r => setTimeout(r, 100));
+    window.print();
+  }
+  async function openPhoto(path) {
+    const { data, error } = await sb.storage.from('lm-pod').createSignedUrl(path, 300);
+    if (error) throw error;
+    window.open(data.signedUrl, '_blank', 'noopener');
+  }
+
+  document.getElementById('app').addEventListener('click', e => {
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    const card = b.closest('[data-load]');
+    const id = card ? Number(card.dataset.load) : null;
+    switch (b.dataset.act) {
+      case 'refresh': refresh(); break;
+      case 'today': R.date = jmDate(0); refresh(); break;
+      case 'print': printSheet(id); break;
+      case 'photo': openPhoto(b.dataset.path).catch(err => toast(errMsg(err), true)); break;
+    }
+  });
+  document.getElementById('app').addEventListener('change', e => {
+    if (e.target.id === 'day' && e.target.value) { R.date = e.target.value; refresh(); }
+  });
+
+  async function refresh() {
+    try { await loadAll(); render(); }
+    catch (e) { console.error('[returns]', e); document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`; }
+  }
+
+  startPage({
+    page: 'returns', role: ['batcher', 'clerk', 'supervisor', 'manager'], title: 'Returns',
+    onEnvChange: () => refresh(),
+    onReady: () => {
+      refresh();
+      setInterval(() => { if (document.visibilityState === 'visible') refresh(); }, 20 * 1000);
+    },
+  });
+</script>
+</body>
+</html>

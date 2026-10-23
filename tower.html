@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f2044">
+<meta name="robots" content="noindex, nofollow">
+<title>Control Tower — Logistics Management System</title>
+<!--
+  Control Tower (OMS last mile): the live dispatch board.
+
+    Board        every checker-confirmed load for the day (plus unfinished ones from earlier
+                 days), with the driver's progress, current and next stop, and last activity.
+                 Comes from lm_board() in one call.
+    Attention    what needs someone's eye, worst first: a driver who says something is missing,
+                 a stopped load, undelivered stops, a rescan, stops finished with no photo or
+                 name, photos not uploaded, no activity for IDLE_MIN, at one stop for DWELL_MIN,
+                 a sheet printed and not collected after WAITING_MIN. (The thresholds are the
+                 three constants below.)
+    Load detail  #load=ID. Claim state, the stops (suggested next to actual order, times, time
+                 at each stop, exceptions, photos, arrival location), the history, and the
+                 actions: print the load sheet, unassign (before a stop has started), close.
+    Find invoice any invoice (shipment) number, any date: the stop, the times, who received it,
+                 where the driver pressed Arrived and Finish, and the signed-invoice photos.
+
+  Live: the page listens for new rows in lm_events (realtime; RLS lets only staff receive them)
+  and refreshes about a second later. Every POLL_MS it refreshes anyway, in case realtime is
+  down. lm_loads is not published: it holds the claim code and token hash.
+-->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="common.css">
+<style>
+  .dctl { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:14px; }
+  .dctl input.txt { min-width:220px; }
+  .livedot { display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; color:var(--text-muted); }
+  .livedot i { width:9px; height:9px; border-radius:50%; background:var(--text-dim); display:inline-block; }
+  .livedot.live i { background:var(--ok); box-shadow:0 0 0 3px rgba(15,159,110,.2); }
+  .livedot.poll i { background:var(--warn); }
+
+  .attn { margin-bottom:14px; }
+  .attn h2, .sec-h { font-size:13px; font-weight:700; color:var(--navy); margin:0 2px 8px; display:flex; gap:8px; align-items:baseline; }
+  .arow { display:flex; gap:10px; align-items:center; padding:8px 12px; border-radius:10px; margin-bottom:6px; cursor:pointer; font-size:13px; border:1px solid transparent; }
+  .arow.bad { background:var(--bad-bg); color:var(--bad-text); border-color:#fecaca; }
+  .arow.warn { background:var(--warn-bg); color:var(--warn-text); border-color:#fde68a; }
+  .arow.info { background:var(--accent-bg); color:var(--accent); border-color:#bfdbfe; }
+  .arow b { font-family:ui-monospace,Consolas,monospace; }
+  .arow .go { margin-left:auto; opacity:.7; }
+
+  .tgrid { display:grid; grid-template-columns:repeat(auto-fill, minmax(330px, 1fr)); gap:12px; }
+  .tcard { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:12px 14px; box-shadow:var(--shadow); cursor:pointer; border-left:4px solid var(--border2); }
+  .tcard:hover { border-color:var(--border2); box-shadow:0 6px 16px rgba(15,32,68,.1); }
+  .tcard.s-ready { border-left-color:var(--accent); }
+  .tcard.s-out { border-left-color:var(--warn); }
+  .tcard.s-done { border-left-color:var(--ok); }
+  .tcard.s-bad { border-left-color:var(--bad); }
+  .tcard .meta { font-size:12.5px; color:var(--text-muted); margin:4px 0; display:flex; gap:10px; flex-wrap:wrap; }
+  .seg3 { display:flex; height:8px; border-radius:999px; overflow:hidden; background:#e2e8f0; margin:8px 0 4px; }
+  .seg3 i { display:block; height:100%; }
+  .seg3 .d { background:var(--ok); } .seg3 .p { background:var(--warn); } .seg3 .f { background:var(--bad); }
+  .now { font-size:13px; margin:6px 0 2px; }
+  .badges { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  .bdg { font-size:11.5px; font-weight:700; padding:2px 8px; border-radius:999px; }
+  .bdg.bad { background:var(--bad-bg); color:var(--bad-text); } .bdg.warn { background:var(--warn-bg); color:var(--warn-text); }
+  .bdg.info { background:var(--accent-bg); color:var(--accent); } .bdg.ok { background:var(--ok-bg); color:var(--ok-text); }
+
+  .back { margin-bottom:10px; }
+  .dhead { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; }
+  .dhead .lnbr { font-size:19px; }
+  .evflag { font-size:12.5px; font-weight:600; padding:2px 8px; border-radius:6px; }
+  .evflag.bad { background:var(--bad-bg); color:var(--bad-text); }
+  .evflag.warn { background:var(--warn-bg); color:var(--warn-text); }
+  .exc { font-size:12px; color:var(--text-muted); margin-top:3px; line-height:1.5; }
+  .phs { margin-top:5px; display:flex; gap:6px; flex-wrap:wrap; }
+  .hit { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px; margin-bottom:10px; box-shadow:var(--shadow); }
+  .hit .row { display:flex; gap:14px; flex-wrap:wrap; font-size:13px; color:var(--text-muted); margin:4px 0; }
+  .hit .row b { color:var(--text); }
+  a.map { color:var(--accent); font-weight:600; text-decoration:none; }
+</style>
+</head>
+<body>
+<div class="page" id="app"><div class="empty">Loading…</div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
+<script src="common.js"></script>
+<script>
+  // Thresholds for the attention list (minutes). lm_board takes them as parameters.
+  const IDLE_MIN = 45, DWELL_MIN = 40, WAITING_MIN = 60;
+  const POLL_MS = 60 * 1000, DEBOUNCE_MS = 1000;
+  // Named columns only: lm_loads' claim code, token hash and device are not readable by staff.
+  const LM_COLS = 'load_id,status,claimed_at,claimed_name,shortage_note,delivering_at,completed_at,closed_at,aborted_at,abort_reason,abort_note,created_at';
+
+  const T = { date: jmDate(0), board: [], generated: null, filter: 'all', detailId: null, detail: null, find: null,
+              rt: 'connecting', busy: false, reasons: new Map(), debounce: null };
+  const canAct = () => D.me && (D.me.roles.includes('supervisor') || D.me.roles.includes('manager'));
+  const reasonName = c => T.reasons.get(c) || c || '';
+  const hhmm = iso => iso ? new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '';
+  const minsSince = iso => iso ? Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000)) : null;
+  const ago = iso => { const m = minsSince(iso); return m == null ? '—' : m < 1 ? 'just now' : m < 90 ? m + ' min ago' : stamp(iso); };
+  const mapLink = (lat, lng, label) => `<a class="map" target="_blank" rel="noopener" href="https://www.google.com/maps?q=${encodeURIComponent(lat + ',' + lng)}">📍 ${esc(label)}</a>`;
+
+  // ------------------------------------------------------------------
+  // Data
+  // ------------------------------------------------------------------
+  async function loadBoard() {
+    const { data, error } = await sb.rpc('lm_board', { p_env: D.env, p_date: T.date, p_idle_min: IDLE_MIN, p_dwell_min: DWELL_MIN, p_waiting_min: WAITING_MIN });
+    if (error) throw error;
+    T.board = data.loads || [];
+    T.generated = new Date(data.generated_at);
+    if (!T.reasons.size) {
+      const rc = await sb.from('lm_reason_codes').select('code,label');
+      if (!rc.error) (rc.data || []).forEach(r => T.reasons.set(r.code, r.label));
+    }
+  }
+
+  async function loadDetail(id) {
+    const [ld, lm, ev, st] = await Promise.all([
+      sb.from('loads').select('id,load_nbr,load_date,wave,ship_via,contractor,truck_type,env,status,check_status').eq('id', id).maybeSingle(),
+      sb.from('lm_loads').select(LM_COLS).eq('load_id', id).maybeSingle(),
+      sb.from('lm_events').select('id,stop_id,kind,source,actor_name,server_at,applied,reject_reason,lat,lng,accuracy_m,payload').eq('load_id', id).order('id', { ascending: false }).limit(600),
+      sb.from('lm_stops').select('id,customer_id,customer_name,zone,seq_suggested,seq_final,status,on_the_way_at,arrived_at,completed_at,receiver_name,fail_reason,fail_note').eq('load_id', id).order('seq_final'),
+    ]);
+    for (const r of [ld, lm, ev, st]) if (r.error) throw r.error;
+    if (!ld.data) throw new Error('Load not found');
+    const stopIds = (st.data || []).map(s => s.id);
+    let lines = [], files = [], rets = [];
+    if (stopIds.length) {
+      const [x, y, z] = await Promise.all([
+        sb.from('lm_stop_lines').select('id,stop_id,shipment_nbr,description,uom,expected_qty,delivered_qty,result,reason_code,note').in('stop_id', stopIds).neq('result', 'delivered').order('shipment_nbr').order('line_nbr'),
+        sb.from('lm_files').select('id,stop_id,kind,storage_path,uploaded_at').in('stop_id', stopIds).order('uploaded_at', { nullsFirst: true }),
+        sb.from('lm_returns').select('id,stop_id').eq('load_id', id),
+      ]);
+      for (const r of [x, y, z]) if (r.error) throw r.error;
+      lines = x.data || []; files = y.data || []; rets = z.data || [];
+    }
+    T.detail = { load: ld.data, lm: lm.data, events: ev.data || [], stops: st.data || [], lines, files, rets,
+                 row: T.board.find(b => b.load_id === id) || null };
+  }
+
+  async function refreshAll() {
+    try {
+      await loadBoard();
+      if (T.detailId != null) await loadDetail(T.detailId);
+      render();
+    } catch (e) {
+      console.error('[tower]', e);
+      const m = document.getElementById('main');
+      if (m) m.innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`;
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Board
+  // ------------------------------------------------------------------
+  const STATUS = {
+    no_sheet:   { label: 'Sheet not printed',        pill: 'done', group: 'waiting', rank: 3, cls: '' },
+    ready:      { label: 'Waiting for the driver',   pill: 'info', group: 'waiting', rank: 2, cls: 's-ready' },
+    collected:  { label: 'Collected',                pill: 'warn', group: 'out',     rank: 1, cls: 's-out' },
+    delivering: { label: 'Out for delivery',         pill: 'warn', group: 'out',     rank: 0, cls: 's-out' },
+    completed:  { label: 'Completed',                pill: 'ok',   group: 'done',    rank: 4, cls: 's-done' },
+    closed:     { label: 'Closed',                   pill: 'ok',   group: 'done',    rank: 5, cls: 's-done' },
+  };
+  const stOf = r => STATUS[r.status] || { label: r.status || '?', pill: 'done', group: 'waiting', rank: 9, cls: '' };
+  const worst = r => (r.attention || []).some(a => a.level === 'bad') ? 0 : (r.attention || []).some(a => a.level === 'warn') ? 1 : (r.attention || []).length ? 2 : 3;
+  const FILTERS = [['all', 'All'], ['attention', 'Needs attention'], ['waiting', 'Waiting'], ['out', 'Out on the road'], ['done', 'Done']];
+  const inFilter = r => T.filter === 'all' || (T.filter === 'attention' ? (r.attention || []).length > 0 : stOf(r).group === T.filter);
+
+  function pillFor(r) {
+    const s = stOf(r);
+    return `<span class="pill ${s.pill}">${esc(s.label)}</span>${r.aborted_at ? ' <span class="pill bad">Stopped by driver</span>' : ''}`;
+  }
+
+  function boardCard(r) {
+    const s = stOf(r);
+    const att = r.attention || [];
+    const total = r.stops_total || 0;
+    const w = n => total ? (100 * n / total).toFixed(1) : 0;
+    const cur = r.current_stop;
+    const nowLine = cur ? `<div class="now">${cur.status === 'arrived' ? 'At' : 'On the way to'} <b>${esc(cur.name)}</b> · ${esc(ago(cur.since))}</div>`
+      : r.status === 'delivering' || r.status === 'collected' ? `<div class="now">Between stops${r.next_stop ? ' · next: <b>' + esc(r.next_stop) + '</b>' : ''}</div>` : '';
+    const bad = att.some(a => a.level === 'bad');
+    return `<div class="tcard ${bad ? 's-bad' : s.cls}" data-act="open" data-load="${r.load_id}">
+      <div class="lhead"><div><span class="lnbr">${esc(r.load_nbr)}</span> ${waveTag(r.wave)} ${pillFor(r)}
+        ${r.carried ? `<span class="tag old" title="Not finished on its own day">from ${esc(niceDate(r.load_date))}</span>` : ''}</div></div>
+      <div class="meta"><span><b>${esc(r.trucker || r.ship_via || '—')}</b></span>${r.truck_type ? `<span>${esc(r.truck_type)}</span>` : ''}
+        ${r.claimed_name && r.status !== 'ready' ? `<span>taken ${esc(hhmm(r.claimed_at))}</span>` : ''}</div>
+      ${total ? `<div class="seg3" title="${r.stops_done} of ${total} stops done"><i class="d" style="width:${w(r.stops_delivered)}%"></i><i class="p" style="width:${w(r.stops_partial)}%"></i><i class="f" style="width:${w(r.stops_failed)}%"></i></div>
+        <div class="meta"><span><b>${r.stops_done}</b> of ${total} stops done</span>${r.last_event_at ? `<span>last activity ${esc(ago(r.last_event_at))}</span>` : ''}</div>` : ''}
+      ${nowLine}
+      <div class="badges">
+        ${att.slice(0, 3).map(a => `<span class="bdg ${esc(a.level)}">${esc(a.text.length > 60 ? a.text.slice(0, 58) + '…' : a.text)}</span>`).join('')}
+        ${att.length > 3 ? `<span class="bdg warn">+${att.length - 3} more</span>` : ''}
+        ${r.return_lines ? `<span class="bdg info">${plural(r.return_lines, 'item')} to hand back</span>` : ''}
+      </div></div>`;
+  }
+
+  function attentionStrip(rows) {
+    const items = rows.flatMap(r => (r.attention || []).map(a => ({ r, a }))).sort((x, y) => ({ bad: 0, warn: 1, info: 2 }[x.a.level] - { bad: 0, warn: 1, info: 2 }[y.a.level]));
+    if (!items.length) return '';
+    return `<div class="attn"><h2>Needs attention <span class="muted">${plural(items.length, 'item')}</span></h2>
+      ${items.slice(0, 12).map(({ r, a }) => `<div class="arow ${esc(a.level)}" data-act="open" data-load="${r.load_id}"><b>${esc(r.load_nbr)}</b><span>${esc(r.trucker || '')}</span><span>${esc(a.text)}</span><span class="go">›</span></div>`).join('')}
+      ${items.length > 12 ? `<div class="muted">and ${items.length - 12} more. Open a load to see them all.</div>` : ''}</div>`;
+  }
+
+  function liveBadge() {
+    const t = { live: ['live', 'Live'], connecting: ['', 'Connecting…'], poll: ['poll', 'Refreshing every minute'] }[T.rt] || ['', ''];
+    return `<span class="livedot ${t[0]}" id="live" title="${T.generated ? 'Updated ' + esc(stamp(T.generated.toISOString())) : ''}"><i></i>${t[1]}${T.generated ? ' · ' + esc(hhmm(T.generated.toISOString())) : ''}</span>`;
+  }
+
+  function controls() {
+    return `<div class="dctl">
+      <input type="date" id="day" value="${T.date}">
+      <button class="btn small" data-act="today">Today</button>
+      <span class="muted">${niceDate(T.date)}</span>
+      <input class="txt" id="findq" placeholder="Find an invoice number…" value="${esc(T.find ? T.find.q : '')}" autocomplete="off">
+      <button class="btn small" data-act="find">Find</button>
+      <span class="spacer"></span>
+      ${liveBadge()}
+      <button class="btn small" data-act="refresh">Refresh</button>
+    </div>`;
+  }
+
+  function boardView() {
+    const rows = T.board.slice().sort((a, b) => worst(a) - worst(b) || stOf(a).rank - stOf(b).rank || String(a.load_nbr).localeCompare(String(b.load_nbr)));
+    const shown = rows.filter(inFilter);
+    const count = f => rows.filter(r => f === 'all' ? true : f === 'attention' ? (r.attention || []).length > 0 : stOf(r).group === f).length;
+    return `${findView()}${attentionStrip(rows)}
+      <div class="chips" style="margin-bottom:12px">${FILTERS.map(([k, l]) => `<button class="chip ${T.filter === k ? 'on' : ''}" data-act="filter" data-filter="${k}">${l} ${count(k)}</button>`).join('')}</div>
+      ${shown.length ? `<div class="tgrid">${shown.map(boardCard).join('')}</div>`
+        : `<div class="card"><div class="empty">${rows.length ? 'Nothing matches that filter.' : 'No checker-confirmed loads on this day yet.'}</div></div>`}`;
+  }
+
+  // ------------------------------------------------------------------
+  // Find an invoice
+  // ------------------------------------------------------------------
+  function findView() {
+    if (!T.find) return '';
+    const hits = T.find.hits;
+    return `<div class="attn"><h2>Invoice ${esc(T.find.q)} <button class="btn small" data-act="clearfind">Clear</button></h2>
+      ${hits.length ? hits.map(h => {
+        const s = h.stop || {};
+        return `<div class="hit"><div class="lhead"><div><b>${esc(h.shipment_nbr)}</b>${h.invoice_nbr ? ' · invoice ' + esc(h.invoice_nbr) : ''} · ${esc(s.customer || '')}
+            <span class="pill ${({ delivered: 'ok', partial: 'warn', failed: 'bad' })[s.status] || 'done'}">${esc(({ delivered: 'Delivered', partial: 'Partly delivered', failed: 'Not delivered', pending: 'Waiting', on_the_way: 'On the way', arrived: 'Arrived' })[s.status] || s.status)}</span></div>
+            <button class="btn small" data-act="openhit" data-load="${h.load_id}">Open load</button></div>
+          <div class="row"><span>Load <b>${esc(h.load_nbr)}</b> · ${esc(niceDate(h.load_date))}${h.env === 'test' ? ' · TEST' : ''}</span><span>${esc(h.trucker || h.ship_via || '')}</span>${h.claimed_name ? `<span>driver: <b>${esc(h.claimed_name)}</b></span>` : ''}</div>
+          <div class="row"><span>On the way <b>${esc(hhmm(s.on_the_way_at)) || '—'}</b></span><span>Arrived <b>${esc(hhmm(s.arrived_at)) || '—'}</b></span><span>Finished <b>${esc(hhmm(s.completed_at)) || '—'}</b></span>
+            ${s.receiver_name ? `<span>received by <b>${esc(s.receiver_name)}</b></span>` : '<span>no receiver name</span>'}</div>
+          <div class="row">${h.arrived_at_gps ? mapLink(h.arrived_at_gps.lat, h.arrived_at_gps.lng, 'Where Arrived was pressed') : '<span>no arrival location</span>'}
+            ${h.finished_at_gps ? mapLink(h.finished_at_gps.lat, h.finished_at_gps.lng, 'Where it was finished') : ''}
+            ${h.lines_not_delivered ? `<span class="evflag bad">${plural(h.lines_not_delivered, 'item')} not delivered</span>` : ''}
+            ${s.fail_reason ? `<span class="evflag bad">${esc(reasonName(s.fail_reason))}${s.fail_note ? ' · ' + esc(s.fail_note) : ''}</span>` : ''}</div>
+          <div class="phs">${(h.files || []).length ? h.files.map(f => f.uploaded
+              ? `<button class="btn small" data-act="photo" data-path="${esc(f.storage_path)}">📷 ${esc(KIND_WORD[f.kind] || f.kind)}${f.covers_invoice ? '' : ' (other invoice)'}</button>`
+              : `<span class="evflag warn">📷 ${esc(KIND_WORD[f.kind] || f.kind)} not uploaded yet</span>`).join('') : '<span class="evflag warn">no photos</span>'}</div></div>`;
+      }).join('') : '<div class="card"><div class="empty">No invoice with that number was handled by a driver.</div></div>'}</div>`;
+  }
+
+  async function runFind() {
+    const q = (document.getElementById('findq').value || '').trim();
+    if (!q) { T.find = null; render(); return; }
+    const { data, error } = await sb.rpc('lm_find_invoice', { p_nbr: q });
+    if (error) throw error;
+    T.find = { q, hits: data || [] };
+    if (T.detailId != null) { location.hash = ''; }
+    render();
+  }
+
+  // ------------------------------------------------------------------
+  // Load detail
+  // ------------------------------------------------------------------
+  const KIND_WORD = { pod: 'Signed invoice', damage: 'Damage', abort: 'Photo', shortage: 'Shortage' };
+  const STOP_PILL = { pending: '<span class="pill done">Waiting</span>', on_the_way: '<span class="pill info">On the way</span>', arrived: '<span class="pill warn">Arrived</span>',
+    delivered: '<span class="pill ok">Delivered</span>', partial: '<span class="pill warn">Partial</span>', failed: '<span class="pill bad">Failed</span>' };
+  const EV_LABEL = { ready: 'Sheet issued', claim: 'Claimed', rescan: 'Rescanned', shortage: 'Driver says something is missing', unassign: 'Unassigned', close: 'Closed',
+    seq_edit: 'Changed the stop order', on_the_way: 'On the way', cancel_on_the_way: 'Cancelled On the way', arrived: 'Arrived', complete: 'Finished the stop',
+    file: 'Photo added', abort_stop: "Couldn't deliver", abort_load: 'Stopped the load' };
+  const OUTCOME = { delivered: 'delivered in full', partial: 'partly delivered', failed: 'nothing delivered' };
+  const FLAG = { no_photo: 'no photo', no_receiver: 'no receiver name' };
+
+  function stopName(d, id) { const s = d.stops.find(x => x.id === id); return s ? (s.customer_name || s.customer_id) : ''; }
+  function evDetail(d, e) {
+    const p = e.payload || {};
+    if (e.applied === false) return `<span class="evflag bad">refused: ${esc(e.reject_reason || '')}</span> ${esc(stopName(d, e.stop_id))}`;
+    if (['on_the_way', 'arrived', 'complete', 'cancel_on_the_way'].includes(e.kind)) {
+      return `${esc(stopName(d, e.stop_id))}${p.outcome ? ' · ' + esc(OUTCOME[p.outcome] || p.outcome) : ''}${p.out_of_order ? ' <span class="evflag warn">not the next stop</span>' : ''}${p.gps === 'missing' ? ' <span class="evflag warn">no location</span>' : ''}${(p.flags || []).map(f => ` <span class="evflag bad">${esc(FLAG[f] || f)}</span>`).join('')}${p.receiver_name ? ' · received by ' + esc(p.receiver_name) : ''}`;
+    }
+    if (e.kind === 'abort_stop') return `${esc(stopName(d, e.stop_id))} · ${esc(reasonName(p.reason_code))}${p.note ? ' · ' + esc(p.note) : ''}`;
+    if (e.kind === 'abort_load') return `${esc(reasonName(p.reason_code))}${p.note ? ' · ' + esc(p.note) : ''}${p.stops_closed != null ? ' · ' + plural(p.stops_closed, 'open stop') + ' closed' : ''}`;
+    if (e.kind === 'file') return `${esc(stopName(d, e.stop_id))} · ${esc({ pod: 'signed invoice', damage: 'damage', abort: "couldn't deliver", shortage: 'shortage' }[p.kind] || p.kind || '')}`;
+    if (e.kind === 'seq_edit') return p.changed === false ? 'same order' : 'driver put the stops in a different order';
+    if (e.kind === 'claim') return `${esc(p.name || '')}${p.soft_mismatch ? ' · phone last ran ' + esc(p.previous_trucker || 'another trucker') + ', driver confirmed' : ''}`;
+    if (e.kind === 'rescan') return `${esc(p.name || '')}${p.took_over ? ' · moved from another phone' : ' · same phone'}`;
+    if (e.kind === 'shortage') return esc(p.note || '');
+    if (e.kind === 'unassign') return `${esc(p.reason || '')}${p.previous_name ? ' · was ' + esc(p.previous_name) : ''}`;
+    if (e.kind === 'close') return `${esc(p.note || '')}${p.photos_not_uploaded ? ' · ' + plural(p.photos_not_uploaded, 'photo') + ' not uploaded' : ''}`;
+    return '';
+  }
+
+  function stopRow(d, s) {
+    const exc = d.lines.filter(x => x.stop_id === s.id);
+    const files = d.files.filter(f => f.stop_id === s.id);
+    const done = ['delivered', 'partial', 'failed'].includes(s.status);
+    const arr = d.events.find(e => e.stop_id === s.id && e.kind === 'arrived' && e.applied && e.lat != null);
+    const fin = d.events.find(e => e.stop_id === s.id && ['complete', 'abort_stop'].includes(e.kind) && e.applied);
+    const flags = fin && fin.payload && fin.payload.flags || [];
+    const dwell = s.arrived_at && s.completed_at ? Math.max(0, Math.round((new Date(s.completed_at) - new Date(s.arrived_at)) / 60000)) : (s.status === 'arrived' ? minsSince(s.arrived_at) : null);
+    const extra = [];
+    if (s.status === 'failed' && s.fail_reason) extra.push(`<div><span class="evflag bad">Not delivered: ${esc(reasonName(s.fail_reason))}</span>${s.fail_note ? ' ' + esc(s.fail_note) : ''}</div>`);
+    if (s.status === 'partial' && s.fail_reason) extra.push(`<div><span class="evflag warn">Load stopped: ${esc(reasonName(s.fail_reason))}</span></div>`);
+    if (exc.length && s.status !== 'failed') extra.push(`<div class="exc">${exc.map(x => `<div>${esc(x.description || '')}: <b>${esc(x.result || 'not delivered')}</b>, ${esc(String(Number(x.delivered_qty || 0)))} of ${esc(String(Number(x.expected_qty)))}${x.uom ? ' ' + esc(x.uom) : ''}${x.reason_code ? ' · ' + esc(reasonName(x.reason_code)) : ''}${x.note ? ' · ' + esc(x.note) : ''}</div>`).join('')}</div>`);
+    if (done && flags.length) extra.push(`<div>${flags.map(f => `<span class="evflag bad">${esc(FLAG[f] || f)}</span>`).join(' ')}</div>`);
+    if (files.length) extra.push(`<div class="phs">${files.map(f => f.uploaded_at
+      ? `<button class="btn small" data-act="photo" data-path="${esc(f.storage_path)}">📷 ${esc(KIND_WORD[f.kind] || f.kind)}</button>`
+      : `<span class="evflag warn">📷 ${esc(KIND_WORD[f.kind] || f.kind)} not uploaded yet</span>`).join(' ')}</div>`);
+    return `<tr><td class="num">${s.seq_final}${s.seq_final !== s.seq_suggested ? ` <span class="muted">(was ${s.seq_suggested})</span>` : ''}</td>
+      <td>${esc(s.customer_name || s.customer_id)}${s.receiver_name ? `<div class="muted">received by ${esc(s.receiver_name)}</div>` : ''}${extra.join('')}</td>
+      <td>${STOP_PILL[s.status] || esc(s.status)}</td><td class="num">${esc(hhmm(s.on_the_way_at))}</td><td class="num">${esc(hhmm(s.arrived_at))}</td>
+      <td class="num">${esc(hhmm(s.completed_at))}</td><td class="num">${dwell == null ? '' : dwell + ' min'}</td>
+      <td>${arr ? mapLink(arr.lat, arr.lng, 'Arrived') : ''}</td></tr>`;
+  }
+
+  function detailView() {
+    const d = T.detail;
+    if (!d) return '<div class="empty">Loading…</div>';
+    const l = d.load, m = d.lm, row = d.row;
+    const status = !m ? 'no_sheet' : m.status;
+    const s = STATUS[status] || { label: status, pill: 'done' };
+    // the load's current round: nothing from before its sheet was made
+    const evs = d.events.filter(e => e.kind !== 'line_set' && (!m || new Date(e.server_at) >= new Date(m.created_at)));
+    const claimed = m && ['collected', 'delivering'].includes(m.status);
+    const done = d.stops.filter(x => ['delivered', 'partial', 'failed'].includes(x.status)).length;
+    const changed = d.stops.some(x => x.seq_final !== x.seq_suggested);
+    const att = row ? row.attention || [] : [];
+    const retLines = row ? row.return_lines : 0;
+    return `<button class="btn link back" data-act="back">‹ Back to the board</button>
+      <div class="card" style="padding:14px 16px;margin-bottom:12px">
+        <div class="dhead"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${waveTag(l.wave)} <span class="pill ${s.pill}">${esc(s.label)}</span>
+            ${m && m.aborted_at ? '<span class="pill bad">Stopped by driver</span>' : ''}${l.env === 'test' ? ' <span class="tag">TEST</span>' : ''}
+            <div class="lstats"><span><b>${esc(l.ship_via || '—')}</b>${l.contractor ? ' · ' + esc(l.contractor) : ''}</span>${l.truck_type ? `<span>${esc(l.truck_type)}</span>` : ''}<span>${esc(niceDate(l.load_date))}</span></div>
+            ${m && m.claimed_at ? `<div class="muted">Taken by <b>${esc(m.claimed_name || '')}</b> at ${esc(stamp(m.claimed_at))}${m.completed_at ? ' · finished ' + esc(stamp(m.completed_at)) : ''}${m.closed_at ? ' · closed ' + esc(stamp(m.closed_at)) : ''}</div>` : ''}</div>
+          <div class="lactions" style="margin:0">
+            <button class="btn small" data-act="printsheet">${m ? 'Reprint load sheet' : 'Print load sheet'}</button>
+            ${claimed && canAct() ? '<button class="btn small danger" data-act="unassign">Unassign</button>' : ''}
+            ${m && m.status === 'completed' && canAct() ? '<button class="btn small primary" data-act="closeload">Close load</button>' : ''}
+          </div></div>
+        ${att.length ? att.map(a => `<div class="warnbox ${a.level === 'bad' ? 'bad' : a.level === 'info' ? 'info' : ''}">${esc(a.text)}</div>`).join('') : ''}
+        ${retLines ? `<div class="warnbox info">${plural(retLines, 'item')} to hand back across ${plural(row.return_sheets, 'stop')}. <a href="returns.html?date=${esc(l.load_date)}">Open the return sheet</a>.</div>` : ''}
+      </div>
+      <div class="sec-h">Stops <span class="muted">${done} of ${d.stops.length} done${changed ? ' · the driver changed the order' : ''}</span></div>
+      <div class="card">${d.stops.length ? `<table class="ships"><thead><tr><th>#</th><th>Customer</th><th>Status</th><th>On the way</th><th>Arrived</th><th>Done</th><th>At stop</th><th></th></tr></thead>
+        <tbody>${d.stops.map(x => stopRow(d, x)).join('')}</tbody></table>` : '<div class="empty">No stops yet. They appear when the driver takes the load.</div>'}</div>
+      <div class="sec-h" style="margin-top:14px">History <span class="muted">${evs.length} events</span></div>
+      <div class="card" style="padding:4px 14px 10px">${evs.length ? `<ul class="evs" style="max-height:none">${evs.map(e =>
+        `<li><b>${esc(EV_LABEL[e.kind] || e.kind)}</b>${evDetail(d, e) ? ' — ' + evDetail(d, e) : ''}<span style="float:right">${esc(e.actor_name || '')}${e.actor_name ? ', ' : ''}${esc(stamp(e.server_at))}</span></li>`).join('')}</ul>` : '<div class="empty">Nothing yet.</div>'}</div>`;
+  }
+
+  // ------------------------------------------------------------------
+  // Render and routing
+  // ------------------------------------------------------------------
+  function render() {
+    const main = document.getElementById('main');
+    if (!main) return;
+    const typing = document.activeElement && document.activeElement.id === 'findq';
+    const keepQ = typing ? document.activeElement.value : null;
+    main.innerHTML = (T.detailId != null ? '' : controls()) + (T.detailId != null ? detailView() : boardView());
+    if (keepQ != null) { const f = document.getElementById('findq'); if (f) { f.value = keepQ; f.focus(); } }
+  }
+
+  async function route() {
+    const m = /^#load=(\d+)$/.exec(location.hash);
+    T.detailId = m ? Number(m[1]) : null;
+    T.detail = null;
+    if (T.detailId != null) { render(); try { await loadDetail(T.detailId); } catch (e) { toast(errMsg(e), true); location.hash = ''; return; } }
+    render();
+    window.scrollTo(0, 0);
+  }
+
+  async function act(fn) {
+    if (T.busy) return;
+    T.busy = true;
+    try { await fn(); }
+    catch (e) { console.error('[tower]', e); toast(errMsg(e), true); }
+    finally { T.busy = false; await refreshAll(); }
+  }
+  async function openPhoto(path) {
+    const { data, error } = await sb.storage.from('lm-pod').createSignedUrl(path, 300);
+    if (error) throw error;
+    window.open(data.signedUrl, '_blank', 'noopener');
+  }
+
+  document.getElementById('app').addEventListener('click', e => {
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    const id = b.dataset.load ? Number(b.dataset.load) : T.detailId;
+    switch (b.dataset.act) {
+      case 'open': case 'openhit': location.hash = '#load=' + id; break;
+      case 'back': location.hash = ''; break;
+      case 'refresh': refreshAll(); break;
+      case 'today': T.date = jmDate(0); refreshAll(); break;
+      case 'filter': T.filter = b.dataset.filter; render(); break;
+      case 'find': runFind().catch(err => toast(errMsg(err), true)); break;
+      case 'clearfind': T.find = null; render(); break;
+      case 'photo': e.stopPropagation(); openPhoto(b.dataset.path).catch(err => toast(errMsg(err), true)); break;
+      case 'printsheet': window.open('loadsheet.html?print=' + id, '_blank'); break;
+      case 'closeload': {
+        const l = T.detail.load;
+        if (!confirm(`Close ${l.load_nbr}?\n\nThe driver's phone is released and no more photos are accepted for this load.`)) break;
+        act(async () => {
+          let r = await sb.rpc('lm_close_load', { p_load_id: id });
+          if (r.error && r.error.code === 'LM409') {
+            if (!confirm(`${r.error.message}\n\nClose it anyway?`)) return;
+            r = await sb.rpc('lm_close_load', { p_load_id: id, p_force: true });
+          }
+          if (r.error) throw r.error;
+          toast('Load closed');
+        });
+        break;
+      }
+      case 'unassign': {
+        const l = T.detail.load, m = T.detail.lm;
+        const why = prompt(`Unassign ${l.load_nbr} from ${m && m.claimed_name ? m.claimed_name : 'the driver'}?\n\nThe driver's phone goes back to the scan screen so they can scan the right load.\nWhy is it being unassigned?`);
+        if (why == null) break;
+        if (!why.trim()) { toast('Say why it is being unassigned', true); break; }
+        act(async () => { const { error } = await sb.rpc('lm_unassign', { p_load_id: id, p_reason: why.trim() }); if (error) throw error; toast('Unassigned'); });
+        break;
+      }
+    }
+  });
+  document.getElementById('app').addEventListener('change', e => {
+    if (e.target.id === 'day' && e.target.value) { T.date = e.target.value; refreshAll(); }
+  });
+  document.getElementById('app').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target.id === 'findq') { e.preventDefault(); runFind().catch(err => toast(errMsg(err), true)); }
+  });
+  window.addEventListener('hashchange', route);
+
+  // ------------------------------------------------------------------
+  // Live updates: new lm_events rows, plus a slow poll as the safety net
+  // ------------------------------------------------------------------
+  function onEvent(ev) {
+    clearTimeout(T.debounce);
+    T.debounce = setTimeout(() => { if (!T.busy) refreshAll(); }, DEBOUNCE_MS);
+  }
+  function startLive() {
+    try {
+      sb.channel('lm-tower')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'lm_events' }, payload => onEvent(payload.new))
+        .subscribe(status => {
+          T.rt = status === 'SUBSCRIBED' ? 'live' : status === 'CONNECTING' ? 'connecting' : 'poll';
+          const el = document.getElementById('live');
+          if (el) el.outerHTML = liveBadge();
+        });
+    } catch (e) { T.rt = 'poll'; }
+    setInterval(() => { if (document.visibilityState === 'visible' && !T.busy) refreshAll(); }, POLL_MS);
+  }
+
+  startPage({
+    page: 'tower', role: ['batcher', 'clerk', 'supervisor', 'manager'], title: 'Control Tower',
+    onEnvChange: () => { T.find = null; refreshAll(); },
+    onReady: async () => { await loadBoard().catch(e => { document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`; }); await route(); startLive(); },
+  });
+</script>
+</body>
+</html>

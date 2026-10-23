@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f2044">
+<meta name="robots" content="noindex, nofollow">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="DFL Driver">
+<title>DFL Driver</title>
+<!--
+  OMS driver app (last mile). A separate phone-first PWA with no navigation and no
+  accounts. The driver scans the QR code on the printed load sheet (or types the
+  8-character code), checks the load details, and takes responsibility for it.
+  After that the app shows only that load until the office closes it.
+
+  Step 2 of the build: scan, review, claim, rescan to resume, and the read-only load.
+  The route editing and the On the way / Arrived / Complete buttons come next.
+
+  Everything goes through the lm_* database functions (see supabase/migrations/
+  20261022200000_lm_core.sql and 20261022210000_lm_claim.sql). The phone keeps a
+  device id and the load token in localStorage; the token works for one load only.
+-->
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="driver.css">
+</head>
+<body>
+<header class="top">
+  <img src="../assets/dfl-logo-white.png" alt="DFL Importers">
+  <span class="app">Driver</span>
+  <span class="net" id="net" hidden>No signal</span>
+</header>
+<main id="app"><p class="lead">Loading…</p></main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js" integrity="sha384-b5Ya4Bq3qCyz39m2ISh+4DxjAIljdeFwK/BsXLuj9gugaNwAcj/ia15fxNZL9Nlx" crossorigin="anonymous"></script>
+<script src="app.js"></script>
+</body>
+</html>

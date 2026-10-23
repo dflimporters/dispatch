@@ -1,0 +1,17 @@
+/* Design tokens for the OMS driver app.
+   Same values as the :root block in ../common.css, kept in their own file so the
+   driver app and the later portal restructure can share one source. common.css is
+   not changed yet; when the portal is restructured, both should import this. */
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+:root {
+  --bg:#f0f4f8; --surface:#ffffff; --border:#e2e8f0; --border2:#cbd5e1;
+  --navy:#0f2044; --navy2:#1a3260; --gold:#F5A623;
+  --shadow:0 1px 3px rgba(0,0,0,.07), 0 2px 8px rgba(15,32,68,.04);
+  --text:#1e293b; --text-muted:#64748b; --text-dim:#94a3b8;
+  --accent:#2563eb; --accent-bg:#eff6ff;
+  --ok:#0f9f6e; --ok-bg:#ecfdf5; --ok-text:#047857;
+  --warn:#f59e0b; --warn-bg:#fffbeb; --warn-text:#b45309;
+  --bad:#dc2626; --bad-bg:#fef2f2; --bad-text:#b91c1c;
+  --font-body:'Inter', system-ui, sans-serif;
+  --font-head:'Montserrat', 'Inter', system-ui, sans-serif;
+}

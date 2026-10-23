@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f2044">
+<meta name="robots" content="noindex, nofollow">
+<title>Load Sheets — Logistics Management System</title>
+<!--
+  Load sheets (OMS last mile): the print station. For each load the checker has confirmed:
+
+    Print load sheet   issues the load's claim code (lm_sheet -> lm_ensure_load) and prints a
+                       laser sheet with a QR code and the same code in text. The driver scans
+                       the QR (or types the code) in the driver app.
+
+  Where the load is, who has it, the stops, exceptions, photos, unassign and close all live in
+  Control Tower (tower.html); each load here links to it. Control Tower's "Print load sheet"
+  opens this page as loadsheet.html?print=ID, which prints that load straight away.
+-->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="common.css">
+<style>
+  .dctl { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:14px; }
+
+  /* The printed sheet: hidden on screen, the only thing shown when printing. */
+  #sheetwrap { display:none; }
+  .sheet { font-family:'Inter',Arial,sans-serif; color:#000; max-width:190mm; margin:0 auto; padding:0; }
+  .sheet .sh { display:flex; justify-content:space-between; align-items:flex-start; border-bottom:3px solid #000; padding-bottom:8px; margin-bottom:12px; gap:16px; }
+  .sheet .sh img { height:46px; }
+  .sheet .sh .t { font-size:13px; font-weight:800; letter-spacing:1.5px; text-transform:uppercase; text-align:right; }
+  .sheet .sh .t b { display:block; font-size:26px; letter-spacing:0; margin-top:2px; font-family:ui-monospace,Consolas,monospace; }
+  .sheet .top { display:flex; gap:20px; align-items:center; margin-bottom:14px; }
+  .sheet .qr { width:52mm; height:52mm; flex:none; }
+  .sheet .qr svg { width:100%; height:100%; display:block; }
+  .sheet .big { flex:1; }
+  .sheet .big .l { font-size:11px; font-weight:700; letter-spacing:1px; text-transform:uppercase; color:#444; }
+  .sheet .big .code { font-family:ui-monospace,Consolas,monospace; font-size:34px; font-weight:800; letter-spacing:3px; margin:2px 0 6px; }
+  .sheet .big .who { font-size:19px; font-weight:800; }
+  .sheet .big .sub { font-size:13px; color:#333; margin-top:2px; }
+  .sheet .how { border:1.5px solid #000; border-radius:6px; padding:7px 10px; font-size:12.5px; margin-bottom:12px; }
+  .sheet table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  .sheet th { text-align:left; font-size:10.5px; letter-spacing:.6px; text-transform:uppercase; border-bottom:2px solid #000; padding:4px 5px; }
+  .sheet td { border-bottom:1px solid #999; padding:5px; vertical-align:top; }
+  .sheet td.n { width:8mm; font-weight:800; }
+  .sheet .foot { margin-top:10px; font-size:11px; color:#444; display:flex; justify-content:space-between; }
+  @media print {
+    @page { margin:12mm; }
+    body { background:#fff; }
+    #chrome, #app, .toast { display:none !important; }
+    #sheetwrap { display:block !important; }
+  }
+</style>
+</head>
+<body>
+<div class="page" id="app"><div class="empty">Loading…</div></div>
+<div id="sheetwrap"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js" integrity="sha384-mZT2gIty7ZDdOGkxfP6joZcYdMW1Jvj9dRlfpTmaJAKKXTqzygtB22k7FLe+KZC1" crossorigin="anonymous"></script>
+<script src="common.js"></script>
+<script>
+  const L = { date: jmDate(0), loads: [], pending: 0, lm: new Map(), busy: false, autoPrint: null };
+  try { const p = Number(new URLSearchParams(location.search).get('print')); if (p) L.autoPrint = p; } catch (e) {}
+  const LM_COLS = 'load_id,status,claimed_name,aborted_at';
+
+  async function loadAll() {
+    // A load opened with ?print=ID may be from another day: find its date first.
+    if (L.autoPrint) {
+      const one = await sb.from('loads').select('load_date,env').eq('id', L.autoPrint).maybeSingle();
+      if (one.data) { L.date = one.data.load_date; if (one.data.env !== D.env) { setEnv(one.data.env); renderEnvBar(() => refresh()); } }
+    }
+    const { data: loads, error } = await sb.from('loads')
+      .select('id,load_nbr,load_date,wave,seq,truck_type,ship_via,contractor,status,check_status')
+      .eq('env', D.env).eq('load_date', L.date).in('status', ['done', 'partial']).order('wave').order('seq');
+    if (error) throw error;
+    const all = loads || [];
+    L.loads = all.filter(l => l.check_status === 'confirmed');
+    L.pending = all.length - L.loads.length;
+    L.lm = new Map();
+    const ids = L.loads.map(l => l.id);
+    if (!ids.length) return;
+    const lm = await sb.from('lm_loads').select(LM_COLS).in('load_id', ids);
+    if (lm.error) throw lm.error;
+    (lm.data || []).forEach(r => L.lm.set(r.load_id, r));
+  }
+
+  function stateOf(l) {
+    const m = L.lm.get(l.id);
+    if (!m) return { pill: '<span class="pill done">Sheet not printed yet</span>', cls: 'st-draft' };
+    const by = m.claimed_name ? ` · ${esc(m.claimed_name)}` : '';
+    return {
+      ready:      { pill: '<span class="pill info">Waiting for the driver to scan</span>', cls: 'st-ready' },
+      collected:  { pill: `<span class="pill warn">Collected${by}</span>`, cls: 'st-confirmed' },
+      delivering: { pill: `<span class="pill warn">Out for delivery${by}</span>`, cls: 'st-confirmed' },
+      completed:  { pill: '<span class="pill ok">Completed</span>', cls: 'st-done' },
+      closed:     { pill: '<span class="pill ok">Closed</span>', cls: 'st-done' },
+    }[m.status] || { pill: esc(m.status), cls: '' };
+  }
+
+  function card(l) {
+    const m = L.lm.get(l.id);
+    const st = stateOf(l);
+    return `<div class="lcard ${st.cls}" data-load="${l.id}">
+      <div class="lhead"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${waveTag(l.wave)} ${st.pill}
+          ${m && m.aborted_at ? '<span class="pill bad">Stopped by driver</span>' : ''}</div>
+        <div class="lactions" style="margin:0">
+          <a class="btn small" href="tower.html#load=${l.id}">Open in Control Tower</a>
+          <button class="btn small primary" data-act="print">${m ? 'Reprint load sheet' : 'Print load sheet'}</button>
+        </div></div>
+      <div class="lstats"><span><b>${esc(l.ship_via || '—')}</b>${l.contractor ? ' · ' + esc(l.contractor) : ''}</span>${l.truck_type ? `<span>${esc(l.truck_type)}</span>` : ''}</div>
+    </div>`;
+  }
+
+  function render() {
+    document.getElementById('main').innerHTML = `
+      <div class="dctl">
+        <input type="date" id="day" value="${L.date}">
+        <button class="btn small" data-act="today">Today</button>
+        <span class="muted">${niceDate(L.date)}</span>
+        <span class="spacer"></span>
+        <a class="btn small" href="tower.html">Control Tower</a>
+        <button class="btn small" data-act="refresh">Refresh</button>
+      </div>
+      ${L.pending ? `<div class="warnbox info">${plural(L.pending, 'load')} on this day ${L.pending === 1 ? "isn't" : "aren't"} confirmed by the checker yet, so ${L.pending === 1 ? 'it has' : 'they have'} no load sheet.</div>` : ''}
+      ${L.loads.length ? L.loads.map(card).join('') : '<div class="card"><div class="empty">No checker-confirmed loads on this day yet.</div></div>'}`;
+  }
+
+  // Printed sheet --------------------------------------------------
+  function prettyCode(c) { return c.slice(0, 4) + '-' + c.slice(4); }
+  function qrSvg(text) {
+    const qr = qrcode(0, 'M');
+    qr.addData(text);
+    qr.make();
+    const n = qr.getModuleCount(), cell = 4, size = n * cell;
+    let rects = '';
+    for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) rects += `<rect x="${c * cell}" y="${r * cell}" width="${cell}" height="${cell}"/>`;
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-8 -8 ${size + 16} ${size + 16}" shape-rendering="crispEdges"><rect x="-8" y="-8" width="${size + 16}" height="${size + 16}" fill="#fff"/><g fill="#000">${rects}</g></svg>`;
+  }
+  function sheetHtml(s) {
+    const link = new URL('driver/?c=' + s.code, location.href).href;
+    const stops = s.stops || [];
+    return `<div class="sheet">
+      <div class="sh"><img src="assets/dfl-logo-color.png" alt="DFL Importers"><div class="t">Load sheet<b>${esc(s.load_nbr)}</b></div></div>
+      <div class="top">
+        <div class="qr">${qrSvg(link)}</div>
+        <div class="big">
+          <div class="l">Load code</div>
+          <div class="code">${esc(prettyCode(s.code))}</div>
+          <div class="who">${esc(s.trucker || s.ship_via || '')}</div>
+          <div class="sub">${esc(s.ship_via || '')}${s.truck_type ? ' · ' + esc(s.truck_type) : ''}</div>
+          <div class="sub">${esc(niceDate(s.load_date))}${s.wave && s.wave !== 'ACU' ? ' · ' + esc(s.wave) : ''} · ${plural(stops.length, 'stop')} · ${fmt(s.units)} items</div>
+        </div>
+      </div>
+      <div class="how"><b>Driver:</b> open the DFL Driver app and scan this QR code, or type the code above. Check the load number and your name on the screen before you take responsibility for the load.</div>
+      <table><thead><tr><th>#</th><th>Customer</th><th>Area</th><th>Invoices</th></tr></thead><tbody>
+        ${stops.map(x => `<tr><td class="n">${x.seq}</td><td>${esc(x.customer_name || x.customer_id)}</td><td>${esc(x.zone || x.city || '')}</td><td>${esc((x.shipments || []).join(', '))}</td></tr>`).join('')}
+      </tbody></table>
+      <div class="foot"><span>Suggested order. The driver may change it in the app.</span><span>Printed ${esc(stamp(new Date().toISOString()))}</span></div>
+    </div>`;
+  }
+
+  async function printSheet(id) {
+    const { data, error } = await sb.rpc('lm_sheet', { p_load_id: id });
+    if (error) throw error;
+    document.getElementById('sheetwrap').innerHTML = sheetHtml(data);
+    await new Promise(r => setTimeout(r, 150));
+    window.print();
+  }
+
+  async function act(fn) {
+    if (L.busy) return;
+    L.busy = true;
+    try { await fn(); }
+    catch (e) { console.error('[loadsheet]', e); toast(errMsg(e), true); }
+    finally { L.busy = false; await refresh(); }
+  }
+
+  document.getElementById('app').addEventListener('click', e => {
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    const card = b.closest('[data-load]');
+    const id = card ? Number(card.dataset.load) : null;
+    switch (b.dataset.act) {
+      case 'refresh': refresh(); break;
+      case 'today': L.date = jmDate(0); refresh(); break;
+      case 'print': act(() => printSheet(id)); break;
+    }
+  });
+  document.getElementById('app').addEventListener('change', e => {
+    if (e.target.id === 'day' && e.target.value) { L.date = e.target.value; refresh(); }
+  });
+
+  async function refresh() {
+    try { await loadAll(); render(); }
+    catch (e) { console.error('[loadsheet]', e); document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`; }
+  }
+
+  startPage({
+    page: 'loadsheet', role: ['batcher', 'clerk', 'supervisor', 'manager'], title: 'Load sheets',
+    onEnvChange: () => { L.autoPrint = null; refresh(); },
+    onReady: async () => {
+      await refresh();
+      if (L.autoPrint) {                           // opened from Control Tower: print that load now
+        const id = L.autoPrint; L.autoPrint = null;
+        history.replaceState(null, '', location.pathname);
+        act(() => printSheet(id));
+      }
+      setInterval(() => { if (!L.busy && document.visibilityState === 'visible') refresh(); }, 30 * 1000);
+    },
+  });
+</script>
+</body>
+</html>
