@@ -96,6 +96,7 @@ function waveTag(w, title) {
 // Extra tags for loads that didn't come from the clerk, or are left over from an earlier day.
 function loadOriginTags(l) {
   return (l.source === 'acumatica' ? '<span class="tag" title="The Ship Via was set directly in Acumatica">From Acumatica</span> ' : '') +
+    (l.source === 'invoice' ? '<span class="tag" title="Built from invoices; picked outside the portal">Picked outside portal</span> ' : '') +
     (l.carried ? `<span class="tag old" title="Not finished on its own day">Carried over from ${esc(niceDate(l.load_date))}</span> ` : '');
 }
 // AM / PM buttons for an auto-load that hasn't been given a wave (or got the wrong one).

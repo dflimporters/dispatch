@@ -111,6 +111,63 @@
     </div>`;
   }
 
+  // Picked outside the portal: search one invoice, get the run's sister invoices, build the load.
+  const F = { q: '', res: null, sel: new Set() };
+
+  function finderHtml() {
+    if (D.env !== 'live') return '';                 // invoices exist for the live tenant only
+    const r = F.res;
+    let body = '';
+    if (r && !r.found) {
+      body = `<div class="warnbox info">No invoice or shipment ${esc(r.nbr)} found.</div>`;
+    } else if (r) {
+      const rows = (r.shipments || []).map(s => `<tr>
+          <td><input type="checkbox" data-pick="${esc(s.shipment_nbr)}" ${s.blocked ? 'disabled' : ''} ${F.sel.has(s.shipment_nbr) ? 'checked' : ''}></td>
+          <td>${esc(s.customer_name || s.customer_id || '')}</td>
+          <td class="mono">${esc(s.shipment_nbr)}</td>
+          <td class="mono">${esc((s.invoice_nbrs || []).join(', '))}</td>
+          <td>${fmt(s.units)} items</td>
+          <td>${s.blocked ? `<span class="pill bad">${esc(s.blocked)}</span>` : '<span class="pill ok">Ready</span>'}</td></tr>`).join('');
+      body = `<div class="muted" style="margin:8px 0">${esc(r.trucker || r.ship_via)} · ${esc(r.ship_via)} · invoices dated ${esc(niceDate(r.invoice_date))}</div>
+        ${rows ? `<table class="sheettbl" style="width:100%"><thead><tr><th></th><th>Customer</th><th>Shipment</th><th>Invoice</th><th>Qty</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+               : '<div class="empty">No shipments found for these invoices.</div>'}
+        <div class="lactions" style="margin-top:10px">
+          <button class="btn small primary" data-act="build" ${F.sel.size ? '' : 'disabled'}>Create load and print sheet (${F.sel.size})</button>
+          <button class="btn small" data-act="clearfind">Clear</button>
+        </div>`;
+    }
+    return `<div class="card" id="finder" style="padding:12px 14px;margin-bottom:14px">
+      <div class="dctl" style="margin:0">
+        <b>Picked outside the portal?</b>
+        <input type="search" id="invq" placeholder="Invoice or shipment number" value="${esc(F.q)}" autocomplete="off" style="min-width:230px">
+        <button class="btn small" data-act="find">Find the run</button>
+      </div>
+      <div class="muted" style="margin-top:4px">Finds the other open invoices on the same Ship Via and date, so you can print one load sheet for the whole run.</div>
+      ${body}</div>`;
+  }
+
+  async function findRun() {
+    const q = (document.getElementById('invq')?.value || '').trim();
+    F.q = q; F.res = null; F.sel = new Set();
+    if (!q) return;
+    const { data, error } = await sb.rpc('lm_invoice_search', { p_nbr: q });
+    if (error) throw error;
+    F.res = data;
+    (data.shipments || []).forEach(s => { if (!s.blocked) F.sel.add(s.shipment_nbr); });
+  }
+
+  async function buildRun() {
+    const n = F.sel.size;
+    if (!F.res || !n) return;
+    if (!confirm(`Create a load for ${n} shipment${n === 1 ? '' : 's'} on ${F.res.ship_via} and print its sheet?`)) return;
+    const { data, error } = await sb.rpc('lm_build_invoice_load', { p_ship_via: F.res.ship_via, p_shipments: [...F.sel] });
+    if (error) throw error;
+    F.q = ''; F.res = null; F.sel = new Set();
+    L.date = jmDate(0);
+    toast(`Created ${data.load_nbr}`);
+    await printSheet(data.load_id);
+  }
+
   function render() {
     document.getElementById('main').innerHTML = `
       <div class="dctl">
@@ -121,6 +178,7 @@
         <a class="btn small" href="tower.html">Control Tower</a>
         <button class="btn small" data-act="refresh">Refresh</button>
       </div>
+      ${finderHtml()}
       ${L.pending ? `<div class="warnbox info">${plural(L.pending, 'load')} on this day ${L.pending === 1 ? "isn't" : "aren't"} confirmed by the checker yet, so ${L.pending === 1 ? 'it has' : 'they have'} no load sheet.</div>` : ''}
       ${L.loads.length ? L.loads.map(card).join('') : '<div class="card"><div class="empty">No checker-confirmed loads on this day yet.</div></div>'}`;
   }
@@ -184,10 +242,20 @@
       case 'refresh': refresh(); break;
       case 'today': L.date = jmDate(0); refresh(); break;
       case 'print': act(() => printSheet(id)); break;
+      case 'find': act(findRun); break;
+      case 'build': act(buildRun); break;
+      case 'clearfind': F.q = ''; F.res = null; F.sel = new Set(); render(); break;
     }
   });
   document.getElementById('app').addEventListener('change', e => {
     if (e.target.id === 'day' && e.target.value) { L.date = e.target.value; refresh(); }
+    if (e.target.dataset && e.target.dataset.pick) {
+      e.target.checked ? F.sel.add(e.target.dataset.pick) : F.sel.delete(e.target.dataset.pick);
+      render();
+    }
+  });
+  document.getElementById('app').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target.id === 'invq') act(findRun);
   });
 
   async function refresh() {
@@ -205,7 +273,10 @@
         history.replaceState(null, '', location.pathname);
         act(() => printSheet(id));
       }
-      setInterval(() => { if (!L.busy && document.visibilityState === 'visible') refresh(); }, 30 * 1000);
+      setInterval(() => {                           // don't redraw under someone who is searching or ticking
+        const typing = document.activeElement && document.activeElement.id === 'invq';
+        if (!L.busy && !F.res && !typing && document.visibilityState === 'visible') refresh();
+      }, 30 * 1000);
     },
   });
 </script>
