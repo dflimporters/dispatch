@@ -69,7 +69,7 @@ function fmt(n) { return Math.round(Number(n) || 0).toLocaleString('en-US'); }
 function num(n) { n = Number(n) || 0; return Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100); }
 function plural(n, w) { return `${n} ${w}${n === 1 ? '' : 's'}`; }
 const el = id => document.getElementById(id);
-function show(html) { el('app').innerHTML = html; window.scrollTo(0, 0); }
+function show(html) { el('app').innerHTML = html; window.scrollTo(0, 0); lastScreenKey = null; }
 function banner(n) { return n ? `<div class="banner ${n.kind || 'info'}">${n.html}</div>` : ''; }
 
 async function rpc(name, args) {
@@ -338,6 +338,7 @@ function renderReview(notice) {
     ${p.soft_mismatch ? `<div class="banner bad"><b>Check this is the right load.</b> This load is for ${esc(p.trucker_key)}. This phone last ran ${esc(p.last_trucker)}.</div>` : ''}
 
     ${p.can_claim ? `
+      <label class="fld">Your phone number<input class="txt" id="c_phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="For example: 876 555 1234" value="${esc(LS.get('lm.phone') || '')}"></label>
       <label class="check"><input type="checkbox" id="c_me"><span><b>Yes, this is me.</b> I am ${esc(p.trucker)}.</span></label>
       ${p.soft_mismatch ? `<label class="check red"><input type="checkbox" id="c_soft"><span>I know this phone last ran ${esc(p.last_trucker)}. This is my load anyway.</span></label>` : ''}
       ${heldOther ? `<label class="check amber"><input type="checkbox" id="c_take"><span>Move this load to my phone.</span></label>` : ''}
@@ -355,12 +356,15 @@ function renderReview(notice) {
 }
 
 // The claim button stays off until every box that applies has been ticked.
+const phoneOk = v => String(v || '').replace(/[^0-9]/g, '').length >= 7;
 function wireReview() {
   const btn = el('claimbtn');
   if (!btn) return;
   const boxes = ['c_me', 'c_soft', 'c_take'].map(el).filter(Boolean);
-  const sync = () => { btn.disabled = !boxes.every(b => b.checked); };
+  const ph = el('c_phone');
+  const sync = () => { btn.disabled = !boxes.every(b => b.checked) || !phoneOk(ph && ph.value); };
   boxes.forEach(b => b.addEventListener('change', sync));
+  if (ph) ph.addEventListener('input', sync);
   sync();
 }
 
@@ -369,12 +373,14 @@ async function doClaim() {
   const p = S.peek;
   S.busy = true;
   const btn = el('claimbtn'); if (btn) { btn.disabled = true; btn.textContent = 'Taking responsibility…'; }
+  const phone = ((el('c_phone') || {}).value || '').trim();
   try {
     const r = await rpc('lm_claim', {
-      p_code: S.code, p_device: deviceId(), p_name: p.trucker,
+      p_code: S.code, p_device: deviceId(), p_name: p.trucker, p_phone: phone,
       p_override_soft: !!(el('c_soft') && el('c_soft').checked),
       p_takeover: !!(el('c_take') && el('c_take').checked),
     });
+    LS.set('lm.phone', phone);
     S.session = { token: r.token, code: S.code, load_nbr: p.load_nbr, claimed_at: Date.now() };
     S.data = r.data;
     S.queue = []; S.editing = false; S.warmed = false; S.screen = null; resetForm();
@@ -529,7 +535,7 @@ function enqueue(events) {
   flush();
 }
 
-async function press(kind, stopId, payload, withGps) {
+async function press(kind, stopId, payload, withGps, screen) {
   if (S.pressing) return;
   S.pressing = true;
   let pos = null;
@@ -538,6 +544,7 @@ async function press(kind, stopId, payload, withGps) {
     pos = await getPosition();
   }
   S.pressing = false;
+  if (screen) { S.screen = screen; S.form.editing = null; S.form.edit = null; S.form.refuseAll = null; }
   enqueue([makeEvent(kind, stopId, payload, pos)]);
 }
 
@@ -606,7 +613,17 @@ function resetForm() { S.form = { receiver: {}, edit: null, editing: null, refus
 function typing() { const a = document.activeElement; return !!a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.type !== 'checkbox'; }
 function rerender() { if (S.session && !typing()) renderLoad(); }
 
+// Redrawing the same screen (ticking an item, a background refresh) keeps the scroll place;
+// moving to a different screen starts at the top.
+let lastScreenKey = null;
 function renderLoad() {
+  const y = window.scrollY, before = lastScreenKey;
+  drawLoad();
+  const key = S.session ? JSON.stringify(S.screen || 'route') : null;
+  lastScreenKey = key;
+  if (key && key === before) window.scrollTo(0, y);
+}
+function drawLoad() {
   const d = view();
   if (!d) { renderScan(); return; }
   const stop = S.screen && S.screen.kind !== 'abortload' ? d.stops.find(s => s.id === S.screen.stop) : null;
@@ -741,35 +758,58 @@ function tidyAddress(name, address, city) {
 // Edit order: only stops still waiting can move; the rest stay where they are.
 function editList(stops) {
   const byId = new Map(stops.map(s => [s.id, s]));
-  const pendIds = S.draft.filter(id => byId.get(id).status === 'pending');
-  return `<p class="muted" style="margin:0 2px 10px">Use the arrows to put your stops in the order you will deliver them. Stops already visited stay where they are.</p>` +
+  return `<p class="muted" style="margin:0 2px 10px">Hold the ☰ handle and drag a stop to where you will deliver it. Stops already visited stay where they are.</p>` +
     S.draft.map((id, i) => {
       const s = byId.get(id);
       const canMove = s.status === 'pending';
-      const k = pendIds.indexOf(id);
-      return `<div class="card stopcard ${canMove ? '' : 'done'}"><div class="stop"><div class="n">${i + 1}</div>
+      return `<div class="card stopcard ${canMove ? 'movable' : 'done'}" data-id="${id}"><div class="stop"><div class="n">${i + 1}</div>
         <div style="flex:1"><div class="who">${esc(s.customer_name || s.customer_id)}</div>
           <div class="addr">${esc(tidyAddress(s.customer_name, s.address, s.city))}</div></div>
-        ${canMove ? `<div class="arrows"><button class="btn" data-act="up" data-stop="${id}" ${k === 0 ? 'disabled' : ''} aria-label="Move up">▲</button>
-          <button class="btn" data-act="down" data-stop="${id}" ${k === pendIds.length - 1 ? 'disabled' : ''} aria-label="Move down">▼</button></div>` : ''}
+        ${canMove ? `<div class="grip" data-grip aria-label="Drag to move">☰</div>` : ''}
       </div></div>`;
     }).join('');
 }
 
-function moveDraft(id, dir) {
-  const d = view();
-  const status = new Map(d.stops.map(s => [s.id, s.status]));
-  const i = S.draft.indexOf(id);
-  let j = i + dir;
-  while (j >= 0 && j < S.draft.length && status.get(S.draft[j]) !== 'pending') j += dir;
-  if (j < 0 || j >= S.draft.length) return;
-  [S.draft[i], S.draft[j]] = [S.draft[j], S.draft[i]];
+// Drag a stop by its handle. The cards move on screen as you drag; on release the new
+// order goes into S.draft. Stops already visited keep their places.
+let drag = null;
+document.addEventListener('pointerdown', e => {
+  const g = e.target.closest('[data-grip]');
+  if (!g || !S.editing) return;
+  e.preventDefault();
+  g.setPointerCapture(e.pointerId);
+  const card = g.closest('.stopcard');
+  card.classList.add('dragging');
+  drag = { card, id: e.pointerId };
+});
+document.addEventListener('pointermove', e => {
+  if (!drag || e.pointerId !== drag.id) return;
+  for (const c of document.querySelectorAll('.stopcard.movable')) {
+    if (c === drag.card) continue;
+    const r = c.getBoundingClientRect();
+    if (e.clientY >= r.top && e.clientY <= r.bottom) {
+      const after = !!(drag.card.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING);
+      c.parentNode.insertBefore(drag.card, after ? c.nextSibling : c);
+      break;
+    }
+  }
+  if (e.clientY < 80) window.scrollBy(0, -12); else if (e.clientY > window.innerHeight - 80) window.scrollBy(0, 12);
+});
+function endDrag(e) {
+  if (!drag || e.pointerId !== drag.id) return;
+  const order = [...document.querySelectorAll('.stopcard.movable')].map(c => Number(c.dataset.id));
+  const status = new Map(view().stops.map(s => [s.id, s.status]));
+  let k = 0;
+  S.draft = S.draft.map(id => status.get(id) === 'pending' ? order[k++] : id);
+  drag = null;
   renderLoad();
 }
+document.addEventListener('pointerup', endDrag);
+document.addEventListener('pointercancel', endDrag);
 
 // --- Checklist ------------------------------------------------------
 const RESULT_WORD = { short: 'Short', refused: 'Refused', damaged: 'Damaged' };
-const lineReasons = (res, reasons) => (reasons || []).filter(r => ['line', 'both'].includes(r.applies_to) && (res !== 'damaged' || r.cause === 'damaged'));
+const lineReasons = (res, reasons) => (reasons || []).filter(r => ['line', 'both'].includes(r.applies_to));
 const stopReasons = reasons => (reasons || []).filter(r => ['stop', 'both'].includes(r.applies_to));
 const options = (list, cur) => `<option value="">Choose a reason…</option>` + list.map(r => `<option value="${esc(r.code)}" ${r.code === cur ? 'selected' : ''}>${esc(r.label)}</option>`).join('');
 
@@ -798,15 +838,16 @@ function lineRow(stop, l, reasons) {
   let editor = '';
   if (editing) {
     const e = S.form.edit;
-    const list = lineReasons(e.result, reasons);
+    const list = lineReasons(null, reasons);
     const max = Math.max(0, Number(l.expected) - 1);
+    const dmg = (list.find(r => r.code === e.reason) || {}).cause === 'damaged';
     editor = `<div class="editor">
-      <div class="chips">${['short', 'refused', 'damaged'].map(r => `<button class="chip ${e.result === r ? 'on' : ''}" data-act="lres" data-res="${r}">${RESULT_WORD[r]}</button>`).join('')}</div>
-      ${e.result === 'short' || e.result === 'damaged' ? `<label class="fld">How many did the customer get?<input class="txt" id="e_qty" type="number" inputmode="decimal" min="0" max="${max}" step="any" value="${esc(e.qty)}"></label>` : ''}
-      ${e.result ? `<label class="fld">Why?<select class="txt" id="e_reason">${options(list, e.reason)}</select></label>
-        <label class="fld">Note (optional)<input class="txt" id="e_note" maxlength="200" value="${esc(e.note)}" autocomplete="off"></label>
-        ${e.result === 'damaged' ? `<button class="btn small" data-act="photo" data-kind="damage" data-line="${l.id}">📷 Photo of the damage</button>${photoList(stop, 'damage', l.id)}` : ''}` : '<p class="muted">What happened to this item?</p>'}
-      <div class="btns" style="margin-top:10px"><button class="btn primary" data-act="lsave" data-line="${l.id}" ${e.result ? '' : 'disabled'}>Save</button>
+      <label class="fld">Why?<select class="txt" id="e_reason">${options(list, e.reason)}</select></label>
+      <label class="fld">How many did the customer get? (of ${num(l.expected)}${unit})<input class="txt" id="e_qty" type="number" inputmode="decimal" min="0" max="${max}" step="any" value="${esc(e.qty)}"></label>
+      <button class="btn small" data-act="lzero" style="margin-top:8px">None of this was delivered</button>
+      <label class="fld">Note (optional)<input class="txt" id="e_note" maxlength="200" value="${esc(e.note)}" autocomplete="off"></label>
+      ${dmg ? `<button class="btn small" data-act="photo" data-kind="damage" data-line="${l.id}">📷 Photo of the damage</button>${photoList(stop, 'damage', l.id)}` : ''}
+      <div class="btns" style="margin-top:10px"><button class="btn primary" data-act="lsave" data-line="${l.id}">Save</button>
         <button class="btn link" data-act="lcancel">Cancel</button></div>
     </div>`;
   }
@@ -863,7 +904,7 @@ function startEdit(lineId) {
   const l = (stop.lines || []).find(x => x.id === lineId);
   const prev = l.result && l.result !== 'delivered';
   S.form.editing = lineId;
-  S.form.edit = { result: prev ? l.result : '', qty: prev && l.result !== 'refused' ? num(l.delivered) : '', reason: prev ? l.reason || '' : '', note: prev ? l.note || '' : '' };
+  S.form.edit = { qty: prev ? num(l.delivered) : '', reason: prev ? l.reason || '' : '', note: prev ? l.note || '' : '' };
   renderLoad();
 }
 
@@ -872,15 +913,15 @@ function saveLine(lineId) {
   const d = view();
   const stop = d.stops.find(s => s.id === S.screen.stop);
   const l = (stop.lines || []).find(x => x.id === lineId);
-  if (!e.result) return;
   const expected = Number(l.expected);
-  let qty = e.result === 'refused' ? 0 : Number(e.qty);
-  if (e.result !== 'refused') {
-    if (e.qty === '' || !isFinite(qty) || qty < 0 || qty >= expected) { toast(`How many did the customer get? It must be less than ${num(expected)}.`); return; }
-  }
+  const qty = Number(e.qty);
+  if (e.qty === '' || !isFinite(qty) || qty < 0 || qty >= expected) { toast(`How many did the customer get? It must be less than ${num(expected)}.`); return; }
   if (!e.reason) { toast('Choose a reason.'); return; }
+  // The office still files each line as refused / damaged / short: worked out from the quantity and the reason.
+  const cause = ((d.reasons || []).find(r => r.code === e.reason) || {}).cause;
+  const result = qty === 0 ? 'refused' : cause === 'damaged' ? 'damaged' : 'short';
   S.form.editing = null; S.form.edit = null;
-  enqueue([makeEvent('line_set', stop.id, { line_id: lineId, result: e.result, qty, reason_code: e.reason, note: (e.note || '').trim() || undefined })]);
+  enqueue([makeEvent('line_set', stop.id, { line_id: lineId, result, qty, reason_code: e.reason, note: (e.note || '').trim() || undefined })]);
 }
 
 function toast(msg) {
@@ -966,12 +1007,10 @@ document.addEventListener('click', e => {
     case 'review': renderReview(); break;
     case 'refresh': refreshLoad(); break;
     case 'otw': press('on_the_way', stop, {}, true); break;
-    case 'arr': press('arrived', stop, {}, true); break;
+    case 'arr': press('arrived', stop, {}, true, { kind: 'check', stop }); break;
     case 'cancelotw': press('cancel_on_the_way', stop, {}, false); break;
     case 'editorder': S.editing = true; S.draft = view().stops.map(s => s.id); renderLoad(); break;
     case 'cancelorder': S.editing = false; renderLoad(); break;
-    case 'up': moveDraft(stop, -1); break;
-    case 'down': moveDraft(stop, 1); break;
     case 'saveorder': {
       const order = S.draft.slice();
       S.editing = false;
@@ -983,7 +1022,7 @@ document.addEventListener('click', e => {
     case 'backroute': S.screen = null; S.form.editing = null; S.form.edit = null; S.form.refuseAll = null; renderLoad(); break;
     case 'lfull': enqueue([makeEvent('line_set', cur(), { line_id: line, result: 'delivered' })]); break;
     case 'lnot': startEdit(line); break;
-    case 'lres': S.form.edit.result = b.dataset.res; if (b.dataset.res === 'refused') S.form.edit.qty = ''; if (!lineReasonOk(S.form.edit)) S.form.edit.reason = ''; renderLoad(); break;
+    case 'lzero': S.form.edit.qty = '0'; renderLoad(); break;
     case 'lsave': saveLine(line); break;
     case 'lcancel': S.form.editing = null; S.form.edit = null; renderLoad(); break;
     case 'allfull': {
@@ -1026,10 +1065,6 @@ document.addEventListener('click', e => {
     }
   }
 });
-function lineReasonOk(e) {
-  const d = view(); if (!d || !e.reason) return true;
-  return lineReasons(e.result, d.reasons).some(r => r.code === e.reason);
-}
 
 // What the driver types is kept in S.form so a refresh doesn't lose it.
 document.addEventListener('input', e => {
@@ -1042,7 +1077,7 @@ document.addEventListener('input', e => {
 });
 document.addEventListener('change', e => {
   const t = e.target;
-  if (t.id === 'e_reason' && S.form.edit) { S.form.edit.reason = t.value; }
+  if (t.id === 'e_reason' && S.form.edit) { S.form.edit.reason = t.value; renderLoad(); }
   else if (t.id === 'r_reason' && S.form.refuseAll) { S.form.refuseAll.reason = t.value; renderLoad(); }
   else if (t.id === 'a_reason') { S.form.abortReason = t.value; renderLoad(); }
   else if (t.id === 'l_reason') { S.form.loadReason = t.value; renderLoad(); }

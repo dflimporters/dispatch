@@ -464,7 +464,9 @@ async function checkConfirm(load: any, acu: Acu) {
             if (lower.length) {
               const edits = lower.map(c => {
                 const l = lines.find((x: any) => x.line === c.line_nbr);
-                return Number(c.final_qty) === 0 ? { id: l.id, delete: true } : { id: l.id, ShippedQty: { value: Number(c.final_qty) } };
+                // A line going to 0 is set to 0, not deleted: a nested delete is accepted by the API
+                // but the line stays (ACU-19, 2026-10-23). settleLines reads it back to prove it is 0.
+                return { id: l.id, ShippedQty: { value: Number(c.final_qty) } };
               });
               const put = await acu.call('PUT', `/Shipment?$expand=Details`, { id: sh.id, Details: edits });
               if (!put.ok) throw new Error(`line changes refused: ${put.status} ${acuError(put.data)}`);
