@@ -34,6 +34,8 @@
   table.so th { text-align:left; font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:.3px; padding:8px; border-bottom:1px solid var(--border); background:#f8fafc; white-space:nowrap; }
   table.so td { padding:7px 8px; border-top:1px solid #f1f5f9; vertical-align:middle; }
   table.so th.r, table.so td.r { text-align:right; font-variant-numeric:tabular-nums; }
+  table.so th[data-sort] { cursor:pointer; user-select:none; }
+  table.so th[data-sort]:hover { color:var(--navy); }
   table.so tr.blocked td { opacity:.55; }
   table.so tr.sel td { background:var(--accent-bg); }
   table.so td.nbr { font-weight:600; white-space:nowrap; }
@@ -51,7 +53,7 @@
 <script>
   const STATUSES = ['Open', 'Back Order', 'Shipping', 'Credit Hold', 'On Hold'];
   const CANT_SHIP = ['Credit Hold', 'On Hold'];
-  const S = { rows: [], statuses: ['Open', 'Back Order'], q: '', zone: 'all', sel: new Set(), date: jmDate(0), synced: null, results: null, busy: false };
+  const S = { rows: [], statuses: ['Open', 'Back Order'], q: '', zone: 'all', sel: new Set(), date: jmDate(0), synced: null, results: null, busy: false, sort: { key: 'order_date', dir: -1 } };
 
   async function callOrders(action, body) {
     const { data: { session } } = await sb.auth.getSession();
@@ -96,8 +98,17 @@
   const canShip = r => !CANT_SHIP.includes(r.status) && r.open_qty > 0;
   function visible() {
     const q = S.q.trim().toLowerCase();
+    const k = S.sort.key, d = S.sort.dir;
+    const num = ['open_qty', 'open_volume', 'order_total'].includes(k);
     return S.rows.filter(r => (S.zone === 'all' || r.shipping_zone === S.zone)
-      && (!q || [r.order_nbr, r.customer_name, r.customer_id].some(v => String(v || '').toLowerCase().includes(q))));
+      && (!q || [r.order_nbr, r.customer_name, r.customer_id].some(v => String(v || '').toLowerCase().includes(q))))
+      .sort((a, b) => d * (num ? (a[k] - b[k])
+        : String(a[k] || '').localeCompare(String(b[k] || ''), undefined, { numeric: true, sensitivity: 'base' }))
+        || String(b.order_nbr).localeCompare(String(a.order_nbr), undefined, { numeric: true }));
+  }
+  function sortTh(label, key, cls) {
+    const on = S.sort.key === key;
+    return `<th class="${cls || ''}" data-sort="${key}" aria-sort="${on ? (S.sort.dir > 0 ? 'ascending' : 'descending') : 'none'}" tabindex="0">${label}${on ? (S.sort.dir > 0 ? ' ▲' : ' ▼') : ''}</th>`;
   }
   function statusPill(s) {
     const cls = { 'Open': 'ok', 'Back Order': 'warn', 'Shipping': 'info', 'Credit Hold': 'bad', 'On Hold': 'bad' }[s] || 'done';
@@ -134,7 +145,7 @@
       <div class="card"><div class="so-wrap">
         ${rows.length ? `<table class="so"><thead><tr>
           <th><input type="checkbox" id="all" aria-label="Select all orders that can ship" ${ready.length && ready.every(r => S.sel.has(r.order_nbr)) ? 'checked' : ''} ${ready.length ? '' : 'disabled'}></th>
-          <th>Order</th><th>Customer</th><th>Zone</th><th>Status</th><th>Ordered</th><th class="r">Open qty</th><th class="r">Volume</th><th class="r">Value</th><th>Notes</th></tr></thead>
+          ${sortTh('Order', 'order_nbr')}${sortTh('Customer', 'customer_name')}${sortTh('Zone', 'shipping_zone')}${sortTh('Status', 'status')}${sortTh('Ordered', 'order_date')}${sortTh('Open qty', 'open_qty', 'r')}${sortTh('Volume', 'open_volume', 'r')}${sortTh('Value', 'order_total', 'r')}<th>Notes</th></tr></thead>
           <tbody>${rows.map(r => `<tr class="${canShip(r) ? '' : 'blocked'} ${S.sel.has(r.order_nbr) ? 'sel' : ''}">
             <td><input type="checkbox" data-pick="${esc(r.order_nbr)}" aria-label="Select order ${esc(r.order_nbr)}" ${S.sel.has(r.order_nbr) ? 'checked' : ''} ${canShip(r) ? '' : 'disabled'}></td>
             <td class="nbr">${esc(r.order_nbr)}</td>
@@ -190,6 +201,12 @@
   document.getElementById('app').addEventListener('click', async e => {
     if (e.target.closest('[data-create]')) { createShipments(); return; }
     if (e.target.closest('[data-dismiss]')) { S.results = null; render(); return; }
+    const th = e.target.closest('th[data-sort]');
+    if (th) {
+      const k = th.dataset.sort;
+      S.sort = S.sort.key === k ? { key: k, dir: -S.sort.dir } : { key: k, dir: ['open_qty', 'open_volume', 'order_total', 'order_date'].includes(k) ? -1 : 1 };
+      render(); return;
+    }
     const st = e.target.closest('[data-st]');
     if (!st) return;
     const s = st.dataset.st;

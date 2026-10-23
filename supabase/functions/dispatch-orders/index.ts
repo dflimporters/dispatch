@@ -146,13 +146,34 @@ async function listTestOrders() {
   try {
     await acu.login();
     const filter = encodeURIComponent("OrderType eq 'SO' and (Status eq 'Open' or Status eq 'Back Order')");
-    const r = await acu.call('GET', `/SalesOrder?$filter=${filter}&$select=OrderNbr,Status,Date,CustomerID,OrderedQty,OrderTotal&$top=200`);
+    const r = await acu.call('GET', `/SalesOrder?$filter=${filter}&$select=OrderNbr,Status,Date,CustomerID,OrderedQty,OrderTotal,Details/InventoryID,Details/OrderQty&$expand=Details&$top=100`);
     if (!r.ok) throw new Error(`TEST orders read failed: ${r.status} ${acuError(r.data)}`);
-    return (Array.isArray(r.data) ? r.data : []).map((o: any) => ({
-      order_nbr: v(o.OrderNbr), status: v(o.Status), order_date: v(o.Date)?.split('T')[0] ?? null, customer_id: v(o.CustomerID),
-      customer_name: v(o.CustomerID), shipping_zone: null, order_total: Number(v(o.OrderTotal)) || 0,
-      open_qty: Number(v(o.OrderedQty)) || 0, open_volume: 0, short_lines: 0, open_shipments: 0,
-    })).sort((a: any, b: any) => String(b.order_nbr).localeCompare(String(a.order_nbr)));
+    const raw: any[] = Array.isArray(r.data) ? r.data : [];
+
+    // Names and zones come from the customers table (same customer IDs as production), volume per
+    // case from the items on production orders (dispatch_item_volumes): TEST itself has neither.
+    const custIds = [...new Set(raw.map(o => v(o.CustomerID)).filter(Boolean))] as string[];
+    const items = [...new Set(raw.flatMap(o => (o.Details ?? []).map((d: any) => v(d.InventoryID))).filter(Boolean))] as string[];
+    const cust = new Map<string, any>();
+    for (let i = 0; i < custIds.length; i += 200) {
+      const { data } = await admin.from('customers').select('customer_id, customer_name, shipping_zone').in('customer_id', custIds.slice(i, i + 200));
+      (data ?? []).forEach(c => cust.set(c.customer_id, c));
+    }
+    const volume = new Map<string, number>();
+    for (let i = 0; i < items.length; i += 300) {
+      const { data } = await admin.rpc('dispatch_item_volumes', { p_ids: items.slice(i, i + 300) });
+      (data ?? []).forEach((x: any) => volume.set(x.inventory_id, Number(x.volume) || 0));
+    }
+    return raw.map((o: any) => {
+      const c = cust.get(v(o.CustomerID));
+      return {
+        order_nbr: v(o.OrderNbr), status: v(o.Status), order_date: v(o.Date)?.split('T')[0] ?? null, customer_id: v(o.CustomerID),
+        customer_name: c?.customer_name ?? v(o.CustomerID), shipping_zone: c?.shipping_zone ?? null, order_total: Number(v(o.OrderTotal)) || 0,
+        open_qty: Number(v(o.OrderedQty)) || 0,
+        open_volume: (o.Details ?? []).reduce((t: number, d: any) => t + (Number(v(d.OrderQty)) || 0) * (volume.get(v(d.InventoryID)) ?? 0), 0),
+        short_lines: 0, open_shipments: 0,
+      };
+    }).sort((a: any, b: any) => String(b.order_nbr).localeCompare(String(a.order_nbr)));
   } finally { await acu.logout(); }
 }
 
@@ -176,7 +197,8 @@ async function createShipments(env: string, orders: string[], date: string, acto
           .in('state', ['created']).gt('requested_at', new Date(Date.now() - 120_000).toISOString()).limit(1);
         if (recent.data?.length) { r = { order_nbr: nbr, state: 'skipped', detail: 'Shipment was just created for this order' }; results.push(r); continue; }
         await acu.lease();
-        const url = `/SalesOrder/SO/${encodeURIComponent(nbr)}?$select=OrderNbr,Status&$expand=Shipments`;
+        // No $select: with one, Acumatica drops the expanded Shipments, which read back as "no new shipment".
+        const url = `/SalesOrder/SO/${encodeURIComponent(nbr)}?$expand=Shipments`;
         const before = await acu.call('GET', url);
         if (!before.ok) throw new Error(`couldn't read order ${nbr}: ${before.status} ${acuError(before.data)}`);
         const status = v(before.data?.Status);
@@ -188,9 +210,12 @@ async function createShipments(env: string, orders: string[], date: string, acto
           const after = await acu.call('GET', url);
           if (!after.ok) throw new Error(`created, but couldn't read ${nbr} back: ${after.status} ${acuError(after.data)}`);
           const fresh = shipmentsOf(after.data).filter(s => !had.has(s));
+          const nowStatus = v(after.data?.Status);
           r = fresh.length
-            ? { order_nbr: nbr, state: 'created', shipments: fresh, detail: `Order is ${v(after.data?.Status)}` }
-            : { order_nbr: nbr, state: 'none', detail: 'Acumatica made no shipment (nothing available to ship?)' };
+            ? { order_nbr: nbr, state: 'created', shipments: fresh, detail: `Order is ${nowStatus}` }
+            : nowStatus !== status
+              ? { order_nbr: nbr, state: 'created', detail: `Order moved to ${nowStatus}; the shipment number wasn't returned (see the Coordinator page after the next sync)` }
+              : { order_nbr: nbr, state: 'none', detail: 'Acumatica made no shipment (nothing available to ship?)' };
         }
       } catch (e: any) { r = { order_nbr: nbr, state: 'failed', detail: String(e?.message ?? e).slice(0, 400) }; }
       results.push(r);
