@@ -59,26 +59,28 @@
 <script src="common.js"></script>
 <script>
   const AREAS = [[1, 'Area 1'], [2, 'Area 2'], [3, 'Area 3'], [4, 'Area 4'], [5, 'Area 5'], [6, 'Area 6'], [7, 'Area 7'], [0, 'Unassigned']];
-  const P = { date: jmDate(0), loads: [], lists: new Map(), done: [], open: null, busy: false, area: 'all' };
+  const P = { date: jmDate(0), loads: [], lists: new Map(), done: [], open: null, busy: false, area: 'all', q: '' };
   try { const a = localStorage.getItem('dispatch-pick-area'); if (a) P.area = a; } catch (e) {}
   function areaName(a) { return (AREAS.find(x => x[0] === Number(a)) || [0, 'Unassigned'])[1]; }
   function inArea(line) { return P.area === 'all' || line.area === Number(P.area); }
 
   async function loadAll() {
-    const loads = (await fetchLoads(P.date, { carry: true })).filter(l => ['done', 'partial'].includes(l.status) && l.check_status !== 'confirmed');
-    const lists = await Promise.all(loads.map(l => sb.rpc('dispatch_pick_list', { p_load_id: l.id })));
-    lists.forEach((r, i) => { if (r.error) throw r.error; });
-    const ids = loads.map(l => l.id);
-    const [done, staged] = ids.length ? await Promise.all([
-      sb.from('pick_area_status').select('*').in('load_id', ids),
-      sb.from('stage_area_status').select('*').in('load_id', ids),
-    ]) : [{ data: [] }, { data: [] }];
-    if (done.error) throw done.error;
-    if (staged.error) throw staged.error;
-    P.staged = staged.data || [];
+    const loads = (await fetchLoads(P.date, { carry: true, events: false })).filter(l => ['done', 'partial'].includes(l.status) && l.check_status !== 'confirmed');
     P.loads = loads;
-    P.lists = new Map(loads.map((l, i) => [l.id, lists[i].data || []]));
-    P.done = done.data || [];
+    await loadPicks();
+  }
+  // Pick lines and area status for the loads already on screen: one request, so a save shows quickly.
+  async function loadPicks() {
+    const ids = P.loads.map(l => l.id);
+    let b = { picks: [], done: [], staged: [] };
+    if (ids.length) {
+      const r = await sb.rpc('dispatch_pick_bundle', { p_load_ids: ids, p_with_checks: false });
+      if (r.error) throw r.error;
+      b = r.data;
+    }
+    P.staged = b.staged || [];
+    P.done = b.done || [];
+    P.lists = new Map(ids.map(id => [id, (b.picks || []).filter(x => x.load_id === id)]));
   }
   function areaDone(loadId, area) { return P.done.find(d => d.load_id === loadId && d.area === area); }
   function areaStaged(loadId, area) { return (P.staged || []).find(d => d.load_id === loadId && d.area === area); }
@@ -87,7 +89,7 @@
   function render() {
     const main = document.getElementById('main');
     if (P.open) { main.innerHTML = loadView(P.loads.find(l => l.id === P.open)); return; }
-    const mine = P.loads.filter(l => (P.lists.get(l.id) || []).some(inArea));
+    const mine = P.loads.filter(l => (P.lists.get(l.id) || []).some(inArea) && loadMatches(l, P.q));
     const allLines = P.loads.flatMap(l => (P.lists.get(l.id) || []).filter(inArea));
     main.innerHTML = `
       <div class="controls">
@@ -96,6 +98,7 @@
           <button data-day="1" class="${P.date === jmDate(1) ? 'on' : ''}">Tomorrow</button>
         </div>
         <input type="date" id="datePick" value="${P.date}" aria-label="Load date">
+        ${searchBox(P.q)}
       </div>
       <div class="areas" role="group" aria-label="My area">
         <button data-area="all" class="${P.area === 'all' ? 'on' : ''}">All areas</button>
@@ -107,7 +110,7 @@
         <div class="kpi ${allLines.some(x => x.picked_qty != null && Number(x.picked_qty) < Number(x.required)) ? 'warn' : ''}"><div class="l">Short</div><div class="v">${allLines.filter(x => x.picked_qty != null && Number(x.picked_qty) < Number(x.required)).length}</div><div class="s">lines picked short</div></div>
         <div class="kpi"><div class="l">Cases</div><div class="v">${fmt(allLines.reduce((s, x) => s + Number(x.required), 0))}</div><div class="s">to pick</div></div>
       </div>
-      ${mine.length ? mine.map(loadCard).join('') : `<div class="card"><div class="empty">No loads to pick${P.area === 'all' ? '' : ' in ' + areaName(P.area)} for ${esc(niceDate(P.date))}. A load shows here once its trucker is locked in.</div></div>`}`;
+      ${mine.length ? mine.map(loadCard).join('') : `<div class="card"><div class="empty">${P.q ? `Nothing matches “${esc(P.q)}”. ` : ''}No loads to pick${P.area === 'all' ? '' : ' in ' + areaName(P.area)} for ${esc(niceDate(P.date))}. A load shows here once its trucker is locked in.</div></div>`}`;
   }
 
   function loadCard(l) {
@@ -174,11 +177,13 @@
 
   // ------------------------------------------------------------------
   async function rpc(name, args) { const { error } = await sb.rpc(name, args); if (error) throw error; }
-  async function act(fn) {
+  // A pick save only changes pick data, so re-read just that (one request) instead of the whole page.
+  async function act(fn, full) {
     if (P.busy) return;
     P.busy = true;
-    try { await fn(); await refresh(); }
-    catch (e) { console.error('[picking]', e); toast(errMsg(e), true); await refresh(); }
+    const again = async () => { if (full) await refresh(); else { try { await loadPicks(); render(); } catch (e) { await refresh(); } } };
+    try { await fn(); await again(); }
+    catch (e) { console.error('[picking]', e); toast(errMsg(e), true); await again(); }
     finally { P.busy = false; }
   }
 
@@ -192,7 +197,7 @@
     if (op) { P.open = Number(op.dataset.open); render(); window.scrollTo(0, 0); return; }
     if (t.closest('[data-back]')) { P.open = null; render(); return; }
     const sw = t.closest('[data-setwave]');
-    if (sw) { act(() => setWave(Number(sw.dataset.load), sw.dataset.setwave)); return; }
+    if (sw) { act(() => setWave(Number(sw.dataset.load), sw.dataset.setwave), true); return; }
     const done = t.closest('[data-areadone]');
     if (done) { act(() => rpc('dispatch_pick_area_done', { p_load_id: P.open, p_area: Number(done.dataset.areadone), p_done: true })); return; }
     const st = t.closest('[data-stage]'), un = t.closest('[data-unstage]');
@@ -215,6 +220,7 @@
   // The box can't go above what the load needs: anything higher snaps back.
   document.getElementById('app').addEventListener('input', e => {
     const t = e.target;
+    if (t.id === 'q') { P.q = t.value; keepSearchFocus(render); return; }
     if (!t.dataset || t.dataset.qty === undefined) return;
     const max = Number(t.max);
     if (t.value !== '' && Number(t.value) > max) {
@@ -235,12 +241,12 @@
   }
 
   async function refresh() {
-    try { await loadAll(); render(); }
+    try { await loadAll(); keepSearchFocus(render); }
     catch (e) { console.error('[picking]', e); document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`; }
   }
   function editing() {
     const a = document.activeElement;
-    return a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
+    return a && a.id !== 'q' && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
   }
 
   startPage({
@@ -248,7 +254,7 @@
     onEnvChange: () => { P.open = null; refresh(); },
     onReady: () => {
       refresh();
-      setInterval(() => { if (!P.busy && !editing()) refresh(); }, 30 * 1000);
+      keepFresh(refresh, () => P.busy || editing(), ['pick_lines', 'pick_area_status', 'stage_area_status', 'loads']);
     },
   });
 </script>

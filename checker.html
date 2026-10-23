@@ -54,28 +54,24 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
 <script src="common.js"></script>
 <script>
-  const K = { date: jmDate(0), loads: [], picks: new Map(), areaDone: [], checks: [], open: null, final: new Map(), busy: false, was: new Map(), poll: null };
+  const K = { q: '', date: jmDate(0), loads: [], picks: new Map(), areaDone: [], checks: [], open: null, final: new Map(), busy: false, was: new Map(), poll: null };
   const key = (nbr, ln) => nbr + '|' + ln;
 
   async function loadAll() {
     const loads = (await fetchLoads(K.date, { carry: true })).filter(l => ['done', 'partial'].includes(l.status));
     const ids = loads.map(l => l.id);
-    await loadLines(loads.flatMap(l => l.ships.map(s => s.shipment_nbr)));
-    const [lists, done, checks, staged] = await Promise.all([
-      Promise.all(loads.map(l => sb.rpc('dispatch_pick_list', { p_load_id: l.id }))),
-      ids.length ? sb.from('pick_area_status').select('*').in('load_id', ids) : { data: [] },
-      ids.length ? sb.from('check_lines').select('*').in('load_id', ids) : { data: [] },
-      ids.length ? sb.from('stage_area_status').select('*').in('load_id', ids) : { data: [] },
+    // Item lines are only needed on a load's own screen, so fetch them for the open load alone.
+    const openLoad = loads.find(l => l.id === K.open);
+    const [b] = await Promise.all([
+      ids.length ? sb.rpc('dispatch_pick_bundle', { p_load_ids: ids, p_with_checks: true }) : { data: { picks: [], done: [], staged: [], checks: [] } },
+      openLoad ? loadLines(openLoad.ships.map(s => s.shipment_nbr)) : null,
     ]);
-    lists.forEach(r => { if (r.error) throw r.error; });
-    if (done.error) throw done.error;
-    if (staged.error) throw staged.error;
-    K.staged = staged.data || [];
-    if (checks.error) throw checks.error;
+    if (b.error) throw b.error;
+    K.staged = b.data.staged || [];
     K.loads = loads;
-    K.picks = new Map(loads.map((l, i) => [l.id, lists[i].data || []]));
-    K.areaDone = done.data || [];
-    K.checks = checks.data || [];
+    K.picks = new Map(ids.map(id => [id, (b.data.picks || []).filter(x => x.load_id === id)]));
+    K.areaDone = b.data.done || [];
+    K.checks = b.data.checks || [];
     loads.forEach(l => {
       const busy = confirmQueued(l) || l.check_status === 'confirming';
       if (K.was.get(l.id) && !busy) {
@@ -137,7 +133,8 @@
   function render() {
     const main = document.getElementById('main');
     if (K.open) { main.innerHTML = loadView(K.loads.find(l => l.id === K.open)); return; }
-    const todo = K.loads.filter(l => l.check_status !== 'confirmed'), done = K.loads.filter(l => l.check_status === 'confirmed');
+    const vis = K.loads.filter(l => loadMatches(l, K.q));
+    const todo = vis.filter(l => l.check_status !== 'confirmed'), done = vis.filter(l => l.check_status === 'confirmed');
     main.innerHTML = `
       <div class="controls">
         <div class="seg" id="daySeg">
@@ -145,6 +142,7 @@
           <button data-day="1" class="${K.date === jmDate(1) ? 'on' : ''}">Tomorrow</button>
         </div>
         <input type="date" id="datePick" value="${K.date}" aria-label="Load date">
+        ${searchBox(K.q)}
       </div>
       <div class="kpis">
         <div class="kpi"><div class="l">To check</div><div class="v">${todo.length}</div><div class="s">${todo.filter(l => { const p = pickState(l); return p.areas && p.done === p.areas; }).length} fully picked</div></div>
@@ -152,7 +150,7 @@
         <div class="kpi ${todo.some(l => l.check_status === 'partial') ? 'warn' : ''}"><div class="l">Problems</div><div class="v">${todo.filter(l => l.check_status === 'partial').length}</div><div class="s">partly confirmed</div></div>
         <div class="kpi"><div class="l">Short picks</div><div class="v">${K.loads.reduce((s, l) => s + pickState(l).short, 0)}</div><div class="s">items across loads</div></div>
       </div>
-      ${K.loads.length ? [...todo, ...done].map(loadCard).join('') : `<div class="card"><div class="empty">No loads with a trucker locked in for ${esc(niceDate(K.date))}.</div></div>`}`;
+      ${vis.length ? [...todo, ...done].map(loadCard).join('') : `<div class="card"><div class="empty">${K.loads.length ? `Nothing matches “${esc(K.q)}”.` : `No loads with a trucker locked in for ${esc(niceDate(K.date))}.`}</div></div>`}`;
   }
 
   function loadCard(l) {
@@ -261,7 +259,16 @@
     const day = t.closest('#daySeg button');
     if (day) { K.date = jmDate(Number(day.dataset.day)); K.open = null; refresh(); return; }
     const op = t.closest('[data-open]');
-    if (op) { K.open = Number(op.dataset.open); K.final = new Map(); render(); window.scrollTo(0, 0); return; }
+    if (op) {
+      K.open = Number(op.dataset.open); K.final = new Map();
+      const l = K.loads.find(x => x.id === K.open);
+      const need = l.ships.map(s => s.shipment_nbr).filter(n => !D.lines.has(n));
+      const go = () => { if (K.open === l.id) { render(); window.scrollTo(0, 0); } };
+      if (!need.length) { go(); return; }
+      document.getElementById('main').innerHTML = '<div class="empty">Loading items…</div>';
+      loadLines(need).then(go).catch(err => { K.open = null; toast(errMsg(err), true); render(); });
+      return;
+    }
     if (t.closest('[data-back]')) { K.open = null; K.final = new Map(); render(); return; }
     const sw = t.closest('[data-setwave]');
     if (sw) { act(() => setWave(Number(sw.dataset.load), sw.dataset.setwave)); return; }
@@ -281,6 +288,9 @@
         K.was.set(l.id, true);
       });
     }
+  });
+  document.getElementById('app').addEventListener('input', e => {
+    if (e.target.id === 'q') { K.q = e.target.value; keepSearchFocus(render); }
   });
   document.getElementById('app').addEventListener('change', e => {
     const t = e.target;
@@ -305,12 +315,12 @@
   }
 
   async function refresh() {
-    try { await loadAll(); render(); poll(); }
+    try { await loadAll(); keepSearchFocus(render); poll(); }
     catch (e) { console.error('[checker]', e); document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`; }
   }
   function editing() {
     const a = document.activeElement;
-    return a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
+    return a && a.id !== 'q' && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
   }
 
   startPage({
@@ -318,7 +328,7 @@
     onEnvChange: () => { K.open = null; K.final = new Map(); refresh(); },
     onReady: () => {
       refresh();
-      setInterval(() => { if (!K.busy && !editing() && !K.open) refresh(); }, 30 * 1000);
+      keepFresh(refresh, () => K.busy || editing(), ['pick_lines', 'pick_area_status', 'stage_area_status', 'check_lines', 'loads']);
     },
   });
 </script>

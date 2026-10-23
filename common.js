@@ -281,35 +281,34 @@ const SHIP_COLS = 'shipment_nbr,status,shipment_date,customer_id,customer_name,s
 
 // Rows by shipment number, in chunks (PostgREST URLs have a length limit).
 async function shipmentsByNbr(nbrs) {
-  const out = [];
-  for (let i = 0; i < nbrs.length; i += 150) {
-    const { data, error } = await sb.from(shipTable()).select(SHIP_COLS).in('shipment_nbr', nbrs.slice(i, i + 150));
-    if (error) throw error;
-    out.push(...(data || []));
-  }
-  return out;
+  const chunks = [];
+  for (let i = 0; i < nbrs.length; i += 150) chunks.push(nbrs.slice(i, i + 150));
+  const res = await Promise.all(chunks.map(c => sb.from(shipTable()).select(SHIP_COLS).in('shipment_nbr', c)));
+  return res.flatMap(r => { if (r.error) throw r.error; return r.data || []; });
 }
 
 // Loads for a date with their shipments, shipment rows and history.
 // opts.carry: when `date` is today or earlier, also include unconfirmed loads from the
 // previous 7 days (l.carried = true), so a load not finished by midnight doesn't vanish.
 async function fetchLoads(date, opts) {
-  let { data: loads, error } = await sb.from('loads').select('*').eq('env', D.env).eq('load_date', date).order('wave').order('seq');
-  if (error) throw error;
-  if (opts && opts.carry && date <= jmDate(0)) {
-    const from = new Date(Date.parse(date + 'T00:00:00Z') - 7 * 86400e3).toISOString().split('T')[0];
-    const old = await sb.from('loads').select('*').eq('env', D.env).gte('load_date', from).lt('load_date', date)
+  const carry = opts && opts.carry && date <= jmDate(0);
+  const from = new Date(Date.parse(date + 'T00:00:00Z') - 7 * 86400e3).toISOString().split('T')[0];
+  const [cur, old] = await Promise.all([
+    sb.from('loads').select('*').eq('env', D.env).eq('load_date', date).order('wave').order('seq'),
+    carry ? sb.from('loads').select('*').eq('env', D.env).gte('load_date', from).lt('load_date', date)
       .in('status', ['done', 'partial']).or('check_status.is.null,check_status.neq.confirmed')
-      .order('load_date').order('wave').order('seq');
-    if (old.error) throw old.error;
-    loads = (old.data || []).map(l => ({ ...l, carried: true })).concat(loads || []);
-  }
-  const ids = (loads || []).map(l => l.id);
+      .order('load_date').order('wave').order('seq') : Promise.resolve({ data: [] }),
+  ]);
+  if (cur.error) throw cur.error;
+  if (old.error) throw old.error;
+  const loads = (old.data || []).map(l => ({ ...l, carried: true })).concat(cur.data || []);
+  const ids = loads.map(l => l.id);
   let ls = [], evs = [];
   if (ids.length) {
+    // History is only drawn on a load's own screen; the picker doesn't need it.
     const [a, b] = await Promise.all([
       sb.from('load_shipments').select('*').in('load_id', ids),
-      sb.from('load_events').select('*').in('load_id', ids).order('created_at', { ascending: false }),
+      opts && opts.events === false ? { data: [] } : sb.from('load_events').select('*').in('load_id', ids).order('created_at', { ascending: false }),
     ]);
     if (a.error) throw a.error;
     if (b.error) throw b.error;
@@ -321,6 +320,53 @@ async function fetchLoads(date, opts) {
     const mine = ls.filter(x => x.load_id === l.id).map(x => ({ ...x, row: byNbr.get(x.shipment_nbr) || null }));
     return { ...l, ships: mine, events: evs.filter(e => e.load_id === l.id), ...loadStats(mine.map(x => x.row).filter(Boolean)) };
   });
+}
+
+// Search box on the picker / checker lists: every word has to appear in the load's number,
+// ship via, trucker, truck, zones, or any of its shipments' customer, zone or number.
+function loadMatches(l, q) {
+  const words = String(q || '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return true;
+  if (!l._hay) {
+    l._hay = [l.load_nbr, l.ship_via, l.contractor, l.truck_type, (l.zones || []).join(' '),
+      ...l.ships.map(s => [s.shipment_nbr, s.row && s.row.customer_name, s.row && s.row.customer_id, s.row && s.row.shipping_zone].join(' '))
+    ].join(' ').toLowerCase();
+  }
+  return words.every(w => l._hay.includes(w));
+}
+function searchBox(q) {
+  return `<input type="search" id="q" class="searchbox" value="${esc(q)}" placeholder="Search ship via, zone or customer" aria-label="Search loads" autocomplete="off">`;
+}
+// Re-draws after a keystroke without losing the caret in the search box.
+function keepSearchFocus(draw) {
+  const had = document.activeElement && document.activeElement.id === 'q';
+  draw();
+  if (!had) return;
+  const el = document.getElementById('q');
+  if (el) { el.focus(); const n = el.value.length; try { el.setSelectionRange(n, n); } catch (e) {} }
+}
+
+// Keeps a page current: re-reads when another screen saves (realtime on the pick / check
+// tables), when the tab comes back to the front, and on a slow timer as the safety net.
+// skip() says the user is typing; the refresh is held until they leave the box.
+function keepFresh(refresh, skip, tables) {
+  let timer = null, held = false, last = 0;
+  const run = async () => {
+    timer = null;
+    if (document.hidden) return;
+    if (skip()) { held = true; return; }
+    held = false; last = Date.now();
+    await refresh();
+  };
+  const soon = ms => { if (!timer) timer = setTimeout(run, ms); };
+  try {
+    let ch = sb.channel('fresh-' + location.pathname);
+    (tables || []).forEach(t => { ch = ch.on('postgres_changes', { event: '*', schema: 'public', table: t }, () => soon(300)); });
+    ch.subscribe();
+  } catch (e) { console.warn('[realtime]', e); }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) soon(50); });
+  document.addEventListener('focusout', () => { if (held) soon(400); });
+  setInterval(() => { if (Date.now() - last > 9000) soon(0); }, 10000);
 }
 
 async function lastSync() {
@@ -378,13 +424,12 @@ async function syncLiveNow() {
 async function loadLines(nbrs) {
   const want = [...new Set(nbrs)];
   const got = new Map(want.map(n => [n, []]));
-  for (let i = 0; i < want.length; i += 100) {
-    const { data, error } = await sb.from('shipment_lines')
-      .select('shipment_nbr,line_nbr,inventory_id,description,uom,ordered_qty,shipped_qty,line_value,location_id')
-      .eq('env', D.env).in('shipment_nbr', want.slice(i, i + 100)).order('line_nbr').range(0, 4999);
-    if (error) throw error;
-    (data || []).forEach(l => got.get(l.shipment_nbr).push(l));
-  }
+  const chunks = [];
+  for (let i = 0; i < want.length; i += 100) chunks.push(want.slice(i, i + 100));
+  const res = await Promise.all(chunks.map(c => sb.from('shipment_lines')
+    .select('shipment_nbr,line_nbr,inventory_id,description,uom,ordered_qty,shipped_qty,line_value,location_id')
+    .eq('env', D.env).in('shipment_nbr', c).order('line_nbr').range(0, 4999)));
+  res.forEach(r => { if (r.error) throw r.error; (r.data || []).forEach(l => got.get(l.shipment_nbr).push(l)); });
   got.forEach((v, k) => D.lines.set(k, v));
 }
 // Lines that went out short of what was ordered (stock not available).
