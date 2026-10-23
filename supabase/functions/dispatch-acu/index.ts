@@ -10,7 +10,8 @@
 //   sync_live_lines        -> read-only: production's Open/On Hold shipments' line items into
 //                             shipment_lines (env 'live') + shipments.shipment_value. Run by
 //                             cron with the Vault token (dispatch_cron_ok), or by any dispatch role.
-//   check_confirm { load_id } -> checker only. Queues the load; the drain then, for each
+//   check_confirm { load_id } -> supervisor (Invoicing) only, once the checker has finished the
+//                             load (loads.checker_done_at). Queues the load; the drain then, for each
 //                             shipment on it: lowers or deletes the lines the checker reduced
 //                             (check_lines), sets Control Qty to the new shipped qty, Confirm
 //                             Shipment, reads it back. Live loads also need
@@ -338,6 +339,59 @@ async function applyLoad(load: any, acu: Acu) {
   return { ok: !fatal, error: fatal, results, udf: udfOk };
 }
 
+// After lowering lines: read the shipment back and make sure every lowered line really holds the
+// new quantity. A line that is split over several allocations (location / lot) keeps its old
+// allocation total, so the line change alone can leave the document out of balance; in that case
+// the allocations are trimmed (from the last one back) to the new quantity. Throws, with what
+// Acumatica reads, if the lines still don't match, so nothing is confirmed on a wrong total.
+async function settleLines(acu: Acu, nbr: string, mine: any[], lowered: any[]) {
+  const read = async (alloc: boolean) => {
+    const sel = 'ShipmentNbr,ShippedQty,Details/LineNbr,Details/ShippedQty';
+    const r = await acu.call('GET', `/Shipment/${encodeURIComponent(nbr)}?$select=${sel}&$expand=${alloc ? 'Details/Allocations' : 'Details'}`);
+    if (!r.ok) throw new Error(`couldn't re-read ${nbr}: ${r.status} ${acuError(r.data)}`);
+    return (r.data?.Details ?? []) as any[];
+  };
+  const wrong = (rows: any[]) => lowered.filter(c => {
+    const d = rows.find(x => num(v(x.LineNbr)) === c.line_nbr);
+    return d ? Number(num(v(d.ShippedQty)) ?? 0) !== Number(c.final_qty) : Number(c.final_qty) !== 0;
+  });
+  let rows = await read(false);
+  let bad = wrong(rows);
+  if (bad.length) {
+    // Trim allocations.
+    let withAlloc: any[] = [];
+    try { withAlloc = await read(true); } catch { /* endpoint without allocations: report below */ }
+    const edits: any[] = [];
+    for (const c of bad) {
+      const d = withAlloc.find(x => num(v(x.LineNbr)) === c.line_nbr);
+      const allocs: any[] = d?.Allocations ?? [];
+      if (!d || !allocs.length) continue;
+      const key = ['Quantity', 'Qty', 'ShippedQty', 'AllocatedQty'].find(k => allocs[0][k] !== undefined);
+      if (!key) continue;
+      let remove = Number(num(v(d.ShippedQty)) ?? 0) - Number(c.final_qty);
+      const al: any[] = [];
+      for (let i = allocs.length - 1; i >= 0 && remove > 0; i--) {
+        const q = Number(num(v(allocs[i][key])) ?? 0), take = Math.min(q, remove);
+        remove -= take;
+        al.push(q - take <= 0 ? { id: allocs[i].id, delete: true } : { id: allocs[i].id, [key]: { value: q - take } });
+      }
+      if (al.length) edits.push({ id: d.id, Allocations: al });
+    }
+    if (edits.length) {
+      const put = await acu.call('PUT', `/Shipment?$expand=Details/Allocations`, { id: (await acu.getShipment(nbr, false)).id, Details: edits });
+      if (!put.ok) throw new Error(`allocation changes refused: ${put.status} ${acuError(put.data)}`);
+      rows = await read(false);
+      bad = wrong(rows);
+    }
+  }
+  if (bad.length) {
+    throw new Error('Lines did not change in Acumatica: ' + bad.map(c => {
+      const d = rows.find(x => num(v(x.LineNbr)) === c.line_nbr);
+      return `line ${c.line_nbr} reads ${d ? num(v(d.ShippedQty)) : 'removed'}, wanted ${c.final_qty}`;
+    }).join('; '));
+  }
+}
+
 // ------------------------------------------------------------------
 // check_confirm: the checker's quantities -> Acumatica, then Confirm
 // ------------------------------------------------------------------
@@ -386,9 +440,12 @@ async function checkConfirm(load: any, acu: Acu) {
         else if (!EDITABLE.includes(status!)) { result = 'refused'; detail = `Status is ${status} in Acumatica`; }
         else if (!v(sh.ShipVia)) { result = 'refused'; detail = 'No Ship Via on the shipment (lock in the trucker first)'; }
         else {
+          // A line is as the checker's sheet saw it, or already lowered by an earlier attempt that
+          // got part-way (lines lowered, then Control Qty refused); a removed line stays removed.
           const changed = mine.filter(c => {
             const l = lines.find((x: any) => x.line === c.line_nbr);
-            return !l || Number(l.qty) !== Number(c.shipped_qty);
+            if (!l) return Number(c.final_qty) !== 0;
+            return Number(l.qty) !== Number(c.shipped_qty) && Number(l.qty) !== Number(c.final_qty);
           });
           const finalTotal = lines.reduce((t: number, l: any) => {
             const c = mine.find(x => x.line_nbr === l.line);
@@ -399,22 +456,33 @@ async function checkConfirm(load: any, acu: Acu) {
           } else if (finalTotal <= 0) {
             result = 'refused'; detail = 'Nothing left to ship on this shipment; cancel it in Acumatica';
           } else {
-            const edits = mine.filter(c => Number(c.final_qty) < Number(c.shipped_qty)).map(c => {
+            const lower = mine.filter(c => {
               const l = lines.find((x: any) => x.line === c.line_nbr);
-              return Number(c.final_qty) === 0 ? { id: l.id, delete: true } : { id: l.id, ShippedQty: { value: Number(c.final_qty) } };
+              return l && Number(l.qty) > Number(c.final_qty);
             });
-            if (edits.length) {
+            if (lower.length) {
+              const edits = lower.map(c => {
+                const l = lines.find((x: any) => x.line === c.line_nbr);
+                return Number(c.final_qty) === 0 ? { id: l.id, delete: true } : { id: l.id, ShippedQty: { value: Number(c.final_qty) } };
+              });
               const put = await acu.call('PUT', `/Shipment?$expand=Details`, { id: sh.id, Details: edits });
               if (!put.ok) throw new Error(`line changes refused: ${put.status} ${acuError(put.data)}`);
+              await settleLines(acu, nbr, mine, lower);
             }
+            // Control Qty has to equal the lines' total as Acumatica now holds it, or the document
+            // is "out of the balance". settleLines has proved the lines read the checked figures.
             const ctl = await acu.call('PUT', `/Shipment?$select=${FIELDS}`, { id: sh.id, Hold: { value: false }, ControlQty: { value: finalTotal } });
-            if (!ctl.ok) throw new Error(`Control Qty refused: ${ctl.status} ${acuError(ctl.data)}`);
+            if (!ctl.ok) {
+              let now = '';
+              try { const s = await acu.getShipment(nbr, false); now = ` (Acumatica reads shipped ${s.shipped_qty}, control ${s.control_qty}; expected ${finalTotal})`; } catch { /* keep the original error */ }
+              throw new Error(`Control Qty refused: ${ctl.status} ${acuError(ctl.data)}${now}`);
+            }
             await acu.confirmShipment(sh.id);
             const after = await acu.getShipment(nbr, false);
             status = after.status;
             if (after.status !== 'Confirmed') throw new Error(`Quantities set, but the shipment is ${after.status}, not Confirmed`);
             result = 'applied';
-            detail = edits.length ? `${edits.length} line(s) lowered or removed` : '';
+            detail = lower.length ? `${lower.length} line(s) lowered or removed` : '';
           }
         }
       } catch (e: any) {
@@ -553,7 +621,7 @@ async function requestJob(kind: 'apply' | 'check', loadId: number, actorName: st
     ? admin.from('loads').update({ write_requested_at: now, write_requested_by: actorName })
         .eq('id', loadId).in('status', ['confirmed', 'partial'])
     : admin.from('loads').update({ confirm_requested_at: now, confirm_requested_by: actorName })
-        .eq('id', loadId).in('status', ['done', 'partial']).in('check_status', ['checking', 'partial']);
+        .eq('id', loadId).in('status', ['done', 'partial']).in('check_status', ['checking', 'partial']).not('checker_done_at', 'is', null);
   const { data: marked, error: e2 } = await q.select('id');
   if (e2) throw e2;
   if (!marked?.length) return { ok: false, error: NOT_WAITING[kind] };
@@ -919,7 +987,7 @@ Deno.serve(async (req) => {
       case 'sync_live_lines':
         return json({ ok: true, ...(await syncLiveLines()) });
       case 'check_confirm': {
-        if (!roles.includes('checker')) return json({ ok: false, error: 'Only the checker can confirm loads' }, 403);
+        if (!roles.includes('supervisor')) return json({ ok: false, error: 'Only a supervisor (Invoicing) can confirm loads in Acumatica' }, 403);
         const id = Number(p.load_id);
         if (!id) return json({ ok: false, error: 'load_id is required' }, 400);
         return json(await requestJob('check', id, actorName));

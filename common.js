@@ -612,7 +612,7 @@ function eventList(evs, key) {
   if (!evs.length) return '';
   const label = e => ({ create:'Created', edit:'Edited', move:'Shipments', send:'Sent to liaison', pull_back:'Pulled back', return:'Sent back to coordinator',
     call: e.outcome || 'Call', confirm:'Trucker confirmed', unconfirm:'Confirmation undone', writeback:'Acumatica', unstick:'Marked stuck', delete:'Deleted',
-    pick_done:'Picked', pick_reopen:'Pick reopened', check_save:'Checked', check_confirm:'Confirmed in Acumatica' }[e.kind] || e.kind);
+    pick_done:'Picked', pick_reopen:'Pick reopened', check_save:'Split saved', check_done:'Check finished', check_reopen:'Check reopened', check_confirm:'Confirmed in Acumatica' }[e.kind] || e.kind);
   return `<details ${key ? keep(key) : ''}><summary>History (${evs.length})</summary><ul class="evs">${evs.map(e => `<li><b>${esc(label(e))}</b>${e.ship_via ? ' · ' + esc(e.ship_via) : ''}${e.contractor ? ' · ' + esc(e.contractor) : ''}${e.note ? ' — ' + esc(e.note) : ''}
     <span style="float:right">${esc(e.actor_name || '')}, ${esc(stamp(e.created_at))}</span></li>`).join('')}</ul></details>`;
 }

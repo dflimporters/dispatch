@@ -42,6 +42,13 @@
   .grp .gh .gsel { color:var(--accent); font-size:12px; font-weight:600; }
   .grp .gh .gval { margin-left:auto; font-weight:600; color:var(--navy); }
   table.inv tr.bad td { background:var(--bad-bg); }
+  table.pc tr.ihead td { background:#f8fafc; border-top:1px solid var(--border); }
+  table.pc tr.ihead.mis td { background:var(--warn-bg); }
+  table.pc tr.cust td:first-child { padding-left:26px; }
+  table.pc tr.low td { background:var(--warn-bg); }
+  table.pc tr.zero td { background:var(--bad-bg); }
+  table.pc .mis-note { font-size:12px; color:var(--warn-text); font-weight:600; }
+  table.pc input[type=number] { width:80px; text-align:right; font:inherit; font-size:14px; padding:5px 8px; border:1px solid var(--border2); border-radius:6px; }
   @media (max-width:900px) { .filt .frow { grid-template-columns:repeat(2,minmax(0,1fr)); } }
   @media (max-width:640px) {
     table.inv .hide-m { display:none; }
@@ -59,9 +66,148 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
 <script src="common.js"></script>
 <script>
-  const V = { ships: [], loadOf: new Map(), inv: new Map(), sel: new Set(), date: '', busy: false, poll: null, was: false };
+  const V = { ships: [], loadOf: new Map(), inv: new Map(), sel: new Set(), date: '', busy: false, poll: null, was: false,
+              pend: [], picks: new Map(), items: new Map(), checks: [], final: new Map(), notes: new Map(), openL: new Set(), wasConf: new Map() };
+
+  // ------------------------------------------------------------------
+  // Loads the checker has finished, waiting to be confirmed in Acumatica.
+  // The checker counts per SKU; where a SKU came up short, the clerk says which
+  // customers go short, then confirms. Lowered lines and Control Qty are written
+  // by dispatch-acu check_confirm.
+  // ------------------------------------------------------------------
+  async function loadPending() {
+    const r = await sb.from('loads').select('*').eq('env', D.env).not('checker_done_at', 'is', null)
+      .or('check_status.is.null,check_status.neq.confirmed').order('load_date').order('wave').order('seq');
+    if (r.error) throw r.error;
+    const loads = r.data || [], ids = loads.map(l => l.id);
+    let ls = [], bundle = { picks: [], items: [], checks: [] };
+    if (ids.length) {
+      const [a, b] = await Promise.all([
+        sb.from('load_shipments').select('*').in('load_id', ids),
+        sb.rpc('dispatch_pick_bundle', { p_load_ids: ids, p_with_checks: true }),
+      ]);
+      if (a.error) throw a.error;
+      if (b.error) throw b.error;
+      ls = a.data || []; bundle = b.data;
+    }
+    const nbrs = ls.map(x => x.shipment_nbr);
+    const rows = nbrs.length ? await shipmentsByNbr(nbrs) : [];
+    const byNbr = new Map(rows.map(x => [x.shipment_nbr, x]));
+    // Item lines: fetch what isn't held yet, and again for a part-confirmed load (its lines moved).
+    const redo = new Set(loads.filter(l => l.check_status === 'partial').flatMap(l => ls.filter(x => x.load_id === l.id).map(x => x.shipment_nbr)));
+    const need = nbrs.filter(n => !D.lines.has(n) || redo.has(n));
+    if (need.length) await loadLines(need);
+    V.pend = loads.map(l => ({ ...l, ships: ls.filter(x => x.load_id === l.id).map(x => ({ ...x, row: byNbr.get(x.shipment_nbr) || null })) }));
+    V.picks = new Map(ids.map(id => [id, (bundle.picks || []).filter(x => x.load_id === id)]));
+    V.items = new Map(ids.map(id => [id, new Map((bundle.items || []).filter(x => x.load_id === id).map(x => [x.inventory_id, x]))]));
+    V.checks = bundle.checks || [];
+    [...V.final.keys()].forEach(id => { if (!ids.includes(id)) { V.final.delete(id); V.notes.delete(id); } });
+    V.pend.forEach(l => {
+      const busy = confirmQueued(l) || l.check_status === 'confirming';
+      if (V.wasConf.get(l.id) && !busy) toast(l.check_status === 'partial' ? `${l.load_nbr}: some shipments didn't confirm. Open it to see why.` : `${l.load_nbr} confirmed in Acumatica`, l.check_status === 'partial');
+      if (busy) V.wasConf.set(l.id, true); else V.wasConf.delete(l.id);
+    });
+  }
+
+  const pkey = (nbr, ln) => nbr + '|' + ln;
+  function pLinesOf(l) {
+    return l.ships.slice().sort((a, b) => a.shipment_nbr.localeCompare(b.shipment_nbr)).flatMap(s =>
+      (D.lines.get(s.shipment_nbr) || []).filter(x => Number(x.shipped_qty) > 0).map(x => ({
+        nbr: s.shipment_nbr, customer: (s.row && (s.row.customer_name || s.row.customer_id)) || '', line_nbr: x.line_nbr,
+        item: x.inventory_id, desc: x.description, uom: x.uom, shipped: Number(x.shipped_qty),
+      })));
+  }
+  // What goes out per shipment line: a saved split wins; else the checker's count per SKU
+  // spread over the shipments in order (the shortfall lands on the last ones); else as shipped.
+  function pDefaults(l) {
+    const lines = pLinesOf(l), saved = V.checks.filter(c => c.load_id === l.id), m = new Map();
+    if (saved.length) {
+      V.notes.set(l.id, new Map(saved.filter(c => c.note).map(c => [pkey(c.shipment_nbr, c.line_nbr), c.note])));
+      lines.forEach(x => { const c = saved.find(s => s.shipment_nbr === x.nbr && s.line_nbr === x.line_nbr); m.set(pkey(x.nbr, x.line_nbr), c ? Number(c.final_qty) : x.shipped); });
+      return m;
+    }
+    const got = V.items.get(l.id) || new Map();
+    const left = new Map([...got.values()].filter(c => c.checked_qty != null).map(c => [c.inventory_id, Number(c.checked_qty)]));
+    lines.forEach(x => {
+      if (!left.has(x.item)) { m.set(pkey(x.nbr, x.line_nbr), x.shipped); return; }
+      const give = Math.min(x.shipped, left.get(x.item));
+      left.set(x.item, left.get(x.item) - give);
+      m.set(pkey(x.nbr, x.line_nbr), give);
+    });
+    return m;
+  }
+  const finalOf = l => { if (!V.final.has(l.id)) V.final.set(l.id, pDefaults(l)); return V.final.get(l.id); };
+  // SKUs of the load; `short` = the checker counted fewer than the shipments hold.
+  function pItems(l) {
+    const fin = finalOf(l), got = V.items.get(l.id) || new Map(), by = new Map();
+    pLinesOf(l).forEach(x => { if (!by.has(x.item)) by.set(x.item, []); by.get(x.item).push(x); });
+    return [...by.entries()].map(([item, xs]) => {
+      const onShip = xs.reduce((t, x) => t + x.shipped, 0), out = xs.reduce((t, x) => t + fin.get(pkey(x.nbr, x.line_nbr)), 0);
+      const c = got.get(item), checked = c && c.checked_qty != null ? Number(c.checked_qty) : null;
+      return { item, xs, onShip, out, checked, short: checked != null ? checked < onShip : out < onShip, desc: xs[0].desc };
+    });
+  }
+  const pMismatch = l => pItems(l).filter(i => i.short && i.checked != null && i.out !== i.checked);
+
+  function renderPending() {
+    const el = document.getElementById('invConfirm');
+    if (!el) return;
+    if (!V.pend.length) { el.innerHTML = ''; return; }
+    el.innerHTML = `<div class="section-h" style="font-size:14px;font-weight:700;color:var(--navy);margin:0 2px 8px">Checked loads to confirm in ${D.env === 'test' ? 'Acumatica TEST' : 'Acumatica'} (${V.pend.length})</div>${V.pend.map(pendCard).join('')}`;
+  }
+
+  function pendPill(l) {
+    if (confirmQueued(l)) return '<span class="pill warn">Queued for Acumatica</span>';
+    if (l.check_status === 'confirming') return `<span class="pill warn">Confirming ${l.ships.filter(s => s.check_result).length} of ${l.ships.length}…</span>`;
+    if (l.check_status === 'partial') return '<span class="pill bad">Partly confirmed</span>';
+    return '<span class="pill info">Ready to confirm</span>';
+  }
+
+  function pendCard(l) {
+    const items = pItems(l), shorts = items.filter(i => i.short), open = V.openL.has(l.id);
+    const queued = confirmQueued(l), confirming = l.check_status === 'confirming', locked = queued || confirming;
+    const res = l.ships.slice().sort((a, b) => a.shipment_nbr.localeCompare(b.shipment_nbr));
+    const bad = pMismatch(l);
+    return `<div class="grp"><div class="gh">
+        <button class="btn small" data-lopen="${l.id}" aria-expanded="${open}">${open ? 'Hide' : 'Open'}</button>
+        <span class="lnbr">${esc(l.load_nbr)}</span>${waveTag(l.wave)} <b>${esc(l.truck_type || '')}</b> <span class="target">${esc(l.ship_via || '')}</span>
+        <span class="muted">${plural(l.ships.length, 'shipment')} · ${shorts.length ? `<b style="color:var(--warn-text)">${plural(shorts.length, 'short item')}</b>` : 'nothing short'}</span>
+        ${pendPill(l)}<span class="gval">${locked ? '' : `<button class="btn primary small" data-confirm="${l.id}">${l.check_status === 'partial' ? 'Retry confirm' : 'Confirm in Acumatica'}</button>`}</span></div>
+      ${open ? `<div style="padding:10px 14px">
+        ${queued ? progressBox('Queued for Acumatica', 0, l.ships.length, 'Starts as soon as the load ahead of it is done.') : ''}
+        ${confirming ? progressBox('Confirming in Acumatica', res.filter(s => s.check_result).length, l.ships.length, 'Lowering lines and confirming, shipment by shipment. You can leave this page.') : ''}
+        ${bad.length ? `<div class="warnbox">Going out doesn't add up to the checker's count for: ${bad.map(i => esc(i.desc || i.item)).join(', ')}.</div>` : ''}
+        ${!pLinesOf(l).length ? '<div class="warnbox bad">No item lines for this load\'s shipments yet.</div>' : ''}
+        ${shorts.length ? `<table class="inv pc"><thead><tr><th>Short item / customer</th><th class="r">On shipment</th><th class="r">Going out</th></tr></thead>${shorts.map(i => pendItem(l, i, locked)).join('')}</table>`
+          : '<div class="muted" style="margin-bottom:8px">The checker found nothing short. Everything goes out as on the shipments.</div>'}
+        ${res.some(s => s.check_result) ? `<table class="inv"><thead><tr><th>Shipment</th><th>Customer</th><th>Acumatica</th></tr></thead><tbody>${res.map(s => `<tr><td class="num">${esc(s.shipment_nbr)}</td><td>${esc((s.row && (s.row.customer_name || s.row.customer_id)) || '')}</td>
+          <td>${s.check_result ? resultPill({ result: s.check_result }) + (s.check_detail ? ` <span class="muted">${esc(s.check_detail)}</span>` : '') : ''}</td></tr>`).join('')}</tbody></table>` : ''}
+      </div>` : ''}</div>`;
+  }
+
+  function pendItem(l, i, locked) {
+    const fin = finalOf(l), notes = V.notes.get(l.id) || new Map();
+    return `<tbody><tr class="ihead ${i.checked != null && i.out !== i.checked ? 'mis' : ''}"><td><b>${esc(i.desc || i.item)}</b> <span class="muted num">${esc(i.item)}</span>
+        <div class="mis-note">Checker counted ${i.checked != null ? fmt(i.checked) : '—'} of ${fmt(i.onShip)}${i.checked != null ? ` · short ${fmt(i.onShip - i.checked)}` : ''}</div></td>
+      <td class="r num">${fmt(i.onShip)}</td><td class="r num"><b>${fmt(i.out)}</b></td></tr>
+      ${i.xs.map(x => {
+        const k = pkey(x.nbr, x.line_nbr), fv = fin.get(k);
+        return `<tr class="cust ${fv === 0 ? 'zero' : fv < x.shipped ? 'low' : ''}"><td>${esc(x.customer)} <span class="muted num">${esc(x.nbr)}</span>
+          ${fv < x.shipped ? `<div><input type="text" maxlength="200" data-lnote="${esc(k)}" data-load="${l.id}" value="${esc(notes.get(k) || '')}" placeholder="${fv === 0 ? 'Why removed? e.g. substituted with item…' : 'Why lowered?'}" style="width:100%;margin-top:4px" ${locked ? 'disabled' : ''}></div>` : ''}</td>
+          <td class="r num">${fmt(x.shipped)}</td>
+          <td class="r"><input type="number" min="0" max="${x.shipped}" step="1" data-lfinal="${esc(k)}" data-load="${l.id}" value="${fv}" ${locked ? 'disabled' : ''} aria-label="Going out for ${esc(i.item)} to ${esc(x.customer)}"></td></tr>`;
+      }).join('')}</tbody>`;
+  }
+
+  function pPayload(l) {
+    const fin = finalOf(l), notes = V.notes.get(l.id) || new Map();
+    return pLinesOf(l).map(x => { const k = pkey(x.nbr, x.line_nbr), fv = fin.get(k);
+      return { shipment_nbr: x.nbr, line_nbr: x.line_nbr, final_qty: fv, note: fv < x.shipped ? (notes.get(k) || null) : null }; });
+  }
+  const editingBoxes = () => { const a = document.activeElement; return !!(a && a.dataset && (a.dataset.lfinal !== undefined || a.dataset.lnote !== undefined)); };
 
   async function loadAll() {
+    await loadPending();
     const { data: ships, error } = await sb.from(shipTable()).select(SHIP_COLS)
       .eq('status', 'Confirmed').eq('operation', 'Issue').order('shipment_date').order('shipment_nbr').range(0, 999);
     if (error) throw error;
@@ -136,7 +282,7 @@
   function ensureShell() {
     const main = document.getElementById('main');
     if (main.querySelector('#invTop')) return;
-    main.innerHTML = `<div id="invTop"></div>
+    main.innerHTML = `<div id="invConfirm"></div><div id="invTop"></div>
       <div class="filt" id="invFilt">
         <div class="fsearch"><label for="fq">Search</label><input class="txt" id="fq" type="search" autocomplete="off" placeholder="Load, trucker, customer, shipment or order…"></div>
         <div class="frow">
@@ -163,6 +309,7 @@
 
   function render() {
     ensureShell();
+    renderPending();
     const all = visible();
     const groups = new Map();
     all.forEach(s => {
@@ -240,6 +387,26 @@
   }
 
   document.getElementById('app').addEventListener('click', e => {
+    const lo = e.target.closest('[data-lopen]');
+    if (lo) { const id = Number(lo.dataset.lopen); V.openL.has(id) ? V.openL.delete(id) : V.openL.add(id); renderPending(); return; }
+    const cf = e.target.closest('[data-confirm]');
+    if (cf) {
+      const l = V.pend.find(x => x.id === Number(cf.dataset.confirm));
+      if (!l) return;
+      const bad = pMismatch(l);
+      if (bad.length) { V.openL.add(l.id); renderPending(); toast("Going out has to add up to the checker's count: " + bad.map(i => i.desc || i.item).join(', '), true); return; }
+      const lines = pLinesOf(l), fin = finalOf(l);
+      const low = lines.filter(x => fin.get(pkey(x.nbr, x.line_nbr)) < x.shipped).length;
+      const where = D.env === 'test' ? 'Acumatica TEST' : 'live Acumatica';
+      if (!confirm(`Confirm ${l.load_nbr} in ${where}?\n\n${plural(new Set(lines.map(x => x.nbr)).size, 'shipment')} will be confirmed${low ? `, with ${plural(low, 'line')} lowered or removed` : ''}.`)) return;
+      act(async () => {
+        if (l.check_status !== 'partial') { const { error } = await sb.rpc('dispatch_check_save', { p_load_id: l.id, p_lines: pPayload(l) }); if (error) throw error; }
+        const r = await callAcu('check_confirm', { load_id: l.id });
+        if (!r.ok) throw new Error(r.error || "Couldn't queue the load");
+        V.wasConf.set(l.id, true); V.final.delete(l.id); V.notes.delete(l.id); V.openL.add(l.id);
+      });
+      return;
+    }
     const b = e.target.closest('[data-act]');
     if (!b) return;
     const a = b.dataset.act;
@@ -272,6 +439,16 @@
   });
   document.getElementById('app').addEventListener('change', e => {
     const t = e.target;
+    if (t.dataset.lnote !== undefined) { const id = Number(t.dataset.load); if (!V.notes.has(id)) V.notes.set(id, new Map()); V.notes.get(id).set(t.dataset.lnote, t.value.trim()); return; }
+    if (t.dataset.lfinal !== undefined) {
+      const l = V.pend.find(x => x.id === Number(t.dataset.load));
+      const x = pLinesOf(l).find(y => pkey(y.nbr, y.line_nbr) === t.dataset.lfinal);
+      let n = Math.round(Number(t.value));
+      if (!(n >= 0)) n = 0;
+      if (n > x.shipped) { toast(`Only ${fmt(x.shipped)} on the shipment; adding is a new order`, true); n = x.shipped; }
+      finalOf(l).set(t.dataset.lfinal, n);
+      renderPending(); return;
+    }
     if (t.id === 'datePick') { V.date = t.value; render(); return; }
     if (t.dataset.ship !== undefined) { t.checked ? V.sel.add(t.dataset.ship) : V.sel.delete(t.dataset.ship); render(); return; }
     if (t.dataset.f !== undefined) { F[t.dataset.f] = t.value; render(); return; }
@@ -303,7 +480,7 @@
   startPage({
     page: 'supervisor', role: 'supervisor', title: 'Invoicing',
     onEnvChange: () => { V.sel.clear(); refresh(); },
-    onReady: () => { refresh(); setInterval(() => { if (!V.busy) refresh(); }, 30 * 1000); },
+    onReady: () => { refresh(); keepFresh(refresh, () => V.busy || editingBoxes(), ['loads', 'check_items']); },
   });
 </script>
 </body>

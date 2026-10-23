@@ -65,7 +65,7 @@
   function inArea(line) { return P.area === 'all' || line.area === Number(P.area); }
 
   async function loadAll() {
-    const loads = (await fetchLoads(P.date, { carry: true, events: false })).filter(l => ['done', 'partial'].includes(l.status) && l.check_status !== 'confirmed');
+    const loads = (await fetchLoads(P.date, { carry: true, events: false })).filter(l => ['done', 'partial'].includes(l.status) && l.check_status !== 'confirmed' && !l.checker_done_at);
     P.loads = loads;
     await loadPicks();
   }

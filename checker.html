@@ -7,45 +7,37 @@
 <meta name="robots" content="noindex, nofollow">
 <title>Checker — Logistics Management System</title>
 <!--
-  Checker: compares what was picked for a load with what's on its shipments,
-  sets what actually goes out on each shipment line, then confirms the load in
-  Acumatica (dispatch-acu check_confirm: lowered lines are reduced, zeroed lines
-  removed, Control Qty set, Confirm Shipment). Confirm only; invoicing stays
-  with Accounts for now.
+  Checker: a count sheet laid out like the picking sheet (items grouped by area, no
+  customers). For each SKU on the load the checker types what is actually there and ticks
+  the line; the line turns green. When every line is ticked the check is finished and the
+  load goes to Invoicing (dispatch_check_item / dispatch_check_finish).
 
-  Picking is consolidated per item, so a short pick has to be split back over
-  the shipments. The default fills shipments in shipment-number order and
-  leaves the shortfall on the last ones; the checker can move it. Quantities
-  can only be lowered (an addition is a new SO). An item nobody picked defaults
-  to what's on the shipment and is flagged.
-
-  Live loads also need DISPATCH_LIVE_CHECKER = 'on' in dispatch-acu, switched on
-  after a supervised pilot load.
+  Nothing is written to Acumatica from here. Invoicing splits any short SKU over the
+  customers and confirms the shipments (invoicing.html -> dispatch-acu check_confirm).
 -->
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="common.css">
 <style>
   .cload { display:block; width:100%; text-align:left; font:inherit; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px; margin-bottom:10px; cursor:pointer; color:var(--text); }
+  .cload:hover { border-color:var(--border2); }
   .cload .top { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   .cload .sub { font-size:13px; color:var(--text-muted); margin-top:4px; }
   .back { font:inherit; font-size:14px; font-weight:600; background:none; border:0; color:var(--accent); cursor:pointer; padding:4px 0; margin-bottom:8px; }
-  .itemsbox { background:var(--surface); border:1px solid var(--border); border-radius:12px; overflow:hidden; margin-bottom:12px; }
-  table.chk tr.ihead td { background:#f8fafc; border-top:1px solid var(--border); padding-top:9px; padding-bottom:9px; }
-  table.chk tr.ihead td b { color:var(--navy); }
-  table.chk tr.ihead.mis td { background:var(--warn-bg); }
-  table.chk tr.cust td:first-child { padding-left:26px; }
-  table.chk .mis-note { font-size:12px; color:var(--warn-text); font-weight:600; }
-  .shipsbox { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:4px 14px 10px; margin-bottom:12px; }
-  .shipsbox summary { cursor:pointer; font-weight:600; padding:8px 0; color:var(--navy); }
-  table.chk { width:100%; border-collapse:collapse; font-size:13px; }
-  table.chk th { text-align:left; font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.3px; padding:6px 10px; border-bottom:1px solid var(--border); }
-  table.chk td { padding:6px 10px; border-top:1px solid #f1f5f9; vertical-align:middle; }
-  table.chk td.r, table.chk th.r { text-align:right; }
-  table.chk tr.low td { background:var(--warn-bg); }
-  table.chk tr.zero td { background:var(--bad-bg); }
-  table.chk input { width:80px; text-align:right; font:inherit; font-size:14px; padding:5px 8px; border:1px solid var(--border2); border-radius:6px; }
-  .sumbar { position:sticky; bottom:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; background:var(--navy); color:#fff; border-radius:12px; padding:12px 14px; margin-top:12px; box-shadow:0 6px 20px rgba(15,32,68,.25); font-size:13px; }
-  .sumbar .btn { border-color:#fff; }
+  .item { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px 12px; align-items:center; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px; margin-bottom:8px; }
+  .item.ok { border-color:#34d399; background:var(--ok-bg); }
+  .item .desc { font-size:15px; font-weight:600; color:var(--navy); line-height:1.3; }
+  .item .meta { font-size:12.5px; color:var(--text-muted); margin-top:2px; }
+  .item .need { font-size:22px; font-weight:700; color:var(--navy); text-align:right; font-variant-numeric:tabular-nums; }
+  .item .need small { display:block; font-size:11px; font-weight:500; color:var(--text-muted); }
+  .item .acts { grid-column:1 / -1; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .item .acts input[type=number] { width:100px; font:inherit; font-size:17px; padding:9px 10px; border:1px solid var(--border2); border-radius:8px; text-align:right; }
+  .item .acts .btn { font-size:14px; padding:9px 12px; }
+  .item .tick { display:inline-flex; align-items:center; gap:8px; font-size:15px; font-weight:600; color:var(--navy); cursor:pointer; padding:6px 4px; }
+  .item .tick input { width:28px; height:28px; cursor:pointer; accent-color:#059669; }
+  .item .got { font-size:13px; color:var(--text-muted); margin-left:auto; }
+  .areah { font-size:13px; font-weight:700; color:var(--navy); margin:14px 2px 6px; display:flex; align-items:center; gap:8px; }
+  .sumbar { position:sticky; bottom:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; background:var(--navy); color:#fff; border-radius:12px; padding:12px 14px; margin-top:12px; box-shadow:0 6px 20px rgba(15,32,68,.25); font-size:14px; }
+  .sumbar .btn { border-color:#fff; font-size:15px; padding:10px 16px; }
 </style>
 </head>
 <body>
@@ -54,87 +46,47 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
 <script src="common.js"></script>
 <script>
-  const K = { q: '', date: jmDate(0), loads: [], picks: new Map(), areaDone: [], checks: [], open: null, final: new Map(), busy: false, was: new Map(), poll: null };
-  const key = (nbr, ln) => nbr + '|' + ln;
+  const AREAS = [[1, 'Area 1'], [2, 'Area 2'], [3, 'Area 3'], [4, 'Area 4'], [5, 'Area 5'], [6, 'Area 6'], [7, 'Area 7'], [0, 'Unassigned']];
+  const K = { q: '', date: jmDate(0), loads: [], picks: new Map(), items: new Map(), areaDone: [], staged: [], open: null, busy: false };
+  const areaName = a => (AREAS.find(x => x[0] === Number(a)) || [0, 'Unassigned'])[1];
 
   async function loadAll() {
     const loads = (await fetchLoads(K.date, { carry: true })).filter(l => ['done', 'partial'].includes(l.status));
     const ids = loads.map(l => l.id);
-    // Item lines are only needed on a load's own screen, so fetch them for the open load alone.
-    const openLoad = loads.find(l => l.id === K.open);
-    const [b] = await Promise.all([
-      ids.length ? sb.rpc('dispatch_pick_bundle', { p_load_ids: ids, p_with_checks: true }) : { data: { picks: [], done: [], staged: [], checks: [] } },
-      openLoad ? loadLines(openLoad.ships.map(s => s.shipment_nbr)) : null,
-    ]);
-    if (b.error) throw b.error;
-    K.staged = b.data.staged || [];
+    const r = ids.length ? await sb.rpc('dispatch_pick_bundle', { p_load_ids: ids, p_with_checks: true }) : { data: { picks: [], done: [], staged: [], items: [] } };
+    if (r.error) throw r.error;
     K.loads = loads;
-    K.picks = new Map(ids.map(id => [id, (b.data.picks || []).filter(x => x.load_id === id)]));
-    K.areaDone = b.data.done || [];
-    K.checks = b.data.checks || [];
-    loads.forEach(l => {
-      const busy = confirmQueued(l) || l.check_status === 'confirming';
-      if (K.was.get(l.id) && !busy) {
-        const bad = l.ships.filter(s => ['refused', 'failed'].includes(s.check_result)).length;
-        if (l.check_status === 'confirmed') toast(`${l.load_nbr} confirmed in Acumatica`);
-        else toast(`${l.load_nbr}: ${bad ? plural(bad, 'shipment') + " didn't confirm" : 'not confirmed'}. Open it to see why.`, true);
-      }
-      if (busy) K.was.set(l.id, true); else K.was.delete(l.id);
-    });
+    K.staged = r.data.staged || [];
+    K.areaDone = r.data.done || [];
+    K.picks = new Map(ids.map(id => [id, (r.data.picks || []).filter(x => x.load_id === id)]));
+    K.items = new Map(ids.map(id => [id, new Map((r.data.items || []).filter(x => x.load_id === id).map(x => [x.inventory_id, x]))]));
   }
 
-  // Lines of a load, in shipment / line order: { nbr, customer, line_nbr, item, desc, uom, shipped }.
-  function loadLinesOf(l) {
-    return l.ships.slice().sort((a, b) => a.shipment_nbr.localeCompare(b.shipment_nbr)).flatMap(s =>
-      (D.lines.get(s.shipment_nbr) || []).filter(x => Number(x.shipped_qty) > 0).map(x => ({
-        nbr: s.shipment_nbr, customer: (s.row && (s.row.customer_name || s.row.customer_id)) || '', line_nbr: x.line_nbr,
-        item: x.inventory_id, desc: x.description, uom: x.uom, shipped: Number(x.shipped_qty),
-      })));
-  }
-
-  // Default "going out": a saved check wins; else the consolidated pick split
-  // over the shipments in order (shortfall on the last); else what's shipped.
-  function defaults(l) {
-    const lines = loadLinesOf(l);
-    const saved = K.checks.filter(c => c.load_id === l.id);
-    const m = new Map();
-    K.notes = new Map(saved.filter(c => c.note).map(c => [key(c.shipment_nbr, c.line_nbr), c.note]));
-    if (saved.length) {
-      lines.forEach(x => { const c = saved.find(s => s.shipment_nbr === x.nbr && s.line_nbr === x.line_nbr); m.set(key(x.nbr, x.line_nbr), c ? Number(c.final_qty) : x.shipped); });
-      return m;
-    }
-    const picks = K.picks.get(l.id) || [];
-    const left = new Map(picks.filter(p => p.picked_qty != null).map(p => [p.inventory_id, Number(p.picked_qty)]));
-    lines.forEach(x => {
-      if (!left.has(x.item)) { m.set(key(x.nbr, x.line_nbr), x.shipped); return; }
-      const give = Math.min(x.shipped, left.get(x.item));
-      left.set(x.item, left.get(x.item) - give);
-      m.set(key(x.nbr, x.line_nbr), give);
-    });
-    return m;
-  }
-
-  function pickState(l) {
-    const picks = K.picks.get(l.id) || [];
+  function itemsOf(l) { return K.items.get(l.id) || new Map(); }
+  function checkState(l) {
+    const picks = K.picks.get(l.id) || [], got = itemsOf(l);
+    const ticked = picks.filter(p => (got.get(p.inventory_id) || {}).confirmed).length;
+    const short = picks.filter(p => { const c = got.get(p.inventory_id); return c && c.confirmed && Number(c.checked_qty) < Number(p.required); }).length;
     const areas = [...new Set(picks.map(p => p.area))];
-    const done = areas.filter(a => K.areaDone.some(d => d.load_id === l.id && d.area === a)).length;
-    const staged = areas.filter(a => (K.staged || []).some(d => d.load_id === l.id && d.area === a)).length;
-    return { areas: areas.length, done, staged, unpicked: picks.filter(p => p.picked_qty == null).length,
-             short: picks.filter(p => p.picked_qty != null && Number(p.picked_qty) < Number(p.required)).length };
+    return { total: picks.length, ticked, short, areas: areas.length,
+             staged: areas.filter(a => K.staged.some(d => d.load_id === l.id && d.area === a)).length };
   }
+  const withAcumatica = l => confirmQueued(l) || ['confirming', 'confirmed', 'partial'].includes(l.check_status);
   function checkPill(l) {
-    if (confirmQueued(l)) return '<span class="pill warn">Queued for Acumatica</span>';
-    if (l.check_status === 'confirming') return `<span class="pill warn">Confirming ${l.ships.filter(s => s.check_result).length} of ${l.count}…</span>`;
-    return { checking: '<span class="pill info">Check saved</span>', confirming: '<span class="pill warn">Confirming…</span>',
-             confirmed: '<span class="pill ok">Confirmed in Acumatica</span>', partial: '<span class="pill bad">Partly confirmed</span>' }[l.check_status]
-      || '<span class="pill done">Not checked</span>';
+    const s = checkState(l);
+    if (l.check_status === 'confirmed') return '<span class="pill ok">Confirmed in Acumatica</span>';
+    if (l.check_status === 'partial') return '<span class="pill bad">Acumatica problem · Invoicing</span>';
+    if (confirmQueued(l) || l.check_status === 'confirming') return '<span class="pill warn">Invoicing is confirming…</span>';
+    if (l.checker_done_at) return '<span class="pill ok">Checked · with Invoicing</span>';
+    if (s.ticked) return `<span class="pill info">Checking ${s.ticked}/${s.total}</span>`;
+    return '<span class="pill done">Not checked</span>';
   }
 
   function render() {
     const main = document.getElementById('main');
-    if (K.open) { main.innerHTML = loadView(K.loads.find(l => l.id === K.open)); return; }
+    if (K.open) { keepSearchFocus(() => { main.innerHTML = loadView(K.loads.find(l => l.id === K.open)); }); return; }
     const vis = K.loads.filter(l => loadMatches(l, K.q));
-    const todo = vis.filter(l => l.check_status !== 'confirmed'), done = vis.filter(l => l.check_status === 'confirmed');
+    const todo = vis.filter(l => !l.checker_done_at), done = vis.filter(l => l.checker_done_at);
     main.innerHTML = `
       <div class="controls">
         <div class="seg" id="daySeg">
@@ -145,107 +97,66 @@
         ${searchBox(K.q)}
       </div>
       <div class="kpis">
-        <div class="kpi"><div class="l">To check</div><div class="v">${todo.length}</div><div class="s">${todo.filter(l => { const p = pickState(l); return p.areas && p.done === p.areas; }).length} fully picked</div></div>
-        <div class="kpi"><div class="l">Confirmed</div><div class="v">${done.length}</div><div class="s">in Acumatica${D.env === 'test' ? ' TEST' : ''}</div></div>
-        <div class="kpi ${todo.some(l => l.check_status === 'partial') ? 'warn' : ''}"><div class="l">Problems</div><div class="v">${todo.filter(l => l.check_status === 'partial').length}</div><div class="s">partly confirmed</div></div>
-        <div class="kpi"><div class="l">Short picks</div><div class="v">${K.loads.reduce((s, l) => s + pickState(l).short, 0)}</div><div class="s">items across loads</div></div>
+        <div class="kpi"><div class="l">To check</div><div class="v">${todo.length}</div><div class="s">${todo.filter(l => { const s = checkState(l); return s.areas && s.staged === s.areas; }).length} fully staged</div></div>
+        <div class="kpi"><div class="l">Checked</div><div class="v">${done.length}</div><div class="s">handed to Invoicing</div></div>
+        <div class="kpi"><div class="l">Short counts</div><div class="v">${K.loads.reduce((s, l) => s + checkState(l).short, 0)}</div><div class="s">items checked short</div></div>
       </div>
       ${vis.length ? [...todo, ...done].map(loadCard).join('') : `<div class="card"><div class="empty">${K.loads.length ? `Nothing matches “${esc(K.q)}”.` : `No loads with a trucker locked in for ${esc(niceDate(K.date))}.`}</div></div>`}`;
   }
 
   function loadCard(l) {
-    const p = pickState(l);
+    const s = checkState(l);
     return `<button class="cload" data-open="${l.id}">
       <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${waveTag(l.wave)}${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b><span class="target">${esc(l.ship_via || '')}</span>
         <span class="spacer"></span>${checkPill(l)}</div>
-      <div class="sub">${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} ·
-        picking ${p.areas ? `${p.done}/${p.areas} areas picked, ${p.staged} staged` : 'not started'}${p.unpicked ? ` · ${p.unpicked} not picked` : ''}${p.short ? ` · <b style="color:var(--warn-text)">${p.short} short</b>` : ''}</div>
+      <div class="sub">${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} · ${plural(s.total, 'item')} ·
+        ${s.areas ? `${s.staged}/${s.areas} areas staged` : 'picking not started'}${s.short ? ` · <b style="color:var(--warn-text)">${s.short} short</b>` : ''}</div>
     </button>`;
   }
 
   function loadView(l) {
     if (!l) { K.open = null; return '<div class="empty">That load is gone.</div>'; }
-    if (!K.final.size) K.final = defaults(l);
-    const lines = loadLinesOf(l);
-    const p = pickState(l);
-    const picks = new Map((K.picks.get(l.id) || []).map(x => [x.inventory_id, x]));
-    const queued = confirmQueued(l), confirming = l.check_status === 'confirming';
-    const locked = queued || ['confirming', 'confirmed'].includes(l.check_status);
-    const lowered = lines.filter(x => K.final.get(key(x.nbr, x.line_nbr)) < x.shipped);
-    const where = 'Acumatica' + (D.env === 'test' ? ' TEST' : '');
-
-    // Items in picking order (area, then description), customers beneath.
-    const byItem = new Map();
-    lines.forEach(x => { if (!byItem.has(x.item)) byItem.set(x.item, []); byItem.get(x.item).push(x); });
-    const items = [...byItem.entries()].sort(([a, la], [b, lb]) =>
-      ((picks.get(a) || {}).area ?? 9) - ((picks.get(b) || {}).area ?? 9) || (la[0].desc || '').localeCompare(lb[0].desc || ''));
-
-    const res = l.ships.slice().sort((a, b) => a.shipment_nbr.localeCompare(b.shipment_nbr));
-    const through = res.filter(s => s.check_result).length;
-    const anyResult = res.some(s => s.check_result);
+    const lines = (K.picks.get(l.id) || []).slice().sort((a, b) => (a.area || 9) - (b.area || 9) || (a.description || '').localeCompare(b.description || ''));
+    const got = itemsOf(l), s = checkState(l);
+    const finished = !!l.checker_done_at, locked = finished;
+    const canReopen = finished && !withAcumatica(l);
+    const areas = [...new Set(lines.map(x => x.area))];
     return `
       <button class="back" data-back>← All loads</button>
-      <div class="lhead"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${waveTag(l.wave)} ${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b> <span class="target">${esc(l.ship_via || '')}</span>
-        <span class="muted">${esc(l.contractor || '')}</span></div>${checkPill(l)}</div>
-      ${setWaveHtml(l)}
-      <div class="lstats"><span>${plural(l.count, 'shipment')}</span><span>${plural(items.length, 'item')}</span><span>${esc(l.zones.join(', '))}</span>
-        <span>picking ${p.areas ? `${p.done}/${p.areas} areas picked` : 'not started'}</span>
-        <span>${p.areas ? `${p.staged}/${p.areas} staged` : ''}</span></div>
-      ${p.areas && p.staged < p.areas ? `<div class="warnbox info">${p.areas - p.staged} of ${p.areas} area(s) not staged yet.</div>` : ''}
-      ${queued ? progressBox('Queued for ' + where, 0, l.count, 'Starts as soon as the load ahead of it is done. You can go back and check other loads.') : ''}
-      ${confirming ? progressBox('Confirming in ' + where, through, l.count, 'Lowering lines and confirming, shipment by shipment. You can go back and check other loads.') : ''}
-      ${p.unpicked ? `<div class="warnbox">${plural(p.unpicked, 'item')} on this load ${p.unpicked === 1 ? 'has' : 'have'} no picked quantity. They default to the shipment's quantity; lower them if they're not going.</div>` : ''}
-      ${!lines.length ? `<div class="warnbox bad">No item lines for this load's shipments${D.env === 'live' ? ' (the live line sync may not be running yet)' : '; pull fresh TEST data'}.</div>` : ''}
-      ${lines.length ? `<div class="itemsbox"><table class="chk">
-        <thead><tr><th>Item / customer</th><th class="hide-m">UOM</th><th class="r">On shipment</th><th class="r hide-m">Picked</th><th class="r">Going out</th></tr></thead>
-        ${items.map(([item, xs]) => {
-          const pk = picks.get(item);
-          const onShip = xs.reduce((t, x) => t + x.shipped, 0);
-          const out = xs.reduce((t, x) => t + K.final.get(key(x.nbr, x.line_nbr)), 0);
-          const picked = pk && pk.picked_qty != null ? Number(pk.picked_qty) : null;
-          const mis = picked != null && out !== picked;
-          return `<tbody>
-            <tr class="ihead ${mis ? 'mis' : ''}"><td><b>${esc(xs[0].desc || item)}</b> <span class="muted num">${esc(item)}</span>
-                ${mis ? `<div class="mis-note">Going out ${fmt(out)}, picked ${fmt(picked)}</div>` : ''}</td>
-              <td class="hide-m">${esc(xs[0].uom || '')}</td><td class="r num"><b>${fmt(onShip)}</b></td>
-              <td class="r num hide-m">${picked != null ? `<b>${fmt(picked)}</b>` : '<span class="tag old">not picked</span>'}</td>
-              <td class="r num"><b>${fmt(out)}</b></td></tr>
-            ${xs.map(x => {
-              const fv = K.final.get(key(x.nbr, x.line_nbr));
-              const cls = fv === 0 ? 'zero' : fv < x.shipped ? 'low' : '';
-              const nk = key(x.nbr, x.line_nbr);
-              return `<tr class="cust ${cls}"><td>${esc(x.customer)} <span class="muted num">${esc(x.nbr)}</span>
-                ${fv < x.shipped ? `<div><input type="text" maxlength="200" data-note="${esc(nk)}" value="${esc((K.notes && K.notes.get(nk)) || '')}" placeholder="${fv === 0 ? 'Why removed? e.g. substituted with item…' : 'Why lowered?'}" style="width:100%;margin-top:4px" ${locked ? 'disabled' : ''} aria-label="Reason for ${esc(item)} to ${esc(x.customer)}"></div>` : ''}</td><td class="hide-m"></td>
-                <td class="r num">${fmt(x.shipped)}</td><td class="hide-m"></td>
-                <td class="r"><input type="number" min="0" max="${x.shipped}" step="1" data-final="${esc(key(x.nbr, x.line_nbr))}" value="${fv}" ${locked ? 'disabled' : ''} aria-label="Going out for ${esc(item)} to ${esc(x.customer)}"></td></tr>`;
-            }).join('')}</tbody>`;
-        }).join('')}
-      </table></div>` : ''}
-      <details class="shipsbox" ${anyResult ? 'open' : keep('cships-' + l.id)}><summary>Shipments on this load (${l.count})</summary>
-        <table class="chk"><thead><tr><th>Shipment</th><th>Customer</th><th>${esc(where)}</th></tr></thead><tbody>
-        ${res.map(s => `<tr><td class="num">${esc(s.shipment_nbr)}</td><td>${esc((s.row && (s.row.customer_name || s.row.customer_id)) || '')}</td>
-          <td>${s.check_result ? resultPill({ result: s.check_result }) + (s.check_detail ? ` <span class="muted">${esc(s.check_detail)}</span>` : '') : (confirming ? '<span class="muted">waiting…</span>' : '')}</td></tr>`).join('')}
-        </tbody></table></details>
-      ${lines.length && !queued && !confirming ? `<div class="sumbar">
-        <span>${lowered.length ? `${plural(lowered.length, 'line')} lowered (${lowered.filter(x => K.final.get(key(x.nbr, x.line_nbr)) === 0).length} removed)` : 'Everything goes out as on the shipments'}</span>
-        <span class="spacer"></span>
-        <button class="btn small" data-act="save" ${locked ? 'disabled' : ''}>Save check</button>
-        <button class="btn primary small" data-act="confirm" ${locked && l.check_status !== 'partial' ? 'disabled' : ''}>${l.check_status === 'partial' ? 'Retry confirm' : 'Confirm in Acumatica'}</button>
+      <div class="lhead" style="margin-bottom:6px"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${waveTag(l.wave)} ${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b>
+        <span class="target">${esc(l.ship_via || '')}</span> <span class="muted">${esc(l.contractor || '')}</span></div>${checkPill(l)}</div>
+      <div class="muted" style="margin-bottom:10px">${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} · ${plural(lines.length, 'item')}${s.areas ? ` · ${s.staged}/${s.areas} areas staged` : ''}</div>
+      ${s.areas && s.staged < s.areas && !finished ? `<div class="warnbox info">${s.areas - s.staged} of ${s.areas} area(s) not staged yet.</div>` : ''}
+      ${finished ? `<div class="warnbox info">${withAcumatica(l) ? 'Invoicing has this load in Acumatica now.' : 'Check finished. Invoicing confirms this load in Acumatica.'}</div>` : ''}
+      ${!lines.length ? '<div class="warnbox bad">No item lines for this load\'s shipments' + (D.env === 'live' ? ' (the live line sync may not be running yet).' : '; pull fresh TEST data.') + '</div>' : ''}
+      ${areas.map(a => `<div class="areah">${areaName(a)}</div>${lines.filter(x => x.area === a).map(x => itemRow(l, x, got.get(x.inventory_id), locked)).join('')}`).join('')}
+      ${lines.length ? `<div class="sumbar">
+        <span><b>${s.ticked}</b> of ${s.total} lines checked${s.short ? ` · ${s.short} short` : ''}</span><span class="spacer"></span>
+        ${finished ? (canReopen ? '<button class="btn small" data-act="reopen">Reopen check</button>' : '')
+          : `<button class="btn primary" data-act="finish" ${s.ticked === s.total ? '' : 'disabled'}>Finish check</button>`}
       </div>` : ''}
       ${eventList(l.events, 'hist-' + l.id)}`;
   }
 
+  function itemRow(l, x, c, locked) {
+    const ok = !!(c && c.confirmed), qty = c && c.checked_qty != null ? Number(c.checked_qty) : null;
+    const short = qty != null && qty < Number(x.required);
+    const fill = x.picked_qty != null ? Number(x.picked_qty) : Number(x.required);
+    const dis = locked ? 'disabled' : '';
+    return `<div class="item ${ok ? 'ok' : ''}" data-item="${esc(x.inventory_id)}">
+      <div><div class="desc">${esc(x.description || x.inventory_id)}</div>
+        <div class="meta">${esc(x.inventory_id)} · ${esc(x.uom || '')} · ${x.picked_qty != null ? `picked ${fmt(x.picked_qty)}` : '<b style="color:var(--warn-text)">not picked</b>'}</div></div>
+      <div class="need">${fmt(x.required)}<small>on load</small></div>
+      <div class="acts">
+        <input type="number" inputmode="numeric" min="0" max="${Number(x.required)}" step="1" data-qty value="${qty != null ? qty : ''}" placeholder="Checked" aria-label="Checked quantity for ${esc(x.inventory_id)}" ${dis || (ok ? 'disabled' : '')}>
+        ${ok || locked ? '' : `<button class="btn small" data-fill="${fill}">= ${fmt(fill)}</button>`}
+        <label class="tick"><input type="checkbox" data-tick ${ok ? 'checked' : ''} ${dis} aria-label="Line checked for ${esc(x.inventory_id)}"> Checked</label>
+        <span class="got">${ok ? `${short ? `<b style="color:var(--warn-text)">Short ${fmt(Number(x.required) - qty)}</b> · ` : ''}${esc(c.checker_name || '')} ${esc(stamp(c.checked_at))}` : ''}</span>
+      </div>
+    </div>`;
+  }
+
   // ------------------------------------------------------------------
-  function payload(l) {
-    return loadLinesOf(l).map(x => {
-      const k = key(x.nbr, x.line_nbr), fv = K.final.get(k);
-      return { shipment_nbr: x.nbr, line_nbr: x.line_nbr, final_qty: fv, note: fv < x.shipped ? ((K.notes && K.notes.get(k)) || null) : null };
-    });
-  }
-  async function save(l) {
-    const { error } = await sb.rpc('dispatch_check_save', { p_load_id: l.id, p_lines: payload(l) });
-    if (error) throw error;
-  }
   async function act(fn) {
     if (K.busy) return;
     K.busy = true;
@@ -254,40 +165,50 @@
     finally { K.busy = false; await refresh(); }
   }
 
+  // Saves one SKU, then patches the screen from the answer instead of re-reading everything.
+  async function saveItem(row, qty, confirmed) {
+    const l = K.loads.find(x => x.id === K.open);
+    const inv = row.dataset.item;
+    const { error } = await sb.rpc('dispatch_check_item', { p_load_id: l.id, p_inventory_id: inv, p_qty: qty, p_confirmed: confirmed });
+    if (error) { toast(errMsg(error), true); await refresh(); return; }
+    const m = itemsOf(l); K.items.set(l.id, m);
+    if (qty == null) m.delete(inv);
+    else m.set(inv, { load_id: l.id, inventory_id: inv, checked_qty: qty, confirmed, checker_name: D.me && D.me.name, checked_at: new Date().toISOString() });
+    render();
+  }
+  function qtyOf(row, line) {
+    const v = row.querySelector('[data-qty]').value.trim();
+    if (v === '') return null;
+    const n = Math.round(Number(v));
+    if (!(n >= 0)) { toast("That isn't a quantity", true); return undefined; }
+    if (n > Number(line.required)) { toast(`Only ${fmt(line.required)} on the load. Checked can't be more.`, true); return undefined; }
+    return n;
+  }
+  const lineOf = row => (K.picks.get(K.open) || []).find(x => x.inventory_id === row.dataset.item);
+
   document.getElementById('app').addEventListener('click', e => {
     const t = e.target;
     const day = t.closest('#daySeg button');
     if (day) { K.date = jmDate(Number(day.dataset.day)); K.open = null; refresh(); return; }
     const op = t.closest('[data-open]');
-    if (op) {
-      K.open = Number(op.dataset.open); K.final = new Map();
-      const l = K.loads.find(x => x.id === K.open);
-      const need = l.ships.map(s => s.shipment_nbr).filter(n => !D.lines.has(n));
-      const go = () => { if (K.open === l.id) { render(); window.scrollTo(0, 0); } };
-      if (!need.length) { go(); return; }
-      document.getElementById('main').innerHTML = '<div class="empty">Loading items…</div>';
-      loadLines(need).then(go).catch(err => { K.open = null; toast(errMsg(err), true); render(); });
-      return;
-    }
-    if (t.closest('[data-back]')) { K.open = null; K.final = new Map(); render(); return; }
+    if (op) { K.open = Number(op.dataset.open); render(); window.scrollTo(0, 0); return; }
+    if (t.closest('[data-back]')) { K.open = null; render(); return; }
     const sw = t.closest('[data-setwave]');
     if (sw) { act(() => setWave(Number(sw.dataset.load), sw.dataset.setwave)); return; }
+    const fill = t.closest('[data-fill]');
+    if (fill) {
+      const row = fill.closest('.item'); row.querySelector('[data-qty]').value = fill.dataset.fill;
+      saveItem(row, Number(fill.dataset.fill), false); return;
+    }
     const b = t.closest('[data-act]');
     if (!b) return;
     const l = K.loads.find(x => x.id === K.open);
-    if (b.dataset.act === 'save') { act(async () => { await save(l); toast('Check saved'); }); return; }
-    if (b.dataset.act === 'confirm') {
-      const lines = loadLinesOf(l);
-      const low = lines.filter(x => K.final.get(key(x.nbr, x.line_nbr)) < x.shipped).length;
-      const where = D.env === 'test' ? 'Acumatica TEST' : 'live Acumatica';
-      if (!confirm(`Confirm ${l.load_nbr} in ${where}?\n\n${plural(new Set(lines.map(x => x.nbr)).size, 'shipment')} will be confirmed${low ? `, with ${plural(low, 'line')} lowered or removed` : ''}. Invoicing stays with Accounts.`)) return;
-      act(async () => {
-        if (l.check_status !== 'partial') await save(l);
-        const r = await callAcu('check_confirm', { load_id: l.id });
-        if (!r.ok) throw new Error(r.error || "Couldn't queue the load");
-        K.was.set(l.id, true);
-      });
+    if (b.dataset.act === 'finish') {
+      const s = checkState(l);
+      if (!confirm(`Finish checking ${l.load_nbr}?\n\n${s.short ? `${plural(s.short, 'item')} checked short. ` : ''}It goes to Invoicing, and you can't change lines after this unless you reopen it.`)) return;
+      act(async () => { const { error } = await sb.rpc('dispatch_check_finish', { p_load_id: l.id }); if (error) throw error; toast('Check finished. With Invoicing now.'); });
     }
+    if (b.dataset.act === 'reopen') act(async () => { const { error } = await sb.rpc('dispatch_check_reopen', { p_load_id: l.id }); if (error) throw error; });
   });
   document.getElementById('app').addEventListener('input', e => {
     if (e.target.id === 'q') { K.q = e.target.value; keepSearchFocus(render); }
@@ -295,40 +216,36 @@
   document.getElementById('app').addEventListener('change', e => {
     const t = e.target;
     if (t.id === 'datePick' && t.value) { K.date = t.value; K.open = null; refresh(); return; }
-    if (t.dataset.note !== undefined) { if (!K.notes) K.notes = new Map(); K.notes.set(t.dataset.note, t.value.trim()); return; }
-    if (t.dataset.final === undefined) return;
-    const l = K.loads.find(x => x.id === K.open);
-    const x = loadLinesOf(l).find(y => key(y.nbr, y.line_nbr) === t.dataset.final);
-    let n = Math.round(Number(t.value));
-    if (!(n >= 0)) n = 0;
-    if (n > x.shipped) { toast(`Only ${fmt(x.shipped)} on the shipment; adding is a new order`, true); n = x.shipped; }
-    K.final.set(t.dataset.final, n);
-    render();
+    const row = t.closest && t.closest('.item[data-item]');
+    if (!row) return;
+    const line = lineOf(row);
+    if (t.dataset.qty !== undefined) {
+      const n = qtyOf(row, line);
+      if (n === undefined) { render(); return; }
+      saveItem(row, n, false);
+    } else if (t.dataset.tick !== undefined) {
+      if (!t.checked) { const n = qtyOf(row, line); saveItem(row, n === undefined ? null : n, false); return; }
+      const n = qtyOf(row, line);
+      if (n == null) { t.checked = false; toast('Enter the checked quantity first (or tap = ' + fmt(line.picked_qty != null ? line.picked_qty : line.required) + ')', true); return; }
+      saveItem(row, n, true);
+    }
   });
 
-  // While a load is queued or confirming, refresh every few seconds (also on
-  // the load's own screen, which the 30s refresh skips).
-  function poll() {
-    const active = K.loads.some(l => confirmQueued(l) || l.check_status === 'confirming');
-    if (!active || K.poll) return;
-    K.poll = setTimeout(async () => { K.poll = null; if (!K.busy && !editing()) await refresh(); else poll(); }, 3000);
-  }
-
   async function refresh() {
-    try { await loadAll(); keepSearchFocus(render); poll(); }
+    try { await loadAll(); render(); }
     catch (e) { console.error('[checker]', e); document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`; }
   }
   function editing() {
     const a = document.activeElement;
-    return a && a.id !== 'q' && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
+    return a && a.id !== 'q' && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.type !== 'checkbox';
   }
 
   startPage({
     page: 'checker', role: 'checker', title: 'Checker',
-    onEnvChange: () => { K.open = null; K.final = new Map(); refresh(); },
+    onEnvChange: () => { K.open = null; refresh(); },
     onReady: () => {
       refresh();
-      keepFresh(refresh, () => K.busy || editing(), ['pick_lines', 'pick_area_status', 'stage_area_status', 'check_lines', 'loads']);
+      keepFresh(refresh, () => K.busy || editing(), ['pick_lines', 'pick_area_status', 'stage_area_status', 'check_items', 'loads']);
     },
   });
 </script>
