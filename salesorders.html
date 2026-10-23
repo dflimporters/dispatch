@@ -8,13 +8,17 @@
 <title>Sales Orders — Logistics Management System</title>
 <!--
   Sales Orders, for the Logistics Coordinator: the orders still waiting to be put on a shipment.
-  READ-ONLY for now. Create Shipments (which will set the shipment date from the date box,
-  default today) is added once it has been tested on TEST.
+  Live mode reads dispatch_sales_orders(): production sales orders (SO type), Open and Back
+  Order by default, with what is still to ship, its volume, and whether stock at 71 covers it.
+  Orders on Credit Hold or On Hold can be shown but can't be selected: Acumatica won't ship them.
+  Test mode reads the Acumatica TEST tenant's Open / Back Order orders through dispatch-orders
+  (production order numbers don't exist there).
 
-  Reads dispatch_sales_orders(): production sales orders (SO type), Open and Back Order by
-  default, with what is still to ship, its volume, and whether stock at 71 covers it. Orders
-  on Credit Hold or On Hold can be shown but can't be selected: Acumatica won't ship them.
-  This page always shows production orders, whatever the Test / Live switch says.
+  Create shipments (dispatch-orders create_shipments) runs Create Shipment on the selected
+  orders with the date in the date box (default today; the coordinator picks tomorrow for the
+  next day's batch). Test writes to TEST only. Live is refused by the server until
+  DISPATCH_LIVE_ORDERS = 'on' (after a TEST run). The new shipments then appear on the
+  Coordinator page at the next shipment sync (within 5 minutes).
 -->
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="common.css">
@@ -47,7 +51,21 @@
 <script>
   const STATUSES = ['Open', 'Back Order', 'Shipping', 'Credit Hold', 'On Hold'];
   const CANT_SHIP = ['Credit Hold', 'On Hold'];
-  const S = { rows: [], statuses: ['Open', 'Back Order'], q: '', zone: 'all', sel: new Set(), date: jmDate(0), synced: null };
+  const S = { rows: [], statuses: ['Open', 'Back Order'], q: '', zone: 'all', sel: new Set(), date: jmDate(0), synced: null, results: null, busy: false };
+
+  async function callOrders(action, body) {
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) throw new Error('Signed out; reload and sign in again');
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/dispatch-orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: SUPABASE_PUBLISHABLE_KEY, Authorization: `Bearer ${session.access_token}` },
+      body: JSON.stringify({ action, ...(body || {}) }),
+    });
+    let json = null;
+    try { json = await res.json(); } catch (e) {}
+    if (!res.ok && !(json && 'ok' in json)) throw new Error(`dispatch-orders ${res.status}`);
+    return json;
+  }
   try {
     const f = JSON.parse(localStorage.getItem('dispatch-so-filter') || '{}');
     if (Array.isArray(f.statuses) && f.statuses.every(x => STATUSES.includes(x)) && f.statuses.length) S.statuses = f.statuses;
@@ -55,13 +73,22 @@
   function saveFilter() { try { localStorage.setItem('dispatch-so-filter', JSON.stringify({ statuses: S.statuses })); } catch (e) {} }
 
   async function loadAll() {
-    const [rows, sync] = await Promise.all([
-      sb.rpc('dispatch_sales_orders', { p_statuses: S.statuses, p_days: 90 }),
-      sb.rpc('dispatch_so_synced_at'),
-    ]);
-    if (rows.error) throw rows.error;
-    S.rows = (rows.data || []).map(r => ({ ...r, order_total: Number(r.order_total) || 0, open_qty: Number(r.open_qty) || 0, open_volume: Number(r.open_volume) || 0 }));
-    S.synced = sync.data ? new Date(sync.data) : null;
+    let data;
+    if (D.env === 'test') {
+      const r = await callOrders('list_test_orders');
+      if (!r.ok) throw new Error(r.error || "Couldn't read the TEST orders");
+      data = (r.orders || []).filter(o => S.statuses.includes(o.status));
+      S.synced = null;
+    } else {
+      const [rows, sync] = await Promise.all([
+        sb.rpc('dispatch_sales_orders', { p_statuses: S.statuses, p_days: 90 }),
+        sb.rpc('dispatch_so_synced_at'),
+      ]);
+      if (rows.error) throw rows.error;
+      data = rows.data || [];
+      S.synced = sync.data ? new Date(sync.data) : null;
+    }
+    S.rows = data.map(r => ({ ...r, order_total: Number(r.order_total) || 0, open_qty: Number(r.open_qty) || 0, open_volume: Number(r.open_volume) || 0 }));
     const have = new Set(S.rows.map(r => r.order_nbr));
     S.sel = new Set([...S.sel].filter(n => have.has(n)));
   }
@@ -83,7 +110,10 @@
     const picked = S.rows.filter(r => S.sel.has(r.order_nbr));
     const ready = rows.filter(canShip);
     document.getElementById('main').innerHTML = `
-      <div class="warnbox info" style="margin-bottom:12px">Read-only for now. Creating shipments from this page is switched on after it has been tested. Orders here are production orders${D.env === 'test' ? ', whatever the Test switch says' : ''}.</div>
+      <div class="warnbox info" style="margin-bottom:12px">${D.env === 'test'
+        ? '<b>TEST:</b> these are the Open and Back Order orders in the Acumatica TEST tenant. Creating shipments here changes TEST only.'
+        : '<b>LIVE:</b> production orders. Creating shipments goes to live Acumatica once that has been switched on after the TEST run.'}</div>
+      ${S.results ? resultsHtml() : ''}
       <div class="so-ctl">
         <div class="so-chips" id="stChips" role="group" aria-label="Order status">
           ${STATUSES.map(s => `<button data-st="${esc(s)}" class="${S.statuses.includes(s) ? 'on' : ''}">${esc(s)}</button>`).join('')}
@@ -120,11 +150,46 @@
         <span><b>${plural(picked.length, 'order')}</b> selected · volume ${fmt(picked.reduce((t, r) => t + r.open_volume, 0))} · ${money(picked.reduce((t, r) => t + r.order_total, 0))}</span>
         <span class="spacer"></span>
         <label>Shipment date <input type="date" id="shipDate" min="${jmDate(0)}" value="${esc(S.date)}"></label>
-        <button class="btn primary" disabled title="Switched on after it has been tested on TEST">Create shipments</button>
+        <button class="btn primary" data-create ${picked.length && !S.busy ? '' : 'disabled'}>${S.busy ? 'Creating…' : 'Create shipments'}</button>
       </div>`;
   }
 
+  function resultsHtml() {
+    const cls = { created: 'ok', none: 'warn', refused: 'bad', failed: 'bad', skipped: 'warn' };
+    const word = { created: 'Created', none: 'No shipment', refused: 'Refused', failed: 'Failed', skipped: 'Skipped' };
+    const made = S.results.filter(r => r.state === 'created').length;
+    return `<div class="card" style="margin-bottom:12px;padding:12px 14px">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><b>${made} of ${S.results.length} order${S.results.length === 1 ? '' : 's'} got a shipment</b>
+        <span class="spacer" style="flex:1"></span><button class="btn small" data-dismiss>Dismiss</button></div>
+      ${S.results.map(r => `<div style="padding:4px 0;border-top:1px solid #f1f5f9;font-size:13px"><b>${esc(r.order_nbr)}</b>
+        <span class="pill ${cls[r.state] || 'done'}">${esc(word[r.state] || r.state)}</span>
+        ${(r.shipments || []).length ? `shipment ${esc(r.shipments.join(', '))}` : ''} <span class="muted">${esc(r.detail || '')}</span></div>`).join('')}
+      ${made ? '<div class="muted" style="margin-top:6px">New shipments appear on the Coordinator page at the next shipment sync (within 5 minutes).</div>' : ''}
+    </div>`;
+  }
+
+  async function createShipments() {
+    if (S.busy) return;
+    const orders = [...S.sel];
+    if (!orders.length) return;
+    if (orders.length > 20) { toast('Select 20 orders or fewer at a time', true); return; }
+    const where = D.env === 'test' ? 'Acumatica TEST' : 'live Acumatica';
+    if (!confirm(`Create shipments for ${plural(orders.length, 'order')} dated ${niceDate(S.date)} in ${where}?\n\nAcumatica ships only what's available; orders with nothing in stock get no shipment.`)) return;
+    S.busy = true; render();
+    try {
+      const r = await callOrders('create_shipments', { env: D.env, orders, shipment_date: S.date });
+      if (!r.ok) throw new Error(r.error || "Couldn't create shipments");
+      S.results = r.results || [];
+      const done = new Set(S.results.filter(x => x.state === 'created').map(x => x.order_nbr));
+      done.forEach(n => S.sel.delete(n));
+      toast(`${plural(done.size, 'order')} shipped`);
+    } catch (e) { console.error('[salesorders]', e); toast(errMsg(e), true); }
+    finally { S.busy = false; await refresh(); }
+  }
+
   document.getElementById('app').addEventListener('click', async e => {
+    if (e.target.closest('[data-create]')) { createShipments(); return; }
+    if (e.target.closest('[data-dismiss]')) { S.results = null; render(); return; }
     const st = e.target.closest('[data-st]');
     if (!st) return;
     const s = st.dataset.st;
@@ -156,7 +221,7 @@
 
   startPage({
     page: 'salesorders', role: 'batcher', title: 'Sales Orders',
-    onEnvChange: () => render(),
+    onEnvChange: () => { S.sel.clear(); S.results = null; refresh(); },
     onReady: () => { refresh(); setInterval(() => { if (!editing()) refresh(); }, 60 * 1000); },
   });
 </script>
