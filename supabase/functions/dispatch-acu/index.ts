@@ -6,6 +6,8 @@
 // checked here (auth.getUser) along with the caller's dispatch role.
 //
 //   status                 -> test target, whether live writeback is on, UDF name. Any dispatch role.
+//   fetch_lines { shipments[] } -> read-only: item lines of Completed live shipments the line sync
+//                             never saw, into shipment_lines. Any batcher/clerk/supervisor/manager.
 //   sync_test              -> mirror the test target's open/confirmed shipments into shipments_test. Any dispatch role.
 //   sync_live_lines        -> read-only: production's Open/On Hold shipments' line items into
 //                             shipment_lines (env 'live') + shipments.shipment_value. Run by
@@ -945,6 +947,62 @@ async function syncLiveLines() {
   return { shipments: raw.length, lines: lineRows.length, values_set: updated ?? 0, synced_at: syncedAt };
 }
 
+// fetch_lines: item lines for Completed shipments the line sync never saw (confirmed in Acumatica
+// between two syncs, e.g. picked outside the portal). Read-only: only reads Acumatica and adds
+// shipment_lines rows (env 'live'); nothing is deleted and nothing is written to Acumatica.
+// Used by Load Sheets before it builds a load from invoices. Up to 50 shipments.
+async function fetchShipmentLines(nbrs: string[]) {
+  const want = [...new Set(nbrs.map(String).filter(n => /^[A-Za-z0-9-]+$/.test(n)))].slice(0, 50);
+  const { data: known, error: ke } = await admin.from('shipments').select('shipment_nbr,status').in('shipment_nbr', want);
+  if (ke) throw new Error(`shipments read: ${ke.message}`);
+  const ok = (known ?? []).filter(s => s.status === 'Completed').map(s => s.shipment_nbr as string);
+  if (!ok.length) return { shipments: 0, lines: 0 };
+
+  const t = readTargetFor('live');
+  const syncedAt = new Date().toISOString();
+  const acu = new Acu(t, 'fetch_lines');
+  let raw: any[] = [];
+  try {
+    await acu.login();
+    await acu.lease();
+    const filter = encodeURIComponent(ok.map(n => `ShipmentNbr eq '${n}'`).join(' or '));
+    const r = await acu.call('GET', `/Shipment?$select=${LIVE_LINE_FIELDS}&$expand=Details&$filter=${filter}&$top=${ok.length}`);
+    if (!r.ok) throw new Error(`${t.label} shipments read failed: ${r.status} ${acuError(r.data)}`);
+    raw = Array.isArray(r.data) ? r.data : [];
+  } finally {
+    await acu.logout();
+  }
+
+  const lines = (sh: any) => (Array.isArray(sh.Details) ? sh.Details : []).map((d: any) => ({
+    type: v(d.OrderType), nbr: v(d.OrderNbr), line: num(v(d.OrderLineNbr)), qty: num(v(d.ShippedQty)) ?? 0,
+    line_nbr: num(v(d.LineNbr)), inventory_id: v(d.InventoryID), description: v(d.Description), uom: v(d.UOM),
+    location_id: v(d.LocationID), ordered: num(v(d.OrderedQty)),
+  }));
+  const orderNbrs = [...new Set(raw.flatMap(sh => lines(sh).map(l => l.nbr)).filter(Boolean))];
+  const price = new Map<string, number>();
+  for (let i = 0; i < orderNbrs.length; i += 200) {
+    (await orderItemRows(orderNbrs.slice(i, i + 200)) ?? []).forEach(o => {
+      const q = Number(o.order_qty), ext = Number(o.ext_price);
+      price.set(`${o.order_type}|${o.order_nbr}|${o.line_nbr}`, q > 0 && !isNaN(ext) ? ext / q : Number(o.unit_price) || 0);
+    });
+  }
+  const lineRows = raw.flatMap(sh => lines(sh).filter(l => l.line_nbr != null).map(l => {
+    const unit = price.get(`${l.type}|${l.nbr}|${l.line}`);
+    return {
+      env: 'live', shipment_nbr: v(sh.ShipmentNbr), line_nbr: l.line_nbr, inventory_id: l.inventory_id,
+      description: l.description, uom: l.uom, ordered_qty: l.ordered, shipped_qty: l.qty,
+      order_type: l.type, order_nbr: l.nbr, order_line_nbr: l.line, location_id: l.location_id,
+      unit_price: unit ?? null, line_value: unit == null ? null : Math.round(l.qty * unit * 100) / 100,
+      synced_at: syncedAt,
+    };
+  }));
+  for (let i = 0; i < lineRows.length; i += 1000) {
+    const { error } = await admin.from('shipment_lines').upsert(lineRows.slice(i, i + 1000), { onConflict: 'env,shipment_nbr,line_nbr' });
+    if (error) throw new Error(`lines upsert: ${error.message}`);
+  }
+  return { shipments: raw.length, lines: lineRows.length };
+}
+
 // ------------------------------------------------------------------
 Deno.serve(async (req) => {
   const headers = { ...cors(req), 'Content-Type': 'application/json' };
@@ -989,6 +1047,11 @@ Deno.serve(async (req) => {
         return json({ ok: true, ...(await syncTest()) });
       case 'sync_live_lines':
         return json({ ok: true, ...(await syncLiveLines()) });
+      case 'fetch_lines': {
+        if (!roles.some(r => ['batcher', 'clerk', 'supervisor', 'manager'].includes(r))) return json({ ok: false, error: 'Not allowed' }, 403);
+        if (!Array.isArray(p.shipments) || !p.shipments.length || p.shipments.length > 50) return json({ ok: false, error: 'shipments (1 to 50) is required' }, 400);
+        return json({ ok: true, ...(await fetchShipmentLines(p.shipments)) });
+      }
       case 'check_confirm': {
         if (!roles.includes('supervisor')) return json({ ok: false, error: 'Only a supervisor (Invoicing) can confirm loads in Acumatica' }, 403);
         const id = Number(p.load_id);

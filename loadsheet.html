@@ -128,7 +128,9 @@
           <td class="mono">${esc((s.invoice_nbrs || []).join(', '))}</td>
           <td>${fmt(s.units)} items</td>
           <td>${s.blocked ? `<span class="pill bad">${esc(s.blocked)}</span>` : '<span class="pill ok">Ready</span>'}</td></tr>`).join('');
-      body = `<div class="muted" style="margin:8px 0">${esc(r.trucker || r.ship_via)} · ${esc(r.ship_via)} · invoices dated ${esc(niceDate(r.invoice_date))}</div>
+      const noLines = (r.shipments || []).some(s => s.blocked && s.blocked.startsWith('Item lines not synced'));
+      body = `${noLines ? '<div class="warnbox info" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span>Some shipments have no item lines yet.</span><button class="btn small" data-act="fetchlines">Fetch missing lines from Acumatica</button></div>' : ''}
+        <div class="muted" style="margin:8px 0">${esc(r.trucker || r.ship_via)} · ${esc(r.ship_via)} · invoices dated ${esc(niceDate(r.invoice_date))}</div>
         ${rows ? `<table class="sheettbl" style="width:100%"><thead><tr><th></th><th>Customer</th><th>Shipment</th><th>Invoice</th><th>Qty</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
                : '<div class="empty">No shipments found for these invoices.</div>'}
         <div class="lactions" style="margin-top:10px">
@@ -154,6 +156,16 @@
     if (error) throw error;
     F.res = data;
     (data.shipments || []).forEach(s => { if (!s.blocked) F.sel.add(s.shipment_nbr); });
+  }
+
+  async function fetchLines() {
+    const nbrs = (F.res?.shipments || []).filter(s => s.blocked && s.blocked.startsWith('Item lines not synced')).map(s => s.shipment_nbr);
+    if (!nbrs.length) return;
+    const r = await callAcu('fetch_lines', { shipments: nbrs });
+    if (!r.ok) throw new Error(r.error || 'Could not fetch the lines');
+    toast(`${fmt(r.lines)} item lines fetched`);
+    document.getElementById('invq').value = F.q;
+    await findRun();
   }
 
   async function buildRun() {
@@ -244,6 +256,7 @@
       case 'print': act(() => printSheet(id)); break;
       case 'find': act(findRun); break;
       case 'build': act(buildRun); break;
+      case 'fetchlines': act(fetchLines); break;
       case 'clearfind': F.q = ''; F.res = null; F.sel = new Set(); render(); break;
     }
   });
