@@ -87,7 +87,7 @@
   const IDLE_MIN = 45, DWELL_MIN = 40, WAITING_MIN = 60;
   const POLL_MS = 60 * 1000, DEBOUNCE_MS = 1000;
   // Named columns only: lm_loads' claim code, token hash and device are not readable by staff.
-  const LM_COLS = 'load_id,status,claimed_at,claimed_name,shortage_note,delivering_at,completed_at,closed_at,aborted_at,abort_reason,abort_note,created_at';
+  const LM_COLS = 'load_id,status,claimed_at,claimed_name,claimed_phone,shortage_note,delivering_at,completed_at,closed_at,aborted_at,abort_reason,abort_note,created_at';
 
   const T = { date: jmDate(0), board: [], generated: null, filter: 'all', detailId: null, detail: null, find: null,
               rt: 'connecting', busy: false, reasons: new Map(), debounce: null };
@@ -336,7 +336,7 @@
         <div class="dhead"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${waveTag(l.wave)} <span class="pill ${s.pill}">${esc(s.label)}</span>
             ${m && m.aborted_at ? '<span class="pill bad">Stopped by driver</span>' : ''}${l.env === 'test' ? ' <span class="tag">TEST</span>' : ''}
             <div class="lstats"><span><b>${esc(l.ship_via || '—')}</b>${l.contractor ? ' · ' + esc(l.contractor) : ''}</span>${l.truck_type ? `<span>${esc(l.truck_type)}</span>` : ''}<span>${esc(niceDate(l.load_date))}</span></div>
-            ${m && m.claimed_at ? `<div class="muted">Taken by <b>${esc(m.claimed_name || '')}</b> at ${esc(stamp(m.claimed_at))}${m.completed_at ? ' · finished ' + esc(stamp(m.completed_at)) : ''}${m.closed_at ? ' · closed ' + esc(stamp(m.closed_at)) : ''}</div>` : ''}</div>
+            ${m && m.claimed_at ? `<div class="muted">Taken by <b>${esc(m.claimed_name || '')}</b>${m.claimed_phone ? ` · <a href="tel:${esc(String(m.claimed_phone).replace(/[^0-9+]/g, ''))}">${esc(m.claimed_phone)}</a>` : ''} at ${esc(stamp(m.claimed_at))}${m.completed_at ? ' · finished ' + esc(stamp(m.completed_at)) : ''}${m.closed_at ? ' · closed ' + esc(stamp(m.closed_at)) : ''}</div>` : ''}</div>
           <div class="lactions" style="margin:0">
             <button class="btn small" data-act="printsheet">${m ? 'Reprint load sheet' : 'Print load sheet'}</button>
             ${claimed && canAct() ? '<button class="btn small danger" data-act="unassign">Unassign</button>' : ''}

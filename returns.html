@@ -91,7 +91,7 @@
     const ids = all.map(l => l.id);
     const [rt, lm] = await Promise.all([
       sb.from('lm_returns').select('id,load_id,stop_id,status,raised_at').in('load_id', ids),
-      sb.from('lm_loads').select('load_id,status,claimed_name,aborted_at,abort_reason,abort_note').in('load_id', ids),
+      sb.from('lm_loads').select('load_id,status,claimed_name,claimed_phone,aborted_at,abort_reason,abort_note').in('load_id', ids),
     ]);
     if (rt.error) throw rt.error;
     if (lm.error) throw lm.error;
@@ -140,7 +140,7 @@
         <div class="lactions" style="margin:0"><button class="btn small primary" data-act="print">Print return sheet</button></div></div>
       <div class="lstats"><span><b>${esc(load.ship_via || '—')}</b>${load.contractor ? ' · ' + esc(load.contractor) : ''}</span>
         <span>${plural(sheets.length, 'stop')} with returns</span><span>${plural(items, 'item')} coming back</span>
-        ${m.claimed_name ? `<span>driver: ${esc(m.claimed_name)}</span>` : ''}</div>
+        ${m.claimed_name ? `<span>driver: ${esc(m.claimed_name)}${m.claimed_phone ? ' · ' + esc(m.claimed_phone) : ''}</span>` : ''}</div>
       ${m.aborted_at ? `<div class="warnbox bad"><b>${esc(reasonName(m.abort_reason))}</b>${m.abort_note ? ' · ' + esc(m.abort_note) : ''} · ${esc(stamp(m.aborted_at))}</div>` : ''}
       ${sheets.map(({ ret, stop }) => `<div class="cust"><h3>${esc(stop.customer_name || stop.customer_id)}
           ${stop.status === 'failed' ? '<span class="pill bad">Not delivered</span>' : '<span class="pill warn">Partly delivered</span>'}
@@ -178,7 +178,7 @@
     return `<div class="sheet">
       <div class="sh"><img src="assets/dfl-logo-color.png" alt="DFL Importers"><div class="t">Return sheet<b>${esc(load.load_nbr)}</b></div></div>
       <div class="meta"><span><b>${esc(load.ship_via || '')}</b>${load.contractor ? ' · ' + esc(load.contractor) : ''}</span>
-        <span>${esc(niceDate(load.load_date))}</span>${m.claimed_name ? `<span>Driver: ${esc(m.claimed_name)}</span>` : ''}
+        <span>${esc(niceDate(load.load_date))}</span>${m.claimed_name ? `<span>Driver: ${esc(m.claimed_name)}${m.claimed_phone ? ' · ' + esc(m.claimed_phone) : ''}</span>` : ''}
         ${m.aborted_at ? `<span><b>Load stopped:</b> ${esc(reasonName(m.abort_reason))}${m.abort_note ? ' · ' + esc(m.abort_note) : ''}</span>` : ''}</div>
       ${sheets.map(({ ret, stop }) => `<h3>${esc(stop.customer_name || stop.customer_id)} — ${stop.status === 'failed' ? 'not delivered' : 'partly delivered'}</h3>
         ${stop.status === 'failed' && stop.fail_reason ? `<div class="why">${esc(reasonName(stop.fail_reason))}${stop.fail_note ? ' · ' + esc(stop.fail_note) : ''}</div>` : ''}

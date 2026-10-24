@@ -61,7 +61,7 @@
 <script>
   const L = { date: jmDate(0), loads: [], pending: 0, lm: new Map(), busy: false, autoPrint: null };
   try { const p = Number(new URLSearchParams(location.search).get('print')); if (p) L.autoPrint = p; } catch (e) {}
-  const LM_COLS = 'load_id,status,claimed_name,aborted_at';
+  const LM_COLS = 'load_id,status,claimed_name,claimed_phone,aborted_at';
 
   async function loadAll() {
     // A load opened with ?print=ID may be from another day: find its date first.
@@ -87,7 +87,7 @@
   function stateOf(l) {
     const m = L.lm.get(l.id);
     if (!m) return { pill: '<span class="pill done">Sheet not printed yet</span>', cls: 'st-draft' };
-    const by = m.claimed_name ? ` · ${esc(m.claimed_name)}` : '';
+    const by = m.claimed_name ? ` · ${esc(m.claimed_name)}${m.claimed_phone ? ' ' + esc(m.claimed_phone) : ''}` : '';
     return {
       ready:      { pill: '<span class="pill info">Waiting for the driver to scan</span>', cls: 'st-ready' },
       collected:  { pill: `<span class="pill warn">Collected${by}</span>`, cls: 'st-confirmed' },
