@@ -267,7 +267,7 @@
   const r1 = n => (Math.round(n * 10) / 10).toLocaleString('en-US');
   const bar = p => `<span class="d0-bartrack" aria-hidden="true"><i style="width:${Math.min(100, p)}%"></i></span>${p}%`;
   const runName = r => ({ near: 'Near · Day 2', far: 'Far · Day 3', none: 'No zone' })[r];
-  const statusPill = s => `<span class="pill ${{ 'Open': 'ok', 'Back Order': 'warn', 'Credit Hold': 'bad', 'On Hold': 'bad' }[s] || 'done'}">${esc(s)}</span>`;
+  const orderPill = s => `<span class="pill ${{ 'Open': 'ok', 'Back Order': 'warn', 'Credit Hold': 'bad', 'On Hold': 'bad' }[s] || 'done'}">${esc(s)}</span>`;
 
   function csv(name, rows) {
     const q = v => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
@@ -376,7 +376,7 @@
   function bigHtml(A) {
     return `<div class="d0-h" id="big"><h2>Big orders</h2><span class="muted">${BIG_VOL}+ of volume in one order. Anything over ${fmt(A.mc)} needs more than one truck, so check whether it's a bulk customer who needs its own arrangement.</span></div>
       <div class="card"><div class="d0-wrap"><table class="d0"><thead><tr><th>Order</th><th>Customer</th><th>Zone</th><th>Status</th><th class="r">Volume</th><th>Trucks</th><th>Stock</th></tr></thead><tbody>
-      ${A.big.map(o => `<tr><td><b>${esc(o.nbr)}</b></td><td>${esc(o.name || '')}</td><td>${esc(o.zone)}</td><td>${statusPill(o.status)}</td><td class="r">${fmt(o.vol)}</td>
+      ${A.big.map(o => `<tr><td><b>${esc(o.nbr)}</b></td><td>${esc(o.name || '')}</td><td>${esc(o.zone)}</td><td>${orderPill(o.status)}</td><td class="r">${fmt(o.vol)}</td>
         <td>${o.vol > A.mc ? `<span class="tag old">${Math.ceil(o.vol / A.mc)} trucks</span>` : '1 truck'}</td>
         <td>${o.ready ? '<span class="pill ok">Ready</span>' : `<span class="pill warn">Waits · ${plural(o.short, 'line')} short</span>`}</td></tr>`).join('')}
       </tbody></table></div></div>`;
@@ -386,7 +386,7 @@
     const rows = A.orders.filter(o => o.zone === NOZONE).sort((a, b) => b.vol - a.vol);
     return `<div class="d0-h" id="nozone"><h2>Orders with no shipping zone</h2><span class="muted">They can't go on a run until the customer has a zone, so they're left out of the truck counts.</span></div>
       <div class="card"><div class="d0-wrap"><table class="d0"><thead><tr><th>Order</th><th>Customer</th><th>City</th><th>Status</th><th class="r">Volume</th></tr></thead><tbody>
-      ${rows.map(o => `<tr><td><b>${esc(o.nbr)}</b></td><td>${esc(o.name || '')}</td><td>${esc(o.city)}</td><td>${statusPill(o.status)}</td><td class="r">${fmt(o.vol)}</td></tr>`).join('')}
+      ${rows.map(o => `<tr><td><b>${esc(o.nbr)}</b></td><td>${esc(o.name || '')}</td><td>${esc(o.city)}</td><td>${orderPill(o.status)}</td><td class="r">${fmt(o.vol)}</td></tr>`).join('')}
       </tbody></table></div></div>`;
   }
 
@@ -479,7 +479,7 @@
       </div>
       <div class="card"><div class="d0-wrap"><table class="d0"><thead><tr><th>Release</th><th>Order</th><th>Customer</th><th>Zone</th><th>Status</th><th>Ordered</th><th class="r">Volume</th><th class="r">Adds trucks</th><th class="r">Adds transfer</th></tr></thead><tbody>
       ${A.held.length ? A.held.map(h => `<tr class="${h.released ? 'sel' : ''}"><td><input type="checkbox" data-rel-one="${esc(h.nbr)}" aria-label="Treat order ${esc(h.nbr)} as released" ${h.released ? 'checked' : ''}></td>
-        <td><b>${esc(h.nbr)}</b></td><td>${esc(h.name || '')}</td><td>${esc(h.zone)}</td><td>${statusPill(h.status)}</td><td>${esc(h.date ? niceDate(h.date) : '')}</td><td class="r">${fmt(h.vol)}</td>
+        <td><b>${esc(h.nbr)}</b></td><td>${esc(h.name || '')}</td><td>${esc(h.zone)}</td><td>${orderPill(h.status)}</td><td>${esc(h.date ? niceDate(h.date) : '')}</td><td class="r">${fmt(h.vol)}</td>
         <td class="r">${h.released ? '<span class="muted">in plan</span>' : h.addTrucks === null ? '<span class="muted">needs zone</span>' : (h.addTrucks > 0 ? '+' : '') + h.addTrucks}</td>
         <td class="r">${h.released ? '<span class="muted">in plan</span>' : (h.addTransfer > 0 ? '+' + fmt(h.addTransfer) + ' cases' : '—')}</td></tr>`).join('')
         : '<tr><td colspan="9" class="muted">No held orders in this date range.</td></tr>'}
