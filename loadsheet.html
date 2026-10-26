@@ -70,7 +70,7 @@
       if (one.data) { L.date = one.data.load_date; if (one.data.env !== D.env) { setEnv(one.data.env); renderEnvBar(() => refresh()); } }
     }
     const { data: loads, error } = await sb.from('loads')
-      .select('id,load_nbr,load_date,wave,seq,truck_type,ship_via,contractor,status,check_status')
+      .select('id,load_nbr,load_date,wave,seq,truck_type,ship_via,contractor,status,check_status,sheet_stale_at')
       .eq('env', D.env).eq('load_date', L.date).in('status', ['done', 'partial']).order('wave').order('seq');
     if (error) throw error;
     const all = loads || [];
@@ -102,13 +102,82 @@
     const st = stateOf(l);
     return `<div class="lcard ${st.cls}" data-load="${l.id}">
       <div class="lhead"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${waveTag(l.wave)} ${st.pill}
-          ${m && m.aborted_at ? '<span class="pill bad">Stopped by driver</span>' : ''}</div>
+          ${m && m.aborted_at ? '<span class="pill bad">Stopped by driver</span>' : ''}
+          ${l.sheet_stale_at ? '<span class="pill warn">Trucker changed: reprint the sheet</span>' : ''}</div>
         <div class="lactions" style="margin:0">
+          ${canReassign() && (!m || m.status === 'ready') ? `<button class="btn small" data-act="reassign">Change trucker…</button>` : ''}
           <a class="btn small" href="tower.html#load=${l.id}">Open in Control Tower</a>
           <button class="btn small primary" data-act="print">${m ? 'Reprint load sheet' : 'Print load sheet'}</button>
         </div></div>
       <div class="lstats"><span><b>${esc(l.ship_via || '—')}</b>${l.contractor ? ' · ' + esc(l.contractor) : ''}</span>${l.truck_type ? `<span>${esc(l.truck_type)}</span>` : ''}</div>
     </div>`;
+  }
+
+  // Change the trucker after invoicing (whole load, or some shipments/invoices moved to another
+  // trucker's load). Allowed only while no driver has claimed the load; the database enforces it.
+  const R = { load: null, rows: [], invs: new Map(), sel: new Set(), isel: new Set(), via: '', target: '', reason: '', part: false };
+  function canReassign() { return (D.me?.roles || []).some(r => ['clerk', 'supervisor', 'manager'].includes(r)); }
+
+  async function openReassign(id) {
+    const l = L.loads.find(x => x.id === id);
+    if (!l) return;
+    const ls = await sb.from('load_shipments').select('shipment_nbr').eq('load_id', id);
+    if (ls.error) throw ls.error;
+    const nbrs = (ls.data || []).map(x => x.shipment_nbr);
+    const ships = nbrs.length ? await shipmentsByNbr(nbrs) : [];
+    R.invs = new Map();
+    if (D.env === 'live' && ships.length) {
+      const inv = await sb.from('invoices').select('reference_number,order_number,status,invoice_date').in('order_number', [...new Set(ships.map(s => s.order_nbr).filter(Boolean))]);
+      (inv.data || []).forEach(i => { const a = R.invs.get(i.order_number) || []; a.push(i); R.invs.set(i.order_number, a); });
+    }
+    Object.assign(R, { load: l, rows: ships.sort((a, b) => String(a.customer_name).localeCompare(String(b.customer_name))),
+                       sel: new Set(), isel: new Set(), via: '', target: '', reason: '', part: false });
+  }
+
+  function reassignHtml() {
+    const l = R.load;
+    if (!l) return '';
+    const opts = shipViaChoices().filter(c => c.ship_via !== l.ship_via)
+      .map(c => `<option value="${esc(c.ship_via)}" ${R.via === c.ship_via ? 'selected' : ''}>${esc(c.ship_via)}${c.description ? ' — ' + esc(c.description) : ''}</option>`).join('');
+    const targets = R.via ? L.loads.filter(x => x.id !== l.id && x.ship_via === R.via && (!L.lm.get(x.id) || L.lm.get(x.id).status === 'ready')) : [];
+    const rows = R.rows.map(s => `<tr>
+        <td><input type="checkbox" data-rsel="${esc(s.shipment_nbr)}" ${R.sel.has(s.shipment_nbr) ? 'checked' : ''}></td>
+        <td>${esc(s.customer_name || s.customer_id || '')}</td><td class="mono">${esc(s.shipment_nbr)}</td>
+        <td class="mono">${(R.invs.get(s.order_nbr) || []).map(i => `<label style="display:block"><input type="checkbox" data-risel="${esc(i.reference_number)}" ${R.isel.has(i.reference_number) ? 'checked' : ''}> ${esc(i.reference_number)} <span class="muted">${esc(i.invoice_date || '')}${i.status === 'Closed' ? ' · closed' : ''}</span></label>`).join('')}</td></tr>`).join('');
+    const n = R.sel.size, all = n === R.rows.length;
+    return `<div class="card" id="reassign" style="padding:12px 14px;margin-bottom:14px;border:2px solid #b45309">
+      <div class="dctl" style="margin:0"><b>Change trucker · ${esc(l.load_nbr)}</b><span class="muted">now ${esc(l.ship_via || '—')}</span>
+        <span class="spacer"></span><button class="btn small" data-act="rclose">Close</button></div>
+      <div class="dctl" style="margin-top:8px">
+        <label>New trucker <select id="rvia"><option value="">Choose…</option>${opts}</select></label>
+        <label><input type="radio" name="rmode" value="all" ${R.part ? '' : 'checked'}> Whole load</label>
+        <label><input type="radio" name="rmode" value="part" ${R.part ? 'checked' : ''}> Only some invoices</label>
+      </div>
+      ${R.part ? `<table class="sheettbl" style="width:100%"><thead><tr><th></th><th>Customer</th><th>Shipment</th><th>Invoices that move with it</th></tr></thead><tbody>${rows}</tbody></table>
+        <div class="dctl" style="margin-top:8px"><label>Move to <select id="rtarget"><option value="">${R.via ? 'Join a matching load, or create one' : 'Choose a trucker first'}</option>
+          ${targets.map(x => `<option value="${x.id}" ${String(x.id) === R.target ? 'selected' : ''}>${esc(x.load_nbr)} (${esc(x.ship_via)})</option>`).join('')}</select></label>
+          ${all ? '<span class="pill warn">That is every shipment: use "Whole load"</span>' : ''}</div>` : ''}
+      <div class="dctl" style="margin-top:8px"><input type="text" id="rreason" placeholder="Why is the trucker changing? (required)" value="${esc(R.reason)}" style="min-width:320px">
+        <button class="btn small primary" data-act="rgo" ${R.via && R.reason.trim() && (!R.part || (n && !all)) ? '' : 'disabled'}>${R.part ? `Move ${plural(n, 'shipment')}` : 'Change whole load'}</button></div>
+      <div class="muted">Only before a driver has scanned the load. Reprint the sheet afterwards: the old paper still shows the old trucker or stops.</div>
+    </div>`;
+  }
+
+  async function doReassign() {
+    const l = R.load, why = R.reason.trim();
+    if (R.part) {
+      if (!confirm(`Move ${plural(R.sel.size, 'shipment')} from ${l.load_nbr} to ${R.via}?`)) return;
+      const { data, error } = await sb.rpc('lm_reassign_shipments', { p_shipments: [...R.sel], p_ship_via: R.via, p_reason: why, p_target_load: R.target ? Number(R.target) : null, p_invoices: [...R.isel] });
+      if (error) throw error;
+      toast(`${plural(R.sel.size, 'shipment')} now on ${data.target_load_nbr}${data.created ? ' (new load)' : ''}. Reprint both sheets.`);
+    } else {
+      if (!confirm(`Give all of ${l.load_nbr} to ${R.via}?`)) return;
+      const { error } = await sb.rpc('lm_reassign_load', { p_load_id: l.id, p_ship_via: R.via, p_reason: why });
+      if (error) throw error;
+      toast(`${l.load_nbr} is now ${R.via}. Reprint the sheet.`);
+    }
+    R.load = null;
+    callAcu('deliverv_write', {}).catch(() => {});   // writes DELIVERVIA to Acumatica when that switch is on
   }
 
   // Picked outside the portal: search one invoice, get the run's sister invoices, build the load.
@@ -190,6 +259,7 @@
         <a class="btn small" href="tower.html">Control Tower</a>
         <button class="btn small" data-act="refresh">Refresh</button>
       </div>
+      ${reassignHtml()}
       ${finderHtml()}
       ${L.pending ? `<div class="warnbox info">${plural(L.pending, 'load')} on this day ${L.pending === 1 ? "isn't" : "aren't"} confirmed by the checker yet, so ${L.pending === 1 ? 'it has' : 'they have'} no load sheet.</div>` : ''}
       ${L.loads.length ? L.loads.map(card).join('') : '<div class="card"><div class="empty">No checker-confirmed loads on this day yet.</div></div>'}`;
@@ -254,6 +324,9 @@
       case 'refresh': refresh(); break;
       case 'today': L.date = jmDate(0); refresh(); break;
       case 'print': act(() => printSheet(id)); break;
+      case 'reassign': act(async () => { await openReassign(id); render(); window.scrollTo(0, 0); }); break;
+      case 'rclose': R.load = null; render(); break;
+      case 'rgo': act(doReassign); break;
       case 'find': act(findRun); break;
       case 'build': act(buildRun); break;
       case 'fetchlines': act(fetchLines); break;
@@ -262,10 +335,31 @@
   });
   document.getElementById('app').addEventListener('change', e => {
     if (e.target.id === 'day' && e.target.value) { L.date = e.target.value; refresh(); }
+    if (e.target.id === 'rvia') { R.via = e.target.value; R.target = ''; render(); }
+    if (e.target.id === 'rtarget') { R.target = e.target.value; render(); }
+    if (e.target.id === 'rreason') { R.reason = e.target.value; render(); }
+    if (e.target.name === 'rmode') { R.part = e.target.value === 'part'; render(); }
+    if (e.target.dataset && e.target.dataset.rsel) {
+      const sh = R.rows.find(x => x.shipment_nbr === e.target.dataset.rsel);
+      const invs = (sh && R.invs.get(sh.order_nbr)) || [];
+      if (e.target.checked) { R.sel.add(sh.shipment_nbr); invs.filter(i => i.invoice_date >= R.load.load_date).forEach(i => R.isel.add(i.reference_number)); }
+      else { R.sel.delete(e.target.dataset.rsel); invs.forEach(i => R.isel.delete(i.reference_number)); }
+      render();
+    }
+    if (e.target.dataset && e.target.dataset.risel) {
+      e.target.checked ? R.isel.add(e.target.dataset.risel) : R.isel.delete(e.target.dataset.risel);
+      render();
+    }
     if (e.target.dataset && e.target.dataset.pick) {
       e.target.checked ? F.sel.add(e.target.dataset.pick) : F.sel.delete(e.target.dataset.pick);
       render();
     }
+  });
+  document.getElementById('app').addEventListener('input', e => {
+    if (e.target.id !== 'rreason') return;
+    R.reason = e.target.value;                       // no redraw: it would swallow the next click
+    const go = document.querySelector('[data-act="rgo"]');
+    if (go) go.disabled = !(R.via && R.reason.trim() && (!R.part || (R.sel.size && R.sel.size !== R.rows.length)));
   });
   document.getElementById('app').addEventListener('keydown', e => {
     if (e.key === 'Enter' && e.target.id === 'invq') act(findRun);
@@ -288,7 +382,7 @@
       }
       setInterval(() => {                           // don't redraw under someone who is searching or ticking
         const typing = document.activeElement && document.activeElement.id === 'invq';
-        if (!L.busy && !F.res && !typing && document.visibilityState === 'visible') refresh();
+        if (!L.busy && !F.res && !R.load && !typing && document.visibilityState === 'visible') refresh();
       }, 30 * 1000);
     },
   });
