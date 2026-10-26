@@ -81,6 +81,7 @@
     P.staged = b.staged || [];
     P.done = b.done || [];
     P.lists = new Map(ids.map(id => [id, (b.picks || []).filter(x => x.load_id === id)]));
+    AS.overlay();
   }
   function areaDone(loadId, area) { return P.done.find(d => d.load_id === loadId && d.area === area); }
   function areaStaged(loadId, area) { return (P.staged || []).find(d => d.load_id === loadId && d.area === area); }
@@ -170,12 +171,108 @@
         <input type="number" inputmode="numeric" min="0" max="${Number(x.required)}" step="1" data-qty value="${got ? Number(x.picked_qty) : ''}" placeholder="Qty" aria-label="Picked quantity for ${esc(x.inventory_id)}" ${dis}>
         <button class="btn small" data-save ${dis}>Save</button>
         ${got ? `<button class="btn small link" data-clear ${dis}>Clear</button>` : ''}
+        <span class="st" data-st>${AS.html(l.id, x.inventory_id)}</span>
         <span class="got">${got ? `${short ? `<b style="color:var(--warn-text)">Short ${fmt(Number(x.required) - Number(x.picked_qty))}</b> · ` : ''}${esc(x.picker_name || '')} ${esc(stamp(x.picked_at))}` : ''}</span>
       </div>
     </div>`;
   }
 
   // ------------------------------------------------------------------
+  // ---- Autosave -------------------------------------------------------
+  // dispatch_pick_set sets the picked quantity to an absolute value, so repeating a save (autosave, then the
+  // Save button, or a retry) can never double-count. Unsaved quantities are kept in localStorage until the
+  // server confirms them, so a reload or dropped wifi doesn't lose input.
+  const AS = (() => {
+    const KEY = 'dispatch-pick-pending', m = new Map(), timers = new Map();
+    let chain = Promise.resolve(), ver = 0, idleT = null;
+    const k = (load, item) => load + '|' + item;
+    const q = s => String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    function persist() {
+      try {
+        const a = [...m.values()].filter(e => e.state !== 'saved').map(e => ({ load: e.load, item: e.item, n: e.n }));
+        if (a.length) localStorage.setItem(KEY, JSON.stringify(a)); else localStorage.removeItem(KEY);
+      } catch (x) {}
+    }
+    function html(load, item) {
+      const e = m.get(k(load, item));
+      if (!e) return '';
+      if (e.state === 'saved') return '<span style="color:var(--ok-text,#1a7f37)">✓ Saved</span>';
+      if (e.state === 'failed') return '<button class="btn small" data-retry style="color:var(--warn-text,#b42318)">Not saved – retry</button>';
+      return '<span class="muted">' + (e.state === 'saving' ? 'Saving…' : 'Unsaved…') + '</span>';
+    }
+    function paint(e) {
+      if (P.open !== e.load) return;
+      const el = document.querySelector('.item[data-item="' + q(e.item) + '"] [data-st]');
+      if (el) el.innerHTML = html(e.load, e.item);
+    }
+    function pending() { return [...m.values()].some(e => e.state !== 'saved'); }
+    function set(load, item, n) {
+      const key = k(load, item), e = m.get(key) || { load, item };
+      Object.assign(e, { n, state: 'dirty', v: ++ver });
+      m.set(key, e); persist(); paint(e);
+      clearTimeout(timers.get(key));
+      timers.set(key, setTimeout(() => flush(key), 700));
+    }
+    function flush(key) {
+      clearTimeout(timers.get(key));
+      const e = m.get(key);
+      if (!e || e.state === 'saved' || e.state === 'saving') return chain;
+      const v = e.v;
+      e.state = 'saving'; paint(e);
+      chain = chain.then(async () => {
+        try {
+          await rpc('dispatch_pick_set', { p_load_id: e.load, p_inventory_id: e.item, p_picked: e.n });
+          const line = (P.lists.get(e.load) || []).find(x => x.inventory_id === e.item);
+          if (line) line.picked_qty = e.n;
+          if (e.v === v) {
+            e.state = 'saved'; paint(e);
+            setTimeout(() => { if (m.get(key) === e && e.state === 'saved') { m.delete(key); paint(e); } }, 1500);
+          } else if (e.state === 'saving') { e.state = 'dirty'; flush(key); }
+        } catch (err) {
+          console.error('[picking] autosave', err);
+          if (e.v === v) e.state = 'failed'; else if (e.state === 'saving') e.state = 'dirty';
+          paint(e);
+        }
+        persist();
+        idleRefresh();
+      });
+      return chain;
+    }
+    function flushAll() { [...m.keys()].forEach(flush); return chain; }
+    function retryFailed() { [...m.entries()].forEach(([key, e]) => { if (e.state === 'failed') { e.state = 'dirty'; flush(key); } }); }
+    // After saves settle and nobody is typing, re-read so the row shows picker name/time and the done buttons unlock.
+    function idleRefresh() {
+      clearTimeout(idleT);
+      idleT = setTimeout(async () => {
+        if (pending() || P.busy || editing()) return;
+        try { await loadPicks(); render(); } catch (x) {}
+      }, 1200);
+    }
+    // Show unsaved quantities on top of whatever the server returned.
+    function overlay() {
+      [...m.values()].forEach(e => {
+        if (e.state === 'saved') return;
+        const line = (P.lists.get(e.load) || []).find(x => x.inventory_id === e.item);
+        if (line) line.picked_qty = e.n;
+      });
+    }
+    // Quantities left over from a reload / closed tab: re-queue them once the loads are on screen.
+    function restore() {
+      let a = [];
+      try { a = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (x) {}
+      a.forEach(o => {
+        const line = (P.lists.get(o.load) || []).find(x => x.inventory_id === o.item);
+        if (line && !m.has(k(o.load, o.item))) set(o.load, o.item, o.n);
+      });
+      persist();
+    }
+    window.addEventListener('beforeunload', e => { if (pending()) { flushAll(); e.preventDefault(); e.returnValue = ''; } });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) flushAll(); });
+    window.addEventListener('online', retryFailed);
+    setInterval(retryFailed, 8000);
+    return { set, flush, flushAll, key: k, html, pending, overlay, restore, retryFailed };
+  })();
+
   async function rpc(name, args) { const { error } = await sb.rpc(name, args); if (error) throw error; }
   // A pick save only changes pick data, so re-read just that (one request) instead of the whole page.
   async function act(fn, full) {
@@ -207,9 +304,10 @@
     const row = t.closest('.item[data-item]');
     if (!row) return;
     const item = row.dataset.item;
+    if (t.closest('[data-retry]')) { AS.retryFailed(); return; }
     const line = (P.lists.get(P.open) || []).find(x => x.inventory_id === item);
-    if (t.closest('[data-all]')) { act(() => rpc('dispatch_pick_set', { p_load_id: P.open, p_inventory_id: item, p_picked: Number(line.required) })); return; }
-    if (t.closest('[data-clear]')) { act(() => rpc('dispatch_pick_set', { p_load_id: P.open, p_inventory_id: item, p_picked: null })); return; }
+    if (t.closest('[data-all]')) { act(async () => { await AS.flushAll(); await rpc('dispatch_pick_set', { p_load_id: P.open, p_inventory_id: item, p_picked: Number(line.required) }); }); return; }
+    if (t.closest('[data-clear]')) { act(async () => { await AS.flushAll(); await rpc('dispatch_pick_set', { p_load_id: P.open, p_inventory_id: item, p_picked: null }); }); return; }
     if (t.closest('[data-save]')) { saveQty(row, line); }
   });
   document.getElementById('app').addEventListener('keydown', e => {
@@ -227,6 +325,14 @@
       t.value = max;
       toast(`Only ${fmt(max)} needed. You can't pick more than that.`, true);
     }
+    const row = t.closest('.item[data-item]');
+    // An emptied box clears the pick (null), same as the Clear button.
+    if (row && P.open && t.value.trim() === '') AS.set(P.open, row.dataset.item, null);
+    else if (row && P.open && Number(t.value) >= 0) AS.set(P.open, row.dataset.item, Math.round(Number(t.value)));
+  });
+  document.getElementById('app').addEventListener('focusout', e => {
+    const row = e.target.closest && e.target.closest('.item[data-item]');
+    if (row && e.target.dataset && e.target.dataset.qty !== undefined && P.open) AS.flush(AS.key(P.open, row.dataset.item));
   });
   document.getElementById('app').addEventListener('change', e => {
     if (e.target.id === 'datePick' && e.target.value) { P.date = e.target.value; P.open = null; refresh(); }
@@ -237,11 +343,12 @@
     const n = Math.round(Number(v));
     if (!(n >= 0)) { toast('That isn\'t a quantity', true); return; }
     if (n > Number(line.required)) { toast(`Only ${fmt(line.required)} needed. You can't pick more than that.`, true); return; }
-    act(() => rpc('dispatch_pick_set', { p_load_id: P.open, p_inventory_id: line.inventory_id, p_picked: n }));
+    // Same absolute-value write the autosave makes, so pressing Save after autosave doesn't double-count.
+    act(async () => { await AS.flushAll(); await rpc('dispatch_pick_set', { p_load_id: P.open, p_inventory_id: line.inventory_id, p_picked: n }); });
   }
 
   async function refresh() {
-    try { await loadAll(); keepSearchFocus(render); }
+    try { await loadAll(); AS.restore(); keepSearchFocus(render); }
     catch (e) { console.error('[picking]', e); document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`; }
   }
   function editing() {
@@ -254,7 +361,7 @@
     onEnvChange: () => { P.open = null; refresh(); },
     onReady: () => {
       refresh();
-      keepFresh(refresh, () => P.busy || editing(), ['pick_lines', 'pick_area_status', 'stage_area_status', 'loads']);
+      keepFresh(refresh, () => P.busy || editing() || AS.pending(), ['pick_lines', 'pick_area_status', 'stage_area_status', 'loads']);
     },
   });
 </script>
