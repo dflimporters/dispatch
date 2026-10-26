@@ -607,7 +607,7 @@ function progressBox(label, done, total, note) {
 
 function resultPill(s) {
   if (!s.result) return '';
-  return { applied: '<span class="pill ok">Applied</span>', refused: '<span class="pill warn">Refused</span>', failed: '<span class="pill bad">Failed</span>' }[s.result];
+  return { applied: '<span class="pill ok">Applied</span>', refused: '<span class="pill warn">Refused</span>', failed: '<span class="pill bad">Failed</span>', skipped: '<span class="pill done">Skipped</span>' }[s.result];
 }
 function eventList(evs, key) {
   if (!evs.length) return '';

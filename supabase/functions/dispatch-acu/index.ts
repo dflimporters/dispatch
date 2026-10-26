@@ -416,7 +416,7 @@ async function checkConfirm(load: any, acu: Acu) {
       throw new Error('The checker can\'t confirm live shipments yet (switched on after the pilot load).');
 
     const [{ data: ships, error: e1 }, { data: checks, error: e2 }] = await Promise.all([
-      admin.from('load_shipments').select('*').eq('load_id', loadId).or('check_result.is.null,check_result.neq.applied').order('shipment_nbr'),
+      admin.from('load_shipments').select('*').eq('load_id', loadId).or('check_result.is.null,check_result.not.in.(applied,skipped)').order('shipment_nbr'),
       admin.from('check_lines').select('*').eq('load_id', loadId),
     ]);
     if (e1) throw e1;
@@ -425,7 +425,7 @@ async function checkConfirm(load: any, acu: Acu) {
 
     for (const row of ships ?? []) {
       const nbr = row.shipment_nbr as string;
-      let result: 'applied' | 'refused' | 'failed' = 'failed';
+      let result: 'applied' | 'refused' | 'failed' | 'skipped' = 'failed';
       let detail = '';
       let status: string | null = null;
       try {
@@ -457,7 +457,9 @@ async function checkConfirm(load: any, acu: Acu) {
           if (changed.length) {
             result = 'refused'; detail = `Changed in Acumatica since it was checked (lines ${changed.map(c => c.line_nbr).join(', ')}); check it again`;
           } else if (finalTotal <= 0) {
-            result = 'refused'; detail = 'Nothing left to ship on this shipment; cancel it in Acumatica';
+            // Not written to Acumatica: the shipment is left as it is. It no longer holds the load back;
+            // someone has to delete or cancel it in Acumatica.
+            result = 'skipped'; detail = 'Nothing left to ship; left untouched in Acumatica, delete or cancel it there';
           } else {
             const lower = mine.filter(c => {
               const l = lines.find((x: any) => x.line === c.line_nbr);
@@ -511,7 +513,7 @@ async function checkConfirm(load: any, acu: Acu) {
     console.error('dispatch-acu check_confirm', loadId, e);
   } finally {
     const { data: all } = await admin.from('load_shipments').select('check_result').eq('load_id', loadId);
-    const done = !!all?.length && all.every(r => r.check_result === 'applied');
+    const done = !!all?.some(r => r.check_result === 'applied') && all.every(r => r.check_result === 'applied' || r.check_result === 'skipped');
     const nothing = !all?.some(r => r.check_result);
     const check_status = done ? 'confirmed' : (nothing && fatal) ? 'checking' : 'partial';
     await admin.from('loads').update({ check_status }).eq('id', loadId);
