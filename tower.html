@@ -113,13 +113,14 @@
   }
 
   async function loadDetail(id) {
-    const [ld, lm, ev, st] = await Promise.all([
+    const [ld, lm, ev, st, sc] = await Promise.all([
       sb.from('loads').select('id,load_nbr,load_date,wave,ship_via,contractor,truck_type,env,status,check_status').eq('id', id).maybeSingle(),
       sb.from('lm_loads').select(LM_COLS).eq('load_id', id).maybeSingle(),
       sb.from('lm_events').select('id,stop_id,kind,source,actor_name,server_at,applied,reject_reason,lat,lng,accuracy_m,payload').eq('load_id', id).order('id', { ascending: false }).limit(600),
       sb.from('lm_stops').select('id,customer_id,customer_name,zone,seq_suggested,seq_final,status,on_the_way_at,arrived_at,completed_at,receiver_name,fail_reason,fail_note').eq('load_id', id).order('seq_final'),
+      sb.from('lm_security_checks').select('result,note,checked_by,checked_at,counts').eq('load_id', id).order('checked_at', { ascending: false }).limit(1),
     ]);
-    for (const r of [ld, lm, ev, st]) if (r.error) throw r.error;
+    for (const r of [ld, lm, ev, st, sc]) if (r.error) throw r.error;
     if (!ld.data) throw new Error('Load not found');
     const stopIds = (st.data || []).map(s => s.id);
     let lines = [], files = [], rets = [];
@@ -132,8 +133,18 @@
       for (const r of [x, y, z]) if (r.error) throw r.error;
       lines = x.data || []; files = y.data || []; rets = z.data || [];
     }
-    T.detail = { load: ld.data, lm: lm.data, events: ev.data || [], stops: st.data || [], lines, files, rets,
+    T.detail = { load: ld.data, lm: lm.data, sec: (sc.data || [])[0] || null, events: ev.data || [], stops: st.data || [], lines, files, rets,
                  row: T.board.find(b => b.load_id === id) || null };
+  }
+
+  // Security's check of the truck against the return sheet. A load can't be closed until it is clear.
+  function securityBox(sec, m) {
+    if (!sec) return m.status === 'closed' ? '' : '<div class="warnbox">Waiting for security to check the truck against the return sheet. The load cannot be closed until they have cleared it. <a href="security.html">Security check</a></div>';
+    const mism = (sec.counts || []).filter(c => Number(c.counted) !== Number(c.expected)).length;
+    const who = `${esc(sec.checked_by || 'security')} at ${esc(stamp(sec.checked_at))}`;
+    return sec.result === 'clear'
+      ? `<div class="warnbox info"><b>Security cleared.</b> Every return-sheet line matched. ${who}${sec.note ? ' · ' + esc(sec.note) : ''}</div>`
+      : `<div class="warnbox bad"><b>Security flagged this load.</b> ${mism ? plural(mism, 'line') + ' differ from the return sheet. ' : ''}${who}${sec.note ? ' · ' + esc(sec.note) : ''}. It cannot be closed until a later check is clear.</div>`;
   }
 
   async function refreshAll() {
@@ -291,6 +302,7 @@
     if (e.kind === 'rescan') return `${esc(p.name || '')}${p.took_over ? ' · moved from another phone' : ' · same phone'}`;
     if (e.kind === 'shortage') return esc(p.note || '');
     if (e.kind === 'unassign') return `${esc(p.reason || '')}${p.previous_name ? ' · was ' + esc(p.previous_name) : ''}`;
+    if (e.kind === 'security_check') return `${p.result === 'clear' ? 'clear' : 'flagged'}${p.mismatched_lines ? ' · ' + plural(p.mismatched_lines, 'line') + ' differ from the return sheet' : ''}${p.note ? ' · ' + esc(p.note) : ''}`;
     if (e.kind === 'close') return `${esc(p.note || '')}${p.photos_not_uploaded ? ' · ' + plural(p.photos_not_uploaded, 'photo') + ' not uploaded' : ''}`;
     return '';
   }
@@ -340,9 +352,10 @@
           <div class="lactions" style="margin:0">
             <button class="btn small" data-act="printsheet">${m ? 'Reprint load sheet' : 'Print load sheet'}</button>
             ${claimed && canAct() ? '<button class="btn small danger" data-act="unassign">Unassign</button>' : ''}
-            ${m && m.status === 'completed' && canAct() ? '<button class="btn small primary" data-act="closeload">Close load</button>' : ''}
+            ${m && m.status === 'completed' && canAct() ? (d.sec && d.sec.result === 'clear' ? '<button class="btn small primary" data-act="closeload">Close load</button>' : '<button class="btn small" disabled title="Security has to clear the truck first">Close load</button>') : ''}
           </div></div>
         ${att.length ? att.map(a => `<div class="warnbox ${a.level === 'bad' ? 'bad' : a.level === 'info' ? 'info' : ''}">${esc(a.text)}</div>`).join('') : ''}
+        ${m && ['completed', 'closed'].includes(m.status) ? securityBox(d.sec, m) : ''}
         ${retLines ? `<div class="warnbox info">${plural(retLines, 'item')} to hand back across ${plural(row.return_sheets, 'stop')}. <a href="returns.html?date=${esc(l.load_date)}">Open the return sheet</a>.</div>` : ''}
       </div>
       <div class="sec-h">Stops <span class="muted">${done} of ${d.stops.length} done${changed ? ' · the driver changed the order' : ''}</span></div>
@@ -406,6 +419,7 @@
         if (!confirm(`Close ${l.load_nbr}?\n\nThe driver's phone is released and no more photos are accepted for this load.`)) break;
         act(async () => {
           let r = await sb.rpc('lm_close_load', { p_load_id: id });
+          if (r.error && r.error.code === 'LM412') throw r.error;
           if (r.error && r.error.code === 'LM409') {
             if (!confirm(`${r.error.message}\n\nClose it anyway?`)) return;
             r = await sb.rpc('lm_close_load', { p_load_id: id, p_force: true });

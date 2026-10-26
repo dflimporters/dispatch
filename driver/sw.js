@@ -1,12 +1,13 @@
 // Service worker for the OMS driver app: keeps the app shell and the two pinned
 // libraries available with no signal. Data calls (Supabase) always go to the network;
 // the app keeps its own copy of the load in localStorage.
-const CACHE = 'lm-driver-v4';
+const CACHE = 'lm-driver-v5';
 const SHELL = [
   './', 'index.html', 'driver.css', 'tokens.css', 'app.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png',
   '../assets/dfl-logo-white.png',
   'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3',
   'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js',
 ];
 
 self.addEventListener('install', e => {
