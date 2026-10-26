@@ -53,7 +53,7 @@
 <script>
   const STATUSES = ['Open', 'Back Order', 'Shipping', 'Credit Hold', 'On Hold'];
   const CANT_SHIP = ['Credit Hold', 'On Hold'];
-  const S = { rows: [], statuses: ['Open', 'Back Order'], q: '', zone: 'all', sel: new Set(), date: jmDate(0), synced: null, results: null, busy: false, sort: { key: 'order_date', dir: -1 } };
+  const S = { rows: [], statuses: ['Open', 'Back Order'], q: '', zone: 'all', sel: new Set(), date: jmDate(0), synced: null, results: null, busy: false, sort: { key: 'order_date', dir: -1 }, tab: loadKindTab() };
 
   async function callOrders(action, body) {
     const { data: { session } } = await sb.auth.getSession();
@@ -90,6 +90,7 @@
       data = rows.data || [];
       S.synced = sync.data ? new Date(sync.data) : null;
     }
+    await loadKinds();
     S.rows = data.map(r => ({ ...r, order_total: Number(r.order_total) || 0, open_qty: Number(r.open_qty) || 0, open_volume: Number(r.open_volume) || 0 }));
     const have = new Set(S.rows.map(r => r.order_nbr));
     S.sel = new Set([...S.sel].filter(n => have.has(n)));
@@ -100,7 +101,7 @@
     const q = S.q.trim().toLowerCase();
     const k = S.sort.key, d = S.sort.dir;
     const num = ['open_qty', 'open_volume', 'order_total'].includes(k);
-    return S.rows.filter(r => (S.zone === 'all' || r.shipping_zone === S.zone)
+    return S.rows.filter(r => (S.tab === 'special') === !!kindOf(r) && (S.zone === 'all' || r.shipping_zone === S.zone)
       && (!q || [r.order_nbr, r.customer_name, r.customer_id].some(v => String(v || '').toLowerCase().includes(q))))
       .sort((a, b) => d * (num ? (a[k] - b[k])
         : String(a[k] || '').localeCompare(String(b[k] || ''), undefined, { numeric: true, sensitivity: 'base' }))
@@ -118,6 +119,8 @@
   function render() {
     const rows = visible();
     const zones = [...new Set(S.rows.map(r => r.shipping_zone).filter(Boolean))].sort();
+    const counts = { special: S.rows.filter(r => kindOf(r)).length };
+    counts.delivery = S.rows.length - counts.special;
     const picked = S.rows.filter(r => S.sel.has(r.order_nbr));
     const ready = rows.filter(canShip);
     document.getElementById('main').innerHTML = `
@@ -125,6 +128,7 @@
         ? '<b>TEST:</b> these are the Open and Back Order orders in the Acumatica TEST tenant. Creating shipments here changes TEST only.'
         : '<b>LIVE:</b> production orders. Creating shipments goes to live Acumatica once that has been switched on after the TEST run.'}</div>
       ${S.results ? resultsHtml() : ''}
+      ${kindTabsHtml(S.tab, counts)}
       <div class="so-ctl">
         <div class="so-chips" id="stChips" role="group" aria-label="Order status">
           ${STATUSES.map(s => `<button data-st="${esc(s)}" class="${S.statuses.includes(s) ? 'on' : ''}">${esc(s)}</button>`).join('')}
@@ -149,13 +153,13 @@
           <tbody>${rows.map(r => `<tr class="${canShip(r) ? '' : 'blocked'} ${S.sel.has(r.order_nbr) ? 'sel' : ''}">
             <td><input type="checkbox" data-pick="${esc(r.order_nbr)}" aria-label="Select order ${esc(r.order_nbr)}" ${S.sel.has(r.order_nbr) ? 'checked' : ''} ${canShip(r) ? '' : 'disabled'}></td>
             <td class="nbr">${esc(r.order_nbr)}</td>
-            <td class="cust" title="${esc(r.customer_name || '')}">${esc(r.customer_name || r.customer_id || '')}</td>
+            <td class="cust" title="${esc(r.customer_name || '')}">${kindTag(kindOf(r))}${esc(r.customer_name || r.customer_id || '')}</td>
             <td>${esc(r.shipping_zone || '')}</td>
             <td>${statusPill(r.status)}</td>
             <td>${esc(r.order_date ? niceDate(r.order_date) : '')}</td>
             <td class="r">${fmt(r.open_qty)}</td><td class="r">${fmt(r.open_volume)}</td><td class="r">${money(r.order_total)}</td>
             <td>${r.open_shipments ? `<span class="tag" title="Already on an open shipment">On shipment${r.open_shipments > 1 ? ' ×' + r.open_shipments : ''}</span> ` : ''}${r.short_lines ? `<span class="tag old" title="Open qty is more than on hand at 71 on these lines">Short ${r.short_lines}</span>` : ''}${CANT_SHIP.includes(r.status) ? '<span class="tag old">Can\'t ship</span>' : ''}</td>
-          </tr>`).join('')}</tbody></table>` : `<div class="empty">No ${esc(S.statuses.join(' / '))} orders${S.q || S.zone !== 'all' ? ' match that search' : ''}.</div>`}
+          </tr>`).join('')}</tbody></table>` : `<div class="empty">No ${S.tab === 'special' ? 'pickup / donation / promotion ' : ''}${esc(S.statuses.join(' / '))} orders${S.q || S.zone !== 'all' ? ' match that search' : ''}.</div>`}
       </div></div>
       <div class="so-bar">
         <span><b>${plural(picked.length, 'order')}</b> selected · volume ${fmt(picked.reduce((t, r) => t + r.open_volume, 0))} · ${money(picked.reduce((t, r) => t + r.order_total, 0))}</span>
@@ -207,6 +211,8 @@
       S.sort = S.sort.key === k ? { key: k, dir: -S.sort.dir } : { key: k, dir: ['open_qty', 'open_volume', 'order_total', 'order_date'].includes(k) ? -1 : 1 };
       render(); return;
     }
+    const kt = e.target.closest('[data-ktab]');
+    if (kt) { S.tab = kt.dataset.ktab; saveKindTab(S.tab); render(); return; }
     const st = e.target.closest('[data-st]');
     if (!st) return;
     const s = st.dataset.st;
