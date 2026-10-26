@@ -102,6 +102,10 @@ select, .field input, .field textarea, input.txt {
 .tag.pm { background:#e0e7ff; color:#3730a3; }
 .tag.acu { background:var(--warn-bg, #ffedd5); color:var(--warn-text, #9a3412); }
 .tag.old { background:var(--bad-bg); color:var(--bad-text); }
+.tag.kind { background:#ede9fe; color:#5b21b6; font-size:11px; }
+.tag.kind-donation { background:#fce7f3; color:#9d174d; }
+.tag.kind-promotion { background:#ccfbf1; color:#115e59; }
+.kindtabs { margin-bottom:12px; flex-wrap:wrap; }
 
 .num { font-variant-numeric:tabular-nums; }
 .muted { color:var(--text-muted); font-size:12.5px; }

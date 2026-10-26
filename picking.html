@@ -66,7 +66,8 @@
 
   async function loadAll() {
     const loads = (await fetchLoads(P.date, { carry: true, events: false })).filter(l => ['done', 'partial'].includes(l.status) && l.check_status !== 'confirmed' && !l.checker_done_at);
-    P.loads = loads;
+    await loadKinds();
+    P.loads = loads.sort((a, b) => isSpecialLoad(b) - isSpecialLoad(a)); // pickup / donation / promotion first
     await loadPicks();
   }
   // Pick lines and area status for the loads already on screen: one request, so a save shows quickly.
@@ -122,7 +123,7 @@
       return `<span class="achip ${cls}">${areaName(a)} · ${areaStaged(l.id, a) ? 'staged' : areaDone(l.id, a) ? 'picked, not staged' : `${got}/${al.length}`}</span>`;
     }).join('');
     return `<button class="pload" data-open="${l.id}">
-      <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${waveTag(l.wave)}${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b>
+      <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${loadKindTags(l)}${waveTag(l.wave)}${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b>
         <span class="target">${esc(l.ship_via || '')}</span>${l.check_status ? '<span class="pill info">Being checked</span>' : ''}</div>
       <div class="sub">${esc(l.contractor || '')}${l.contractor ? ' · ' : ''}${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} · ${plural(lines.filter(inArea).length, 'item')}</div>
       <div class="achips">${chips}</div>
@@ -137,7 +138,7 @@
     const locked = l.check_status === 'confirming';
     return `
       <button class="back" data-back>← All loads</button>
-      <div class="lhead" style="margin-bottom:6px"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${waveTag(l.wave)} ${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b></div>
+      <div class="lhead" style="margin-bottom:6px"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${loadKindTags(l)}${waveTag(l.wave)} ${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b></div>
         <span class="target">${esc(l.ship_via || '')}</span></div>
       ${setWaveHtml(l)}
       <div class="muted" style="margin-bottom:10px">${esc(l.zones.join(', '))} · ${P.area === 'all' ? 'all areas' : areaName(P.area)} · ${plural(lines.length, 'item')}</div>
