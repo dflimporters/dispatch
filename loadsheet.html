@@ -13,6 +13,10 @@
                        laser sheet with a QR code and the same code in text. The driver scans
                        the QR (or types the code) in the driver app.
 
+  The sheet also prints the same link the QR code holds (driver/?c=CODE), for a driver whose
+  camera is not working; Copy driver link / Send by WhatsApp on each card give it to the
+  coordinator to pass on.
+
   Where the load is, who has it, the stops, exceptions, photos, unassign and close all live in
   Control Tower (tower.html); each load here links to it. Control Tower's "Print load sheet"
   opens this page as loadsheet.html?print=ID, which prints that load straight away.
@@ -38,6 +42,8 @@
   .sheet .big .who { font-size:19px; font-weight:800; }
   .sheet .big .sub { font-size:13px; color:#333; margin-top:2px; }
   .sheet .how { border:1.5px solid #000; border-radius:6px; padding:7px 10px; font-size:12.5px; margin-bottom:12px; }
+  .sheet .how.link { margin-top:-4px; }
+  .sheet .how .url { display:block; font-family:ui-monospace,Consolas,monospace; font-size:14px; font-weight:800; margin-top:3px; word-break:break-all; }
   .sheet table { width:100%; border-collapse:collapse; font-size:12.5px; }
   .sheet th { text-align:left; font-size:10.5px; letter-spacing:.6px; text-transform:uppercase; border-bottom:2px solid #000; padding:4px 5px; }
   .sheet td { border-bottom:1px solid #999; padding:5px; vertical-align:top; }
@@ -105,6 +111,7 @@
           ${m && m.aborted_at ? '<span class="pill bad">Stopped by driver</span>' : ''}</div>
         <div class="lactions" style="margin:0">
           <a class="btn small" href="tower.html#load=${l.id}">Open in Control Tower</a>
+          ${m && ['ready', 'collected', 'delivering'].includes(m.status) ? '<button class="btn small" data-act="copylink" title="The link the QR code opens, for a driver whose camera is not working">Copy driver link</button><button class="btn small" data-act="sharelink">Send by WhatsApp</button>' : ''}
           <button class="btn small primary" data-act="print">${m ? 'Reprint load sheet' : 'Print load sheet'}</button>
         </div></div>
       <div class="lstats"><span><b>${esc(l.ship_via || '—')}</b>${l.contractor ? ' · ' + esc(l.contractor) : ''}</span>${l.truck_type ? `<span>${esc(l.truck_type)}</span>` : ''}</div>
@@ -222,6 +229,7 @@
         </div>
       </div>
       <div class="how"><b>Driver:</b> open the DFL Driver app and scan this QR code, or type the code above. Check the load number and your name on the screen before you take responsibility for the load.</div>
+      <div class="how link"><b>Camera not working?</b> On your phone, open this link in the browser. It takes you to the same screen as the QR code.<span class="url">${esc(link)}</span></div>
       <table><thead><tr><th>#</th><th>Customer</th><th>Area</th><th>Invoices</th></tr></thead><tbody>
         ${stops.map(x => `<tr><td class="n">${x.seq}</td><td>${esc(x.customer_name || x.customer_id)}</td><td>${esc(x.zone || x.city || '')}</td><td>${esc((x.shipments || []).join(', '))}</td></tr>`).join('')}
       </tbody></table>
@@ -235,6 +243,23 @@
     document.getElementById('sheetwrap').innerHTML = sheetHtml(data);
     await new Promise(r => setTimeout(r, 150));
     window.print();
+  }
+
+  // The link the QR code holds. The coordinator can send it to a trucker whose camera is not working.
+  async function driverLink(id) {
+    const { data, error } = await sb.rpc('lm_sheet', { p_load_id: id });
+    if (error) throw error;
+    return { link: new URL('driver/?c=' + data.code, location.href).href, data };
+  }
+  async function copyLink(id) {
+    const { link } = await driverLink(id);
+    try { await navigator.clipboard.writeText(link); toast('Driver link copied'); }
+    catch (e) { window.prompt('Copy this link', link); }
+  }
+  async function shareLink(id) {
+    const { link, data } = await driverLink(id);
+    const text = `DFL load ${data.load_nbr}: open this link on your phone to collect the load. ${link}`;
+    window.open('https://wa.me/?text=' + encodeURIComponent(text), '_blank', 'noopener');
   }
 
   async function act(fn) {
@@ -254,6 +279,8 @@
       case 'refresh': refresh(); break;
       case 'today': L.date = jmDate(0); refresh(); break;
       case 'print': act(() => printSheet(id)); break;
+      case 'copylink': act(() => copyLink(id)); break;
+      case 'sharelink': act(() => shareLink(id)); break;
       case 'find': act(findRun); break;
       case 'build': act(buildRun); break;
       case 'fetchlines': act(fetchLines); break;
