@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f2044">
+<meta name="robots" content="noindex, nofollow">
+<title>Contacts — Logistics Management System</title>
+<!--
+  Contacts (OMS last mile). The numbers behind the Call / WhatsApp buttons on each stop in the
+  driver app. For every stop the app shows two contacts:
+
+    Sales rep      the salesperson on the customer's shipments (shipments.salesperson_code ->
+                   reps). Rep numbers are saved here (reps.phone is mostly empty), or set for one
+                   customer below when someone else covers that account.
+    Sales support  the customer's own contact if one is set, otherwise the one for the
+                   customer's sales area, otherwise the default one.
+
+  Reads and writes through lm_contacts_list / lm_contact_save / lm_contact_delete
+  (supervisor or manager), into lm_sales_contacts.
+-->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="common.css">
+<style>
+  .wrap { max-width:900px; }
+  table.ct { width:100%; border-collapse:collapse; font-size:13.5px; }
+  table.ct th { text-align:left; font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:.3px; padding:6px; border-bottom:1px solid var(--border); }
+  table.ct td { padding:6px; border-top:1px solid #f1f5f9; vertical-align:middle; }
+  table.ct input { width:100%; min-width:110px; padding:6px 8px; border:1px solid var(--border); border-radius:6px; font:inherit; }
+  .sect { padding:12px 16px; margin-bottom:14px; }
+  .sect h3 { font-size:15px; color:var(--navy); margin-bottom:2px; }
+  .sect .muted { margin-bottom:8px; font-size:12.5px; }
+  .addrow { display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; margin-top:10px; }
+  .addrow .field { flex:1 1 140px; }
+</style>
+</head>
+<body>
+<div class="page" id="app"><div class="empty">Loading…</div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
+<script src="common.js"></script>
+<script>
+  const C = { contacts: [], reps: [], areas: [], busy: false };
+  const find = (kind, scope, key) => C.contacts.find(c => c.kind === kind && c.scope === scope && c.key === (key || ''));
+
+  async function load() {
+    const { data, error } = await sb.rpc('lm_contacts_list');
+    if (error) throw error;
+    C.contacts = data.contacts || []; C.reps = data.reps || []; C.areas = data.areas || [];
+  }
+
+  // One editable row. data-* on the button say what it saves.
+  function row(cells, kind, scope, key, existing, defName) {
+    return `<tr data-kind="${kind}" data-scope="${scope}" data-key="${esc(key)}">${cells}
+      <td><input class="cn" placeholder="Name" value="${esc(existing ? existing.name : defName || '')}"></td>
+      <td><input class="cp" type="tel" placeholder="876 555 1234" value="${esc(existing ? existing.phone : '')}"></td>
+      <td style="white-space:nowrap"><button class="btn small primary" data-act="save">Save</button>${existing && existing.id ? ` <button class="btn small" data-act="del" data-id="${existing.id}">Remove</button>` : ''}</td></tr>`;
+  }
+
+  function render() {
+    const def = find('support', 'default', '');
+    const custRows = C.contacts.filter(c => c.scope === 'customer');
+    document.getElementById('main').innerHTML = `<div class="wrap">
+      <div class="card sect"><h3>Default sales support</h3>
+        <div class="muted">Used when the customer's area has no sales support of its own.</div>
+        <table class="ct"><thead><tr><th>Name</th><th>Phone (WhatsApp is the same number)</th><th></th></tr></thead><tbody>
+          ${row('', 'support', 'default', '', def, 'Sales support')}
+        </tbody></table></div>
+
+      <div class="card sect"><h3>Sales support by area</h3>
+        <div class="muted">The area is the customer's Sales Area in Acumatica. Customers with no area use the default above.</div>
+        <table class="ct"><thead><tr><th>Area</th><th>Name</th><th>Phone</th><th></th></tr></thead><tbody>
+          ${C.areas.map(a => row(`<td><b>${esc(a)}</b></td>`, 'support', 'area', a, find('support', 'area', a))).join('') || '<tr><td colspan="4" class="muted">No sales areas found.</td></tr>'}
+        </tbody></table></div>
+
+      <div class="card sect"><h3>Sales rep numbers</h3>
+        <div class="muted">Saved here, they are what the driver sees for that rep. A rep with no number saved here uses the sales portal's number if there is one; otherwise the driver sees the name and "no number yet".</div>
+        <table class="ct"><thead><tr><th>Rep</th><th>Name</th><th>Phone</th><th></th></tr></thead><tbody>
+          ${C.reps.map(r => { const ex = find('rep', 'rep', r.code);
+            return row(`<td>${esc(r.name)} <span class="muted">${esc(r.code)}${r.area ? ' · ' + esc(r.area) : ''}</span></td>`, 'rep', 'rep', r.code,
+              ex || (r.phone ? { name: r.name, phone: r.phone, id: null } : null), r.name); }).join('') || '<tr><td colspan="4" class="muted">No reps found.</td></tr>'}
+        </tbody></table></div>
+
+      <div class="card sect"><h3>One customer, a different contact</h3>
+        <div class="muted">Overrides the area or rep above for that customer only (for example a key account with its own account manager).</div>
+        ${custRows.length ? `<table class="ct"><thead><tr><th>Customer</th><th>Role</th><th>Name</th><th>Phone</th><th></th></tr></thead><tbody>
+          ${custRows.map(c => row(`<td><b>${esc(c.key)}</b></td><td>${c.kind === 'rep' ? 'Sales rep' : 'Sales support'}</td>`, c.kind, 'customer', c.key, c)).join('')}</tbody></table>` : ''}
+        <div class="addrow" id="addc">
+          <label class="field">Customer ID<input id="ac_key" placeholder="e.g. C000123" autocomplete="off"></label>
+          <label class="field">Role<select id="ac_kind"><option value="rep">Sales rep</option><option value="support">Sales support</option></select></label>
+          <label class="field">Name<input id="ac_name" autocomplete="off"></label>
+          <label class="field">Phone<input id="ac_phone" type="tel" autocomplete="off"></label>
+          <button class="btn small primary" data-act="addc">Add</button>
+        </div></div></div>`;
+  }
+
+  async function act(fn) {
+    if (C.busy) return;
+    C.busy = true;
+    try { await fn(); await load(); render(); }
+    catch (e) { console.error('[contacts]', e); toast(errMsg(e), true); }
+    finally { C.busy = false; }
+  }
+  const save = (kind, scope, key, name, phone) => sb.rpc('lm_contact_save', { p_kind: kind, p_scope: scope, p_key: key, p_name: name, p_phone: phone }).then(r => { if (r.error) throw r.error; });
+
+  document.getElementById('app').addEventListener('click', e => {
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    const tr = b.closest('tr');
+    switch (b.dataset.act) {
+      case 'save': act(async () => {
+        await save(tr.dataset.kind, tr.dataset.scope, tr.dataset.key, tr.querySelector('.cn').value, tr.querySelector('.cp').value);
+        toast('Saved');
+      }); break;
+      case 'del': if (confirm('Remove this contact?')) act(async () => {
+        const r = await sb.rpc('lm_contact_delete', { p_id: Number(b.dataset.id) });
+        if (r.error) throw r.error;
+        toast('Removed');
+      }); break;
+      case 'addc': act(async () => {
+        const g = id => document.getElementById(id).value.trim();
+        if (!g('ac_key')) throw new Error('Enter the customer ID');
+        await save(g('ac_kind'), 'customer', g('ac_key'), g('ac_name'), g('ac_phone'));
+        toast('Added');
+      }); break;
+    }
+  });
+
+  startPage({
+    page: 'contacts', role: ['supervisor', 'manager'], title: 'Contacts',
+    onEnvChange: () => {},
+    onReady: async () => {
+      const envbar = document.getElementById('envbar'); if (envbar) envbar.style.display = 'none';
+      try { await load(); render(); }
+      catch (e) { document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`; }
+    },
+  });
+</script>
+</body>
+</html>

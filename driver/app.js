@@ -23,7 +23,7 @@ const S = {
   peek: null, code: null, session: null, data: null, queue: [],
   offline: false, stream: null, scanning: false, timer: null, busy: false,
   syncing: false, pressing: false, editing: false, draft: [], notice: null, gpsDenied: false, warmed: false,
-  screen: null,                      // null = the route; { kind: 'check' | 'abort', stop: id } or { kind: 'abortload' }
+  screen: null,                      // null = the route; { kind: 'check' | 'abort', stop: id } or { kind: 'abortload' } or { kind: 'qr' }
   form: { receiver: {}, edit: null, editing: null, refuseAll: null, abortReason: '', abortNote: '', loadReason: '', loadNote: '' },
   waiting: new Set(),                // ids of photos still on this phone
   uploading: false,
@@ -502,6 +502,15 @@ function applyLocal(data, queue) {
 const view = () => (S.data ? applyLocal(S.data, S.queue) : null);
 const reasonLabel = code => { const r = ((S.data && S.data.reasons) || []).find(x => x.code === code); return r ? r.label : code || ''; };
 
+// Digits for a wa.me link: Jamaican numbers without the country code get 1 (876).
+function waNumber(p) {
+  const d = String(p || '').replace(/[^0-9]/g, '');
+  if (d.length === 7) return '1876' + d;
+  if (d.length === 10) return '1' + d;
+  return d;
+}
+const telHref = p => 'tel:' + String(p || '').replace(/[^0-9+]/g, '');
+
 // ------------------------------------------------------------------
 // GPS
 // ------------------------------------------------------------------
@@ -626,14 +635,17 @@ function renderLoad() {
 function drawLoad() {
   const d = view();
   if (!d) { renderScan(); return; }
-  const stop = S.screen && S.screen.kind !== 'abortload' ? d.stops.find(s => s.id === S.screen.stop) : null;
-  if (S.screen && S.screen.kind !== 'abortload' && !stop) S.screen = null;
+  const loadWide = S.screen && ['abortload', 'qr'].includes(S.screen.kind);
+  if (S.screen && S.screen.kind === 'qr' && !d.load.claim_code) S.screen = null;      // an older copy of the load: wait for the refresh
+  const stop = S.screen && !loadWide ? d.stops.find(s => s.id === S.screen.stop) : null;
+  if (S.screen && !loadWide && !stop) S.screen = null;
   if (S.screen && S.screen.kind === 'check' && stop && stop.status !== 'arrived') S.screen = null;   // finished, or moved on
   if (S.screen && S.screen.kind === 'abort' && stop && DONE.includes(stop.status)) S.screen = null;
   if (S.screen && S.screen.kind === 'abortload' && ['completed', 'closed'].includes(d.load.status)) S.screen = null;
   if (S.screen && S.screen.kind === 'check') return renderChecklist(d, stop);
   if (S.screen && S.screen.kind === 'abort') return renderAbort(d, stop);
   if (S.screen && S.screen.kind === 'abortload') return renderAbortLoad(d);
+  if (S.screen && S.screen.kind === 'qr') return renderQr(d);
   renderRoute(d);
 }
 
@@ -671,6 +683,35 @@ function statusBanners() {
     ${S.gpsDenied ? '<div class="banner warn"><b>Location is off.</b> Your deliveries are still saved, but without a location. Turn location on for this app in your phone settings.</div>' : ''}`;
 }
 
+// --- The load's QR, for security when the truck comes back ------------
+// The same code as on the load sheet. It lives in the phone's copy of the load, so it shows
+// with no signal.
+function qrSvg(text) {
+  const qr = qrcode(0, 'M');
+  qr.addData(text);
+  qr.make();
+  const n = qr.getModuleCount(), cell = 4, size = n * cell;
+  let rects = '';
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) rects += `<rect x="${c * cell}" y="${r * cell}" width="${cell}" height="${cell}"/>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-8 -8 ${size + 16} ${size + 16}" shape-rendering="crispEdges" role="img" aria-label="Load QR code"><rect x="-8" y="-8" width="${size + 16}" height="${size + 16}" fill="#fff"/><g fill="#000">${rects}</g></svg>`;
+}
+const prettyCode = c => String(c || '').slice(0, 4) + '-' + String(c || '').slice(4);
+function renderQr(d) {
+  const l = d.load;
+  const link = new URL('./?c=' + l.claim_code, location.href).href;
+  show(`
+    <button class="btn link back" data-act="backroute">‹ Back to the route</button>
+    <h1>Show this to security</h1>
+    <p class="lead">When you are back at the warehouse, security scans this code to check your truck. It is the same code you scanned to collect the load.</p>
+    <div class="card qrcard">
+      <div class="qrbox">${qrSvg(link)}</div>
+      <div class="loadnbr" style="text-align:center;margin-top:10px">${esc(l.load_nbr)}</div>
+      <div class="qrcode">${esc(prettyCode(l.claim_code))}</div>
+      <div class="muted" style="text-align:center">${esc(l.trucker)}</div>
+    </div>
+    <div class="btns"><button class="btn" data-act="backroute">Back to the route</button></div>`);
+}
+
 // --- Route ---------------------------------------------------------
 function renderRoute(d) {
   const l = d.load, stops = d.stops || [];
@@ -702,8 +743,21 @@ function renderRoute(d) {
     ${S.editing ? editList(stops) : stops.map((s, i) => stopCard(s, i, { active, firstPending })).join('') || '<div class="card muted">No stops on this load.</div>'}
     ${S.editing ? '' : handBackCard(stops)}
     ${S.editing ? `<div class="btns"><button class="btn primary" data-act="saveorder">Save this order</button><button class="btn link" data-act="cancelorder">Cancel</button></div>`
-      : `<div class="btns"><button class="btn" data-act="refresh">Refresh</button>
+      : `<div class="btns">${l.claim_code ? `<button class="btn ${finished ? 'primary' : ''}" data-act="qr">Show my load QR (for security)</button>` : ''}
+          <button class="btn" data-act="refresh">Refresh</button>
           ${finished ? '' : '<button class="btn link" data-act="abortloadscreen">I can\'t finish this load</button>'}</div>`}`);
+}
+
+// Call / WhatsApp for the sales rep and sales support behind this customer (set up on the
+// office's Contacts page). A contact with no number yet is listed by name only.
+function contactRow(s) {
+  const list = s.contacts || [];
+  if (!list.length) return '';
+  return `<div class="contacts">${list.map(c => c.phone
+    ? `<div class="crow"><span class="cwho"><small>${esc(c.label)}</small>${esc(c.name || '')}</span>
+        <a class="btn small" href="${esc(telHref(c.phone))}">📞 Call</a>
+        <a class="btn small wa" href="https://wa.me/${esc(waNumber(c.phone))}" target="_blank" rel="noopener">WhatsApp</a></div>`
+    : `<div class="crow"><span class="cwho"><small>${esc(c.label)}</small>${esc(c.name || '')} <span class="muted">(no number yet)</span></span></div>`).join('')}</div>`;
 }
 
 function stopCard(s, i, ctx) {
@@ -741,6 +795,7 @@ function stopCard(s, i, ctx) {
         ${addr ? `<div class="addr">${esc(addr)}</div>` : ''}
         <div class="meta">${plural((s.invoices || []).length, 'invoice')} · ${fmt(items)} items${s.phone ? ` · <a class="tel" href="tel:${esc(String(s.phone).replace(/[^0-9+]/g, ''))}">${esc(s.phone)}</a>` : ''}</div>
         ${state ? `<div style="margin-top:8px">${state}</div>` : ''}
+        ${s.status === 'delivered' ? '' : contactRow(s)}
       </div></div>
     ${acts ? `<div class="acts">${acts}</div>` : ''}
   </div>`;
@@ -1006,6 +1061,7 @@ document.addEventListener('click', e => {
     case 'sendmissing': sendMissing(); break;
     case 'review': renderReview(); break;
     case 'refresh': refreshLoad(); break;
+    case 'qr': S.screen = { kind: 'qr' }; renderLoad(); break;
     case 'otw': press('on_the_way', stop, {}, true); break;
     case 'arr': press('arrived', stop, {}, true, { kind: 'check', stop }); break;
     case 'cancelotw': press('cancel_on_the_way', stop, {}, false); break;

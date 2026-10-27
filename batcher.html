@@ -33,13 +33,14 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
 <script src="common.js"></script>
 <script>
-  const B = { date: jmDate(0), free: [], hasSv: [], loads: [], dates: [], sel: new Set(), sync: null, busy: false, wave: loadWaveFilter('batcher') };
+  const B = { date: jmDate(0), free: [], hasSv: [], loads: [], dates: [], sel: new Set(), sync: null, busy: false, wave: loadWaveFilter('batcher'), tab: loadKindTab() };
 
   // The All / AM / PM filter: free shipments by suggested wave, loads by their wave.
   function inWave(r) { return B.wave === 'all' || suggestWave(r, B.date) === B.wave; }
   function loadInWave(l) { return B.wave === 'all' || l.wave === B.wave; }
-  function visFree() { return B.free.filter(inWave); }
-  function visLoads() { return B.loads.filter(loadInWave); }
+  const inTab = r => (B.tab === 'special') === !!kindOf(r);
+  function visFree() { return B.free.filter(inWave).filter(inTab); }
+  function visLoads() { return B.loads.filter(loadInWave).filter(l => (B.tab === 'special') === isSpecialLoad(l)); }
 
   // ------------------------------------------------------------------
   // Data
@@ -57,6 +58,7 @@
       openDates(),
     ]);
     if (pool.error) throw pool.error;
+    await loadKinds();
     const rows = pool.data || [];
     // Which of these are already on a load (any date)?
     const taken = new Set();
@@ -109,7 +111,10 @@
     const chips = B.dates.length
       ? `<span class="chips">Unloaded on: ${B.dates.map(([d, n]) => `<button class="chip ${d === B.date ? 'on' : ''}" data-date="${d}">${esc(niceDate(d))} · ${n}</button>`).join('')}</span>` : '';
 
+    const kc = { special: B.free.filter(r => kindOf(r)).length + B.loads.filter(isSpecialLoad).length };
+    kc.delivery = B.free.length + B.loads.length - kc.special;
     document.getElementById('main').innerHTML = `
+      ${kindTabsHtml(B.tab, kc)}
       <div class="controls">
         <div class="seg" id="daySeg">
           <button data-day="0" class="${B.date === jmDate(0) ? 'on' : ''}">Today</button>
@@ -159,7 +164,7 @@
         return `<tr class="${sel ? 'sel' : ''}">
           ${cb ? `<td class="cb">${pickable(n) ? `<input type="checkbox" data-pick="${esc(n)}" ${sel ? 'checked' : ''} aria-label="Select ${esc(n)}">` : ''}</td>` : ''}
           <td class="num">${shipToggle(n)} ${w ? waveTag(w, 'Suggested run') : ''}</td>
-          <td class="cust" title="${esc(r.customer_name || '')}">${esc(r.customer_name || r.customer_id || '—')} ${tags.join(' ')}</td>
+          <td class="cust" title="${esc(r.customer_name || '')}">${kindTag(kindOf(r))}${esc(r.customer_name || r.customer_id || '—')} ${tags.join(' ')}</td>
           ${zone ? `<td class="hide-m">${esc(r.shipping_zone || '—')}</td>` : ''}
           <td class="r num">${fmt(qty(r))}</td>
           <td class="r num">${fmt(vol(r))}</td>
@@ -194,7 +199,7 @@
     const others = B.loads.filter(x => x.status === 'draft' && x.id !== l.id);
     const fit = bestFit(l.vol, l.drops);
     return `<div class="lcard st-${l.status}" data-load="${l.id}">
-      <div class="lhead"><div><span class="lnbr">${esc(l.load_nbr)}</span> <span class="muted">${esc(l.zones.join(', '))}</span></div>${statusPill(l.status)}</div>
+      <div class="lhead"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${loadKindTags(l)}<span class="muted">${esc(l.zones.join(', '))}</span></div>${statusPill(l.status)}</div>
       ${l.returned_note && draft ? `<div class="warnbox bad">Sent back by the liaison: ${esc(l.returned_note)}</div>` : ''}
       ${draft ? `<div class="lctl">
           <label class="field">Wave <select data-f="wave">${['AM', 'PM'].map(w => `<option ${w === l.wave ? 'selected' : ''}>${w}</option>`).join('')}</select></label>
@@ -280,6 +285,8 @@
     if (chip) { setDate(chip.dataset.date); return; }
     const day = e.target.closest('#daySeg button');
     if (day) { setDate(jmDate(Number(day.dataset.day))); return; }
+    const kt = e.target.closest('[data-ktab]');
+    if (kt) { B.tab = kt.dataset.ktab; saveKindTab(B.tab); B.sel.clear(); render(); return; }
     const wb = e.target.closest('.wavef button[data-wave]');
     if (wb) { B.wave = wb.dataset.wave; saveWaveFilter('batcher', B.wave); B.sel.clear(); render(); return; }
     const btn = e.target.closest('[data-act]');

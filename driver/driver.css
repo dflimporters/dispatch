@@ -121,3 +121,17 @@ select.txt { appearance:auto; }
 .stop a.tel { color:var(--accent); font-weight:600; text-decoration:none; }
 .spin { display:inline-block; width:16px; height:16px; border:2.5px solid #cbd5e1; border-top-color:var(--navy); border-radius:50%; animation:sp .8s linear infinite; vertical-align:-3px; margin-right:8px; }
 @keyframes sp { to { transform:rotate(360deg); } }
+
+/* Load QR for security */
+.qrcard { text-align:center; }
+.qrbox { width:min(100%, 320px); margin:0 auto; }
+.qrbox svg { width:100%; height:auto; display:block; }
+.qrcode { font-family:ui-monospace,Consolas,monospace; font-size:26px; font-weight:800; letter-spacing:3px; color:var(--navy); margin:2px 0 4px; }
+
+/* Call / WhatsApp per stop */
+.contacts { margin-top:10px; border-top:1px solid #f1f5f9; padding-top:8px; display:flex; flex-direction:column; gap:8px; }
+.crow { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.crow .cwho { flex:1 1 120px; font-size:15px; font-weight:600; color:var(--text); line-height:1.25; }
+.crow .cwho small { display:block; font-size:12px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:.4px; }
+.crow .btn.small { padding:9px 14px; font-weight:700; }
+.crow .btn.wa { background:#25d366; border-color:#25d366; color:#06371b; }

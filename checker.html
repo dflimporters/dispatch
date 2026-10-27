@@ -55,7 +55,8 @@
     const ids = loads.map(l => l.id);
     const r = ids.length ? await sb.rpc('dispatch_pick_bundle', { p_load_ids: ids, p_with_checks: true }) : { data: { picks: [], done: [], staged: [], items: [] } };
     if (r.error) throw r.error;
-    K.loads = loads;
+    await loadKinds();
+    K.loads = loads.sort((a, b) => isSpecialLoad(b) - isSpecialLoad(a)); // pickup / donation / promotion first
     K.staged = r.data.staged || [];
     K.areaDone = r.data.done || [];
     K.picks = new Map(ids.map(id => [id, (r.data.picks || []).filter(x => x.load_id === id)]));
@@ -107,7 +108,7 @@
   function loadCard(l) {
     const s = checkState(l);
     return `<button class="cload" data-open="${l.id}">
-      <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${waveTag(l.wave)}${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b><span class="target">${esc(l.ship_via || '')}</span>
+      <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${loadKindTags(l)}${waveTag(l.wave)}${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b><span class="target">${esc(l.ship_via || '')}</span>
         <span class="spacer"></span>${checkPill(l)}</div>
       <div class="sub">${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} · ${plural(s.total, 'item')} ·
         ${s.areas ? `${s.staged}/${s.areas} areas staged` : 'picking not started'}${s.short ? ` · <b style="color:var(--warn-text)">${s.short} short</b>` : ''}</div>
@@ -123,7 +124,7 @@
     const areas = [...new Set(lines.map(x => x.area))];
     return `
       <button class="back" data-back>← All loads</button>
-      <div class="lhead" style="margin-bottom:6px"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${waveTag(l.wave)} ${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b>
+      <div class="lhead" style="margin-bottom:6px"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${loadKindTags(l)}${waveTag(l.wave)} ${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b>
         <span class="target">${esc(l.ship_via || '')}</span> <span class="muted">${esc(l.contractor || '')}</span></div>${checkPill(l)}</div>
       <div class="muted" style="margin-bottom:10px">${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} · ${plural(lines.length, 'item')}${s.areas ? ` · ${s.staged}/${s.areas} areas staged` : ''}</div>
       ${s.areas && s.staged < s.areas && !finished ? `<div class="warnbox info">${s.areas - s.staged} of ${s.areas} area(s) not staged yet.</div>` : ''}

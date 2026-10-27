@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f2044">
+<meta name="robots" content="noindex, nofollow">
+<title>Security check — Logistics Management System</title>
+<!--
+  Security check (OMS last mile). When a truck is back, security scans the QR code on the
+  driver's phone (the same code the driver scanned to collect the load) or types the code,
+  sees the load's return sheet and counts every line against what physically came back. The
+  database works out the result: clear only if every count matches and every check is ticked;
+  anything else is recorded as flagged, with a note. Until a load has a clear check it cannot
+  be closed in Control Tower.
+
+  This is separate from the returns clerk's receiving: it writes only lm_security_checks (and
+  an audit event) and never changes a return sheet or the load. Several checks can be
+  recorded for a load (for example a re-check after a flag); the latest shows first.
+
+  Uses lm_security_lookup and lm_security_submit (supabase/migrations/20261026120000_*.sql).
+  The checklist is lm_security_check_items.
+-->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="common.css">
+<style>
+  .secwrap { max-width:640px; margin:0 auto; }
+  .viewfinder { position:relative; width:100%; aspect-ratio:1 / 1; max-height:60vh; background:#0b1220; border-radius:14px; overflow:hidden; margin-bottom:12px; }
+  .viewfinder video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+  .viewfinder::after { content:''; position:absolute; inset:14%; border:3px solid rgba(255,255,255,.85); border-radius:16px; box-shadow:0 0 0 999px rgba(0,0,0,.35); pointer-events:none; }
+  .viewfinder .hint { position:absolute; left:0; right:0; bottom:10px; text-align:center; color:#fff; font-size:13px; z-index:2; text-shadow:0 1px 3px rgba(0,0,0,.6); }
+  input.codein { width:100%; font-family:ui-monospace,Consolas,monospace; font-size:24px; font-weight:800; letter-spacing:3px; text-align:center; text-transform:uppercase; padding:12px; border:2px solid var(--border); border-radius:10px; }
+  .kv { display:flex; justify-content:space-between; gap:12px; padding:7px 0; border-top:1px solid var(--border); font-size:14px; }
+  .kv:first-child { border-top:0; }
+  .kv span:first-child { color:var(--text-muted); }
+  .tick { display:flex; gap:12px; align-items:flex-start; padding:12px 14px; border:1.5px solid var(--border); border-radius:10px; margin-bottom:8px; background:#fff; font-size:15px; line-height:1.35; cursor:pointer; }
+  .tick input { width:22px; height:22px; flex:none; margin-top:1px; }
+  .hb { padding:8px 0; border-top:1px solid var(--border); }
+  .hb:first-child { border-top:0; }
+  .hb .c { font-weight:700; color:var(--navy); }
+  .hb .l { display:flex; justify-content:space-between; gap:10px; font-size:13.5px; padding:2px 0; }
+  .hb .l small { display:block; color:var(--text-muted); }
+  .hb .l b { white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .big { font-family:ui-monospace,Consolas,monospace; font-size:26px; font-weight:800; color:var(--navy); }
+  textarea.note { width:100%; min-height:70px; padding:10px; border:1.5px solid var(--border); border-radius:10px; font:inherit; }
+  .cnt { display:flex; align-items:center; gap:8px; white-space:nowrap; }
+  .cnt input { width:90px; padding:6px 8px; border:1.5px solid var(--border); border-radius:8px; font:inherit; font-size:15px; text-align:right; }
+  .cnt input.bad { border-color:#dc2626; background:#fef2f2; }
+  .cnt input.good { border-color:#0f9f6e; background:#ecfdf5; }
+  .row2 { display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }
+</style>
+</head>
+<body>
+<div class="page" id="app"><div class="empty">Loading…</div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js" integrity="sha384-b5Ya4Bq3qCyz39m2ISh+4DxjAIljdeFwK/BsXLuj9gugaNwAcj/ia15fxNZL9Nlx" crossorigin="anonymous"></script>
+<script src="common.js"></script>
+<script>
+  const CODE_RE = /^[0-9A-HJKMNP-TV-Z]{8}$/;
+  const X = { res: null, ticks: {}, counts: {}, note: '', done: null, stream: null, scanning: false, timer: null, busy: false, typing: false };
+  const main = () => document.getElementById('main');
+
+  // A scanned QR holds a link ending in ?c=CODE, or the bare code. Same clean-up as the database.
+  function extractCode(text) {
+    let t = String(text || '').trim();
+    try { const c = new URL(t).searchParams.get('c'); if (c) t = c; } catch (e) {}
+    const n = t.replace(/[^0-9A-Za-z]/g, '').toUpperCase().replace(/O/g, '0').replace(/[IL]/g, '1');
+    return CODE_RE.test(n) ? n : null;
+  }
+  const pretty = c => c.slice(0, 4) + '-' + c.slice(4);
+  const num = n => { n = Number(n) || 0; return Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100); };
+
+  // --- scan ---------------------------------------------------------
+  function renderScan(notice) {
+    stopScan();
+    X.res = null; X.ticks = {}; X.counts = {}; X.note = ''; X.done = null; X.typing = false;
+    main().innerHTML = `<div class="secwrap">
+      <h2 style="margin-bottom:4px">Truck back: security check</h2>
+      <p class="muted" style="margin-bottom:12px">Scan the QR code on the driver's phone (Driver app, <b>Show my load QR</b>), or the one on the load sheet.</p>
+      ${notice ? `<div class="warnbox bad">${notice}</div>` : ''}
+      <div class="viewfinder"><video id="cam" playsinline muted></video><div class="hint" id="camhint">Starting the camera…</div></div>
+      <canvas id="grab" hidden></canvas>
+      <div class="row2"><button class="btn" data-act="typecode">Type the code instead</button></div></div>`;
+    startScan();
+  }
+  async function startScan() {
+    const video = document.getElementById('cam');
+    if (!video) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { document.getElementById('camhint').textContent = "This device can't open the camera here. Type the code instead."; return; }
+    try {
+      X.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+      video.srcObject = X.stream;
+      await video.play();
+      document.getElementById('camhint').textContent = 'Hold steady until it reads';
+      X.scanning = true;
+      tick();
+    } catch (e) {
+      const h = document.getElementById('camhint');
+      if (h) h.textContent = "Couldn't start the camera. Type the code instead.";
+    }
+  }
+  function tick() {
+    if (!X.scanning) return;
+    const video = document.getElementById('cam'), canvas = document.getElementById('grab');
+    if (video && canvas && video.readyState === video.HAVE_ENOUGH_DATA && video.videoWidth) {
+      const scale = Math.min(1, 640 / video.videoWidth);
+      canvas.width = Math.round(video.videoWidth * scale); canvas.height = Math.round(video.videoHeight * scale);
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const hit = jsQR(img.data, canvas.width, canvas.height, { inversionAttempts: 'dontInvert' });
+      const code = hit && extractCode(hit.data);
+      if (code) { if (navigator.vibrate) navigator.vibrate(60); lookup(code); return; }
+    }
+    X.timer = setTimeout(tick, 130);
+  }
+  function stopScan() {
+    X.scanning = false; clearTimeout(X.timer);
+    if (X.stream) { X.stream.getTracks().forEach(t => t.stop()); X.stream = null; }
+  }
+  function renderType(notice) {
+    stopScan(); X.typing = true;
+    main().innerHTML = `<div class="secwrap">
+      <h2 style="margin-bottom:4px">Type the code</h2>
+      <p class="muted" style="margin-bottom:12px">The 8 letters and numbers under the QR code.</p>
+      ${notice ? `<div class="warnbox bad">${notice}</div>` : ''}
+      <input class="codein" id="codein" maxlength="12" autocapitalize="characters" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX">
+      <div class="row2"><button class="btn primary" data-act="codego">Look up this load</button><button class="btn" data-act="scan">Scan instead</button></div></div>`;
+    document.getElementById('codein').focus();
+  }
+
+  async function lookup(code) {
+    if (X.busy) return;
+    X.busy = true; stopScan();
+    main().innerHTML = '<div class="empty">Looking up the load…</div>';
+    try {
+      const { data, error } = await sb.rpc('lm_security_lookup', { p_code: code });
+      if (error) throw error;
+      X.res = data; X.code = code; X.ticks = {}; X.counts = {}; X.note = ''; X.done = null;
+      renderResult();
+    } catch (e) {
+      const msg = e && e.code === 'LM404' ? "That code isn't recognised. Check it and try again." : esc(errMsg(e));
+      renderType(msg);
+    } finally { X.busy = false; }
+  }
+
+  // --- result -------------------------------------------------------
+  const STATE = { ready: 'Not collected', collected: 'Collected, not yet out', delivering: 'Out for delivery', completed: 'All stops done', closed: 'Closed' };
+  const allLines = () => (X.res.handback || []).flatMap(s => s.lines || []);
+  const counted = x => X.counts[x.id] !== undefined && X.counts[x.id] !== '' && Number(X.counts[x.id]) >= 0;
+  const status = () => {
+    const lines = allLines(), items = X.res.items || [];
+    const missing = lines.filter(x => !counted(x)).length;
+    const mism = lines.filter(x => counted(x) && Number(X.counts[x.id]) !== Number(x.qty)).length;
+    const unticked = items.filter(i => !X.ticks[i.code]).length;
+    return { missing, mism, unticked, clear: !missing && !mism && !unticked };
+  };
+  function renderResult() {
+    const r = X.res, l = r.load, items = r.items || [], hb = r.handback || [];
+    const last = (r.checks || [])[0];
+    const totalHb = allLines().length;
+    main().innerHTML = `<div class="secwrap">
+      ${X.done ? `<div class="warnbox ${X.done === 'clear' ? 'info' : 'bad'}"><b>Check recorded: ${X.done === 'clear' ? 'clear. The load can now be closed in Control Tower.' : 'flagged. The load cannot be closed until a later check is clear.'}</b></div>` : ''}
+      <div class="card" style="padding:14px 16px;margin-bottom:12px">
+        <div class="muted">Load</div><div class="big">${esc(l.load_nbr)}</div>
+        <div style="font-weight:700;margin:4px 0 8px">${esc(l.trucker || l.ship_via || '')}${l.truck_type ? ` <span class="muted" style="font-weight:500">· ${esc(l.truck_type)}</span>` : ''}</div>
+        <div class="kv"><span>Date</span><b>${esc(niceDate(l.load_date))}</b></div>
+        <div class="kv"><span>Driver</span><b>${esc(l.claimed_name || '—')}${l.claimed_phone ? ' · ' + esc(l.claimed_phone) : ''}</b></div>
+        <div class="kv"><span>Status</span><b>${esc(STATE[l.status] || l.status)}${l.aborted_at ? ' (stopped by driver)' : ''}</b></div>
+      </div>
+      ${l.open_stops ? `<div class="warnbox bad"><b>${plural(l.open_stops, 'stop')} not finished.</b> The driver has not completed every stop, so the return sheet may still grow. If the truck is back early, ask why before you check it.</div>` : ''}
+      ${last ? `<div class="warnbox ${last.result === 'clear' ? 'info' : 'bad'}">Last check: <b>${esc(last.result === 'clear' ? 'clear' : 'flagged')}</b> by ${esc(last.checked_by || '?')} at ${esc(stamp(last.checked_at))}${last.note ? ' · ' + esc(last.note) : ''}</div>` : ''}
+      <h3 style="margin:14px 0 2px">Return sheet: count what came back${totalHb ? ` (${plural(totalHb, 'line')})` : ''}</h3>
+      <div class="muted" style="margin-bottom:6px">Enter how many of each item are physically on the truck. Enter 0 if it did not come back.</div>
+      <div class="card" style="padding:6px 16px;margin-bottom:12px">
+        ${hb.length ? hb.map(s => `<div class="hb"><div class="c">${esc(s.customer)}${s.why ? `<div class="muted" style="font-weight:400;font-size:12.5px">${esc(s.why)}</div>` : ''}</div>
+            ${(s.lines || []).map(x => `<div class="l"><span>${esc(x.description || '')}${x.why ? `<small>${esc(x.why)}</small>` : ''}</span>
+              <span class="cnt" data-line="${x.id}"><span class="muted">sheet ${num(x.qty)}${x.uom ? ' ' + esc(x.uom) : ''}</span>
+              <input type="number" inputmode="decimal" min="0" step="any" data-count="${x.id}" value="${esc(X.counts[x.id] === undefined ? '' : X.counts[x.id])}" placeholder="counted"></span></div>`).join('')}</div>`).join('')
+          : '<div class="muted" style="padding:8px 0">Nothing on the return sheet. Everything on this load was delivered.</div>'}
+      </div>
+      <h3 style="margin:14px 0 6px">Checks</h3>
+      ${items.map(i => `<label class="tick"><input type="checkbox" data-tick="${esc(i.code)}" ${X.ticks[i.code] ? 'checked' : ''}><span>${esc(i.label)}</span></label>`).join('')}
+      <label class="field" style="display:block;margin-top:10px"><span class="muted">Note (required if anything is different, extra or missing)</span>
+        <textarea class="note" id="note" maxlength="500" placeholder="For example: 2 cases on the truck that are not on the sheet">${esc(X.note)}</textarea></label>
+      <div id="sumline"></div>
+      <div class="row2"><button class="btn primary" id="record" data-act="record">Record check</button>
+        <button class="btn" data-act="scan">Scan another truck</button></div></div>`;
+    paint();
+  }
+
+  // Updates the summary and the record button without redrawing (so typing keeps its focus).
+  function paint() {
+    const st = status();
+    allLines().forEach(x => {
+      const c = document.querySelector('.cnt[data-line="' + x.id + '"] input'); if (!c) return;
+      c.classList.toggle('bad', counted(x) && Number(X.counts[x.id]) !== Number(x.qty));
+      c.classList.toggle('good', counted(x) && Number(X.counts[x.id]) === Number(x.qty));
+    });
+    const need = st.mism || st.unticked ? X.note.trim().length < 3 : false;
+    document.getElementById('sumline').innerHTML = st.missing ? `<div class="warnbox info">${plural(st.missing, 'line')} still to count.</div>`
+      : st.clear ? '<div class="warnbox info"><b>Everything matches.</b> This will be recorded as clear.</div>'
+      : `<div class="warnbox bad"><b>This will be recorded as flagged:</b> ${st.mism ? plural(st.mism, 'line') + ' differ from the sheet' : ''}${st.mism && st.unticked ? ', ' : ''}${st.unticked ? plural(st.unticked, 'check') + ' not ticked' : ''}. Add a note.</div>`;
+    document.getElementById('record').disabled = !!st.missing || need;
+  }
+
+  async function submit() {
+    if (X.busy) return;
+    X.busy = true;
+    try {
+      const { data, error } = await sb.rpc('lm_security_submit', { p_load_id: X.res.load.id, p_counts: X.counts, p_items: X.ticks, p_note: X.note.trim() });
+      if (error) throw error;
+      toast(data.result === 'clear' ? 'Recorded: clear' : 'Recorded: flagged');
+      const again = await sb.rpc('lm_security_lookup', { p_code: X.code });
+      if (!again.error) X.res = again.data;
+      X.done = data.result; X.counts = {}; X.ticks = {}; X.note = '';
+      renderResult();
+    } catch (e) { toast(errMsg(e), true); }
+    finally { X.busy = false; }
+  }
+
+    document.getElementById('app').addEventListener('click', e => {
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    switch (b.dataset.act) {
+      case 'scan': renderScan(); break;
+      case 'typecode': renderType(); break;
+      case 'codego': { const c = extractCode(document.getElementById('codein').value); if (!c) renderType('A code has 8 letters and numbers. Check it and try again.'); else lookup(c); break; }
+      case 'record': submit(); break;
+    }
+  });
+  document.getElementById('app').addEventListener('change', e => {
+    const t = e.target;
+    if (t.dataset && t.dataset.tick) { X.ticks[t.dataset.tick] = t.checked; paint(); }
+  });
+  document.getElementById('app').addEventListener('input', e => {
+    const t = e.target;
+    if (t.id === 'note') { X.note = t.value; paint(); }
+    else if (t.dataset && t.dataset.count) { X.counts[t.dataset.count] = t.value; paint(); }
+  });
+  document.getElementById('app').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target.id === 'codein') document.querySelector('[data-act=codego]').click();
+  });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stopScan(); });
+
+  startPage({
+    page: 'security', role: ['security', 'supervisor', 'manager'], title: 'Security check',
+    onEnvChange: () => {},
+    onReady: () => {
+      const envbar = document.getElementById('envbar'); if (envbar) envbar.style.display = 'none';   // loads are found by code, in either system
+      renderScan();
+    },
+  });
+</script>
+</body>
+</html>

@@ -26,6 +26,8 @@
 //                             shipments (shipment_invoicing); the drain runs it, one shipment at a
 //                             time, and records the result. Releasing the invoice stays with
 //                             Accounts. Live also needs DISPATCH_LIVE_INVOICE = 'on'.
+//   deliverv_write         -> clerk/supervisor/manager. Writes the invoice UDF DELIVERVIA for loads reassigned
+//                             after invoicing (see migration 20261026120000). Live, switched off by default.
 //   drain                  -> cron (Vault token) every minute: work through anything queued.
 //
 // Queue: apply and check_confirm only mark the load (write_requested_at /
@@ -1006,6 +1008,53 @@ async function fetchShipmentLines(nbrs: string[]) {
 }
 
 // ------------------------------------------------------------------
+// deliverv_write: set the invoice UDF DELIVERVIA (the Ship Via of the trucker who actually delivers)
+// for invoices whose load was reassigned after invoicing (invoice_deliver_via, acu_state pending/failed).
+// Live only, and off until DISPATCH_LIVE_DELIVERVIA = 'on' (Joel creates the UDF on the Sales Invoices
+// screen first; ID from DELIVERVIA_UDF_ATTRIBUTE, default DELIVERVIA). Skips Closed invoices.
+// Not yet exercised against Acumatica: test on a sandbox invoice before switching on.
+const DV_ID  = Deno.env.get('DELIVERVIA_UDF_ATTRIBUTE') ?? 'DELIVERVIA';
+const DV_KEY = `Attribute${DV_ID}`;
+async function writeDeliverVia() {
+  if (Deno.env.get('DISPATCH_LIVE_DELIVERVIA') !== 'on') return { written: 0, note: 'DELIVERVIA writeback is switched off' };
+  const t = targetFor('live');
+  const { data: rows, error } = await admin.from('invoice_deliver_via').select('*')
+    .eq('env', 'live').in('acu_state', ['pending', 'failed']).order('set_at').limit(40);
+  if (error) throw new Error(`invoice_deliver_via read: ${error.message}`);
+  if (!rows?.length) return { written: 0 };
+  const acu = new Acu(t, 'deliverv_write');
+  let written = 0, failed = 0;
+  try {
+    await acu.login();
+    for (const r of rows) {
+      let state = 'written', detail: string | null = null;
+      try {
+        await acu.lease();
+        const key = `/SalesInvoice/Invoice/${encodeURIComponent(r.invoice_nbr)}`;
+        const q = `$select=ReferenceNbr,Status&$custom=Document.${DV_KEY}`;
+        const cur = await acu.call('GET', `${key}?${q}`);
+        if (!cur.ok) throw new Error(`couldn't read ${r.invoice_nbr}: ${cur.status} ${acuError(cur.data)}`);
+        if (v(cur.data?.Status) === 'Closed') { state = 'skipped'; detail = 'Invoice already Closed in Acumatica'; }
+        else {
+          const put = await acu.call('PUT', `/SalesInvoice?$select=ReferenceNbr&$custom=Document.${DV_KEY}`, {
+            id: cur.data?.id, custom: { Document: { [DV_KEY]: { type: 'CustomStringField', value: r.deliver_via } } },
+          });
+          if (!put.ok) throw new Error(`update refused: ${put.status} ${acuError(put.data)}`);
+          const back = await acu.call('GET', `${key}?${q}`);
+          const got = v(back.data?.custom?.Document?.[DV_KEY]);
+          if (got !== r.deliver_via) throw new Error(`UDF reads ${got ?? 'empty'}, expected ${r.deliver_via} (does ${DV_ID} exist on Sales Invoices?)`);
+        }
+      } catch (e: any) { state = 'failed'; detail = String(e?.message ?? e).slice(0, 400); }
+      if (state === 'written') written++; else if (state === 'failed') failed++;
+      await admin.from('invoice_deliver_via').update({ acu_state: state, acu_detail: detail, acu_at: new Date().toISOString() })
+        .eq('invoice_nbr', r.invoice_nbr).eq('deliver_via', r.deliver_via);
+    }
+  } finally {
+    await acu.logout();
+  }
+  return { written, failed };
+}
+
 Deno.serve(async (req) => {
   const headers = { ...cors(req), 'Content-Type': 'application/json' };
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers });
@@ -1053,6 +1102,10 @@ Deno.serve(async (req) => {
         if (!roles.some(r => ['batcher', 'clerk', 'supervisor', 'manager'].includes(r))) return json({ ok: false, error: 'Not allowed' }, 403);
         if (!Array.isArray(p.shipments) || !p.shipments.length || p.shipments.length > 50) return json({ ok: false, error: 'shipments (1 to 50) is required' }, 400);
         return json({ ok: true, ...(await fetchShipmentLines(p.shipments)) });
+      }
+      case 'deliverv_write': {
+        if (!roles.some(r => ['clerk', 'supervisor', 'manager'].includes(r))) return json({ ok: false, error: 'Not allowed' }, 403);
+        return json({ ok: true, ...(await writeDeliverVia()) });
       }
       case 'check_confirm': {
         if (!roles.includes('supervisor')) return json({ ok: false, error: 'Only a supervisor (Invoicing) can confirm loads in Acumatica' }, 403);

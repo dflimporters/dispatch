@@ -23,7 +23,7 @@ const STALE_MIN = 15;
 const LIVE_ENABLED = true;
 
 const ROLE_NAMES = { batcher: 'Logistics Coordinator', clerk: 'Trucker Liaison', picker: 'Picker', checker: 'Checker',
-  supervisor: 'Supervisor', manager: 'Operations Manager' };
+  supervisor: 'Supervisor', manager: 'Operations Manager', security: 'Security' };
 
 const D = { env: 'test', me: null, truckTypes: [], codes: [], acuStatus: null,
   lines: new Map(),       // shipment_nbr -> its line items (shipment_lines)
@@ -209,6 +209,8 @@ async function startPage({ page, role, title, onReady, onEnvChange }) {
                  ['tower.html', 'Control Tower', ['batcher', 'clerk', 'supervisor', 'manager'], 'tower'],
                  ['loadsheet.html', 'Load sheets', ['batcher', 'clerk', 'supervisor', 'manager'], 'loadsheet'],
                  ['returns.html', 'Returns', ['batcher', 'clerk', 'supervisor', 'manager'], 'returns'],
+                 ['security.html', 'Security check', ['security', 'supervisor', 'manager'], 'security'],
+                 ['contacts.html', 'Contacts', ['supervisor', 'manager'], 'contacts'],
                  ['invoicing.html', 'Invoicing', 'supervisor'], ['dashboard.html', 'Dashboard', ['manager', 'supervisor'], 'dashboard']]
     .filter(([, , r]) => [].concat(r).some(x => me.roles.includes(x)))
     .map(([href, label, r, key]) => [href, label, (key || r) === page]);
@@ -311,6 +313,47 @@ async function fetchLoads(date, opts) {
     return { ...l, ships: mine, events: evs.filter(e => e.load_id === l.id), ...loadStats(mine.map(x => x.row).filter(Boolean)) };
   });
 }
+
+// ------------------------------------------------------------------
+// Pickup / donation / promotion customers (dispatch_customer_kinds: PROMOTION class plus a
+// hand-kept list). Shipments on a PICKUP* ship via count as pickup whatever the customer.
+// If the lookup fails the pages still work; only the ship-via rule applies.
+// ------------------------------------------------------------------
+const KINDS = { pickup: 'Pickup', donation: 'Donation', promotion: 'Promotion' };
+const _kinds = { map: new Map(), at: 0 };
+async function loadKinds() {
+  if (Date.now() - _kinds.at < 5 * 60e3) return;
+  try {
+    const { data, error } = await sb.rpc('dispatch_customer_kinds');
+    if (error) throw error;
+    _kinds.map = new Map((data || []).map(r => [r.customer_id, r.kind]));
+    _kinds.at = Date.now();
+  } catch (e) { console.warn('[kinds]', e); _kinds.at = Date.now() - 4 * 60e3; }
+}
+// Kind of a customer id / shipment row ({customer_id, ship_via}), or null for a normal delivery.
+function kindOf(r) {
+  if (!r) return null;
+  return _kinds.map.get(r.customer_id) || (/^PICKUP/i.test(r.ship_via || '') ? 'pickup' : null);
+}
+function kindTag(k) {
+  return k ? `<span class="tag kind kind-${k}" title="${KINDS[k]} customer: handle ahead of normal deliveries">${KINDS[k]}</span> ` : '';
+}
+// Distinct kinds among a load's shipments, in a stable order.
+function loadKinds_(l) {
+  const s = new Set((l.ships || []).map(x => kindOf(x.row)).filter(Boolean));
+  if (/^PICKUP/i.test(l.ship_via || '')) s.add('pickup');
+  return Object.keys(KINDS).filter(k => s.has(k));
+}
+function loadKindTags(l) { return loadKinds_(l).map(kindTag).join(''); }
+const isSpecialLoad = l => loadKinds_(l).length > 0;
+// Delivery | Pickup/Donation/Promotion tab switch. counts = {delivery, special}.
+function kindTabsHtml(cur, counts) {
+  return `<div class="seg kindtabs" role="tablist" aria-label="Order type">
+    <button role="tab" data-ktab="delivery" class="${cur === 'delivery' ? 'on' : ''}">Delivery · ${counts.delivery}</button>
+    <button role="tab" data-ktab="special" class="${cur === 'special' ? 'on' : ''}">Pickup / Donation / Promotion · ${counts.special}</button></div>`;
+}
+function loadKindTab() { try { return localStorage.getItem('dispatch-kindtab') === 'special' ? 'special' : 'delivery'; } catch (e) { return 'delivery'; } }
+function saveKindTab(t) { try { localStorage.setItem('dispatch-kindtab', t); } catch (e) {} }
 
 // Search box on the picker / checker lists: every word has to appear in the load's number,
 // ship via, trucker, truck, zones, or any of its shipments' customer, zone or number.
