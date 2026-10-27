@@ -90,26 +90,15 @@ const ICON = {
   chev:   '<svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
 };
 function waveTag(w, title) {
-  if (w === 'ACU') return '<span class="tag acu" title="Ship Via was set in Acumatica; pick AM or PM">No wave</span>';
+  if (w === 'ACU') return '<span class="tag acu" title="Ship Via was set in Acumatica; these loads have no AM/PM run">ACU</span>';
   return `<span class="tag ${w === 'PM' ? 'pm' : 'am'}" title="${esc(title || (w === 'PM' ? 'Evening run' : 'Morning run'))}">${w === 'PM' ? ICON.moon : ICON.sun}${w}</span>`;
 }
 // Extra tags for loads that didn't come from the clerk, or are left over from an earlier day.
 function loadOriginTags(l) {
   return (l.source === 'acumatica' ? '<span class="tag" title="The Ship Via was set directly in Acumatica">From Acumatica</span> ' : '') +
     (l.source === 'invoice' ? '<span class="tag" title="Built from invoices; picked outside the portal">Picked outside portal</span> ' : '') +
+    (l.closed_at ? `<span class="tag" title="${esc(l.closed_reason || '')}">Closed</span> ` : '') +
     (l.carried ? `<span class="tag old" title="Not finished on its own day">Carried over from ${esc(niceDate(l.load_date))}</span> ` : '');
-}
-// AM / PM buttons for an auto-load that hasn't been given a wave (or got the wrong one).
-function setWaveHtml(l) {
-  if (l.source !== 'acumatica' || ['confirming', 'confirmed'].includes(l.check_status)) return '';
-  return `<div class="warnbox${l.wave === 'ACU' ? '' : ' info'}" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-    <span>${l.wave === 'ACU' ? 'Which run is this load on?' : 'Wave'}</span>
-    <button class="btn small ${l.wave === 'AM' ? 'primary' : ''}" data-setwave="AM" data-load="${l.id}">${ICON.sun}AM</button>
-    <button class="btn small ${l.wave === 'PM' ? 'primary' : ''}" data-setwave="PM" data-load="${l.id}">${ICON.moon}PM</button></div>`;
-}
-async function setWave(id, wave) {
-  const { error } = await sb.rpc('dispatch_set_wave', { p_id: id, p_wave: wave });
-  if (error) throw error;
 }
 
 // All / AM / PM filter, remembered per device and page.

@@ -51,7 +51,7 @@
   const areaName = a => (AREAS.find(x => x[0] === Number(a)) || [0, 'Unassigned'])[1];
 
   async function loadAll() {
-    const loads = (await fetchLoads(K.date, { carry: true })).filter(l => ['done', 'partial'].includes(l.status));
+    const loads = (await fetchLoads(K.date, { carry: true })).filter(l => ['done', 'partial'].includes(l.status) && !l.closed_at);
     const ids = loads.map(l => l.id);
     const r = ids.length ? await sb.rpc('dispatch_pick_bundle', { p_load_ids: ids, p_with_checks: true }) : { data: { picks: [], done: [], staged: [], items: [] } };
     if (r.error) throw r.error;
@@ -193,8 +193,6 @@
     const op = t.closest('[data-open]');
     if (op) { K.open = Number(op.dataset.open); render(); window.scrollTo(0, 0); return; }
     if (t.closest('[data-back]')) { K.open = null; render(); return; }
-    const sw = t.closest('[data-setwave]');
-    if (sw) { act(() => setWave(Number(sw.dataset.load), sw.dataset.setwave)); return; }
     const fill = t.closest('[data-fill]');
     if (fill) {
       const row = fill.closest('.item'); row.querySelector('[data-qty]').value = fill.dataset.fill;
