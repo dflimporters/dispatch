@@ -17,6 +17,7 @@
 --      lm_returns.status change             -> return.status  (release etc.)
 --    Role changes are logged by admin_set_roles. admin_audit() reads it with filters.
 -- 4. admin_load_find / admin_load_detail: look a load up by number (or shipment / order number).
+--    Read-only; admins and supervisors. Everything else here is admin only.
 -- 5. admin_sync_health: cron jobs, data freshness, recent failed HTTP calls, write queues, items needing attention.
 --
 -- Rollback at the bottom.
@@ -46,6 +47,15 @@ language plpgsql stable security definer set search_path = public as $$
 begin
   if not _admin_ok() then raise exception 'Admin only' using errcode = '42501'; end if;
 end $$;
+
+-- Load lookup is read-only and also open to supervisors (Joel, 2026-10-27). Everything that
+-- changes data, and user management, stays admin only.
+create function public._admin_read_require() returns void
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if not (_admin_ok() or dispatch_has_role('supervisor')) then raise exception 'Admin or supervisor only' using errcode = '42501'; end if;
+end $$;
+revoke all on function public._admin_read_require() from public, anon, authenticated;
 
 -- ------------------------------------------------------------------
 -- 2. Audit log
@@ -289,7 +299,7 @@ create function public.admin_load_find(p_q text) returns jsonb
 language plpgsql stable security definer set search_path = public as $$
 declare q text := nullif(btrim(coalesce(p_q, '')), '');
 begin
-  perform _admin_require();
+  perform _admin_read_require();
   if q is null then return '[]'::jsonb; end if;
   return coalesce((
     select jsonb_agg(to_jsonb(x) order by x.load_date desc, x.id desc) from (
@@ -307,7 +317,7 @@ create function public.admin_load_detail(p_load_id bigint) returns jsonb
 language plpgsql stable security definer set search_path = public as $$
 declare l loads; out jsonb;
 begin
-  perform _admin_require();
+  perform _admin_read_require();
   select * into l from loads where id = p_load_id;
   if not found then raise exception 'Load not found'; end if;
 
@@ -481,6 +491,6 @@ grant execute on function public.admin_users(), public.admin_sync_health(), publ
 -- drop function public.admin_run_sync(text), public.admin_sync_health(), public.admin_load_detail(bigint), public.admin_load_find(text),
 --   public.admin_audit(text, text, timestamptz, timestamptz, int, bigint), public.admin_set_roles(text, text[]), public.admin_users();
 -- drop table public.audit_log; drop function public._audit(text, text, text, text, jsonb, jsonb, text, bigint, text, text), public._audit_immutable();
--- drop function public._admin_require(), public._admin_ok();
+-- drop function public._admin_read_require(), public._admin_require(), public._admin_ok();
 -- delete from public.dispatch_roles where role = 'admin'; delete from public.dispatch_role_invites where role = 'admin';
 -- then restore both role check constraints without 'admin' (see 20261026120000_driver_security_contacts.sql).

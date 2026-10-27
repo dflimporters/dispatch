@@ -80,13 +80,16 @@
   // ------------------------------------------------------------------
   // Shell
   // ------------------------------------------------------------------
-  const TABS = [['users', 'Users'], ['audit', 'Audit log'], ['load', 'Load query'], ['sync', 'Sync health']];
+  // Supervisors get the read-only Load query; everything else is admin only (also enforced in the RPCs).
+  const ALL_TABS = [['users', 'Users'], ['audit', 'Audit log'], ['load', 'Load query'], ['sync', 'Sync health']];
+  const isAdmin = () => D.me.roles.includes('admin');
+  const tabList = () => isAdmin() ? ALL_TABS : ALL_TABS.filter(([k]) => k === 'load');
   function tabsHtml() {
-    return `<div class="seg tabs" role="tablist">${TABS.map(([k, l]) => `<button role="tab" data-tab="${k}" class="${A.tab === k ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+    return `<div class="seg tabs" role="tablist">${tabList().map(([k, l]) => `<button role="tab" data-tab="${k}" class="${A.tab === k ? 'on' : ''}">${l}</button>`).join('')}</div>`;
   }
   async function route() {
     const h = location.hash.replace('#', '').split('=')[0];
-    A.tab = TABS.some(([k]) => k === h) ? h : 'users';
+    A.tab = tabList().some(([k]) => k === h) ? h : tabList()[0][0];
     draw();
     try {
       if (A.tab === 'users') await loadUsers();
@@ -434,7 +437,7 @@
 
   // ------------------------------------------------------------------
   startPage({
-    page: 'admin', role: 'admin', title: 'Admin',
+    page: 'admin', role: ['admin', 'supervisor'], title: 'Admin',
     onEnvChange: () => {},
     onReady: () => {
       const eb = document.getElementById('envbar'); if (eb) eb.remove();   // nothing here depends on Test / Live

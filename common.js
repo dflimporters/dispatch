@@ -212,7 +212,7 @@ async function startPage({ page, role, title, onReady, onEnvChange }) {
                  ['security.html', 'Security check', ['security', 'supervisor', 'manager'], 'security'],
                  ['contacts.html', 'Contacts', ['supervisor', 'manager'], 'contacts'],
                  ['invoicing.html', 'Invoicing', 'supervisor'], ['dashboard.html', 'Dashboard', ['manager', 'supervisor'], 'dashboard'],
-                 ['admin.html', 'Admin', 'admin']]
+                 ['admin.html', 'Admin', ['admin', 'supervisor']]]
     .filter(([, , r]) => [].concat(r).some(x => me.roles.includes(x)))
     .map(([href, label, r, key]) => [href, label, (key || r) === page]);
   drawChrome({ title, nav: links, name: me.name || session.user.email });
