@@ -28,7 +28,7 @@
 </style>
 </head>
 <body>
-<div class="page" id="app"><div class="empty">Loading…</div></div>
+<div class="page" id="app"><div class="skel-wrap"><div class="skel-card"><div class="skel w40"></div><div class="skel w70"></div><div class="skel w55"></div></div></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
 <script src="common.js"></script>
@@ -368,7 +368,7 @@
     try { await loadAll(); render(); }
     catch (e) {
       console.error('[batcher]', e);
-      document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`;
+      document.getElementById('main').innerHTML = errBox(e);
     }
   }
 
@@ -384,6 +384,7 @@
     onEnvChange: () => { B.sel.clear(); refresh(); },
     onReady: () => {
       refresh();
+      keepFresh(refresh, () => B.busy || editing() || B.sel.size > 0, ['loads', 'load_shipments']);
       setInterval(() => { if (!B.busy && !editing() && !B.sel.size) refresh(); }, 60 * 1000);
     },
   });
