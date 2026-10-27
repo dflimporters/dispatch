@@ -73,20 +73,100 @@ function stamp(iso) {
   return iso ? new Date(iso).toLocaleString('en-GB', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit' }) : '';
 }
 function plural(n, word) { return `${n} ${word}${n === 1 ? '' : 's'}`; }
-function toast(msg, bad) {
+// opts: { action: { label, fn }, ms }. Errors stay up longer; an action (Retry / Undo) longer still.
+function toast(msg, bad, opts) {
+  opts = opts || {};
+  let host = document.getElementById('toasts');
+  if (!host) { host = document.createElement('div'); host.id = 'toasts'; host.setAttribute('role', 'status'); host.setAttribute('aria-live', 'polite'); document.body.appendChild(host); }
   const el = document.createElement('div');
   el.className = 'toast' + (bad ? ' bad' : '');
-  el.textContent = msg;
-  document.body.appendChild(el);
-  setTimeout(() => el.remove(), bad ? 6000 : 2500);
+  const t = document.createElement('span'); t.textContent = msg; el.appendChild(t);
+  const close = () => el.remove();
+  if (opts.action) {
+    const b = document.createElement('button'); b.className = 'toast-act'; b.textContent = opts.action.label;
+    b.onclick = () => { close(); opts.action.fn(); };
+    el.appendChild(b);
+  }
+  host.appendChild(el);
+  while (host.children.length > 3) host.firstChild.remove();
+  setTimeout(close, opts.ms || (opts.action ? 8000 : bad ? 6000 : 2500));
 }
-function errMsg(e) { return (e && (e.message || e.error_description || e.error)) || String(e); }
+// Raw errors in words a picker can act on. Messages the database raises on purpose
+// (business rules) pass through; transport and auth failures are rewritten.
+function errMsg(e) {
+  const m = String((e && (e.message || e.error_description || e.error)) || e || 'Something went wrong');
+  if (/failed to fetch|networkerror|load failed|network request failed/i.test(m) || (typeof navigator !== 'undefined' && navigator.onLine === false)) return "Can't reach the server. Check the wifi and try again.";
+  if (/jwt|refresh token|not authenticated/i.test(m) && /expired|invalid|missing|not found|not authenticated/i.test(m)) return 'Your sign-in expired. Reload the page and sign in again.';
+  if (/^dispatch-acu \d+$/.test(m)) return `Acumatica didn't answer (${m.split(' ')[1]}). Try again in a moment.`;
+  if (/^5\d\d\b|gateway|timed? ?out/i.test(m)) return 'The server is busy. Try again in a moment.';
+  return m;
+}
+
+// ------------------------------------------------------------------
+// States: skeleton loaders, empty states, errors with retry, "updated" and "saved" chips
+// ------------------------------------------------------------------
+function skeleton(n) {
+  return `<div class="skel-wrap" aria-busy="true" aria-label="Loading">${Array.from({ length: n || 3 }, () =>
+    '<div class="skel-card"><div class="skel w40"></div><div class="skel w70"></div><div class="skel w55"></div></div>').join('')}</div>`;
+}
+// What's empty and what to do next. next = { label, id } renders a button with data-next=id.
+function emptyState(msg, hint, next) {
+  return `<div class="empty-state"><div class="es-ico">${ICON.inbox}</div><div class="es-msg">${msg}</div>${hint ? `<div class="es-hint">${hint}</div>` : ''}${next ? `<button class="btn primary" data-next="${esc(next.id)}">${esc(next.label)}</button>` : ''}</div>`;
+}
+// A failed load, in words, with a button that runs the page's refresh() (or reloads).
+function errBox(e, what) {
+  console.error('[load]', e);
+  return `<div class="err-state" role="alert"><div class="es-msg">${esc(what || "Couldn't load this page")}</div><div class="es-hint">${esc(errMsg(e))}</div><button class="btn primary" data-retry-load>Try again</button></div>`;
+}
+document.addEventListener('click', e => {
+  if (!e.target.closest || !e.target.closest('[data-retry-load]')) return;
+  const m = document.getElementById('main'); if (m) m.innerHTML = skeleton(3);
+  if (typeof refresh === 'function') refresh(); else location.reload();
+});
+
+// "Live" / "Updated 40s ago" chip in the header, amber when the data is stale.
+// markFresh() is called whenever data is (re)read.
+const FRESH = { at: 0 };
+function markFresh() { FRESH.at = Date.now(); paintFresh(); }
+function paintFresh() {
+  const el = document.getElementById('freshchip'); if (!el || !FRESH.at) return;
+  const secs = Math.round((Date.now() - FRESH.at) / 1000), stale = secs > 120;
+  el.className = 'fresh' + (stale ? ' stale' : '');
+  el.title = 'Last refreshed ' + new Date(FRESH.at).toLocaleTimeString('en-GB');
+  el.innerHTML = `<i></i>${stale ? 'Updated ' + Math.round(secs / 60) + ' min ago' : secs < 10 ? 'Just updated' : 'Updated ' + secs + 's ago'}`;
+}
+setInterval(paintFresh, 5000);
+// Brief "Saved" tick beside the chip after a write goes through.
+function flashSaved() {
+  const el = document.getElementById('savedchip'); if (!el) return;
+  el.classList.remove('on'); void el.offsetWidth; el.classList.add('on');
+}
+
+// Haptic + optional sound on pick / check actions. Haptic on by default (phones only);
+// sound is off until someone turns it on; both remembered per device.
+const FB = { sound: false, haptic: true };
+try { FB.sound = localStorage.getItem('dispatch-sound') === '1'; FB.haptic = localStorage.getItem('dispatch-haptic') !== '0'; } catch (e) {}
+let _ac = null;
+function feedback(kind) {   // 'ok' | 'bad'
+  try { if (FB.haptic && navigator.vibrate) navigator.vibrate(kind === 'bad' ? [60, 40, 60] : 25); } catch (e) {}
+  if (!FB.sound) return;
+  try {
+    _ac = _ac || new (window.AudioContext || window.webkitAudioContext)();
+    const o = _ac.createOscillator(), g = _ac.createGain();
+    o.frequency.value = kind === 'bad' ? 220 : 880; g.gain.value = .08;
+    o.connect(g); g.connect(_ac.destination); o.start(); o.stop(_ac.currentTime + (kind === 'bad' ? .25 : .09));
+  } catch (e) {}
+}
+function setSound(on) { FB.sound = on; try { localStorage.setItem('dispatch-sound', on ? '1' : '0'); } catch (e) {} }
 
 // Small inline icons (stroke = currentColor).
 const ICON = {
   filter: '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18l-7 8v5l-4 2v-7z"/></svg>',
   sun:    '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
   moon:   '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>',
+  inbox:  '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13l3-8h12l3 8v6H3zM3 13h5l1 3h6l1-3h5"/></svg>',
+  speaker:'<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9zM16.5 8.5a5 5 0 0 1 0 7"/></svg>',
+  grid:   '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg>',
   chev:   '<svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
 };
 function waveTag(w, title) {
@@ -149,7 +229,7 @@ function initials(name) {
 
 // Top bar (logo over system name), tab strip, page title. Drawn into #chrome,
 // a sibling above .page, so it spans the full width. `nav` is [[href, label, on]].
-function drawChrome({ title, nav, name }) {
+function drawChrome({ title, nav, name, roles }) {
   let el = document.getElementById('chrome');
   if (!el) { el = document.createElement('div'); el.id = 'chrome'; el.className = 'hdr'; document.body.insertBefore(el, document.body.firstChild); }
   document.body.classList.remove('is-gate');
@@ -159,10 +239,14 @@ function drawChrome({ title, nav, name }) {
   el.innerHTML = `
     <div class="lms-top"><div class="lms-top-in">
       <a class="lms-brand" href="index.html" title="${LMS_NAME}"><img src="assets/dfl-logo-white.png" alt="DFL Importers"><span>${LMS_NAME}</span></a>
-      <div class="lms-who"><div class="av">${esc(initials(name))}</div><div class="nm"><b>${esc(name)}</b></div><button class="btn small" id="signout">Sign out</button></div>
+      <div class="lms-who"><a class="home" href="index.html?all=1" title="All my pages" aria-label="All my pages">${ICON.grid}</a><button class="snd${FB.sound ? ' on' : ''}" id="sndbtn" title="Sound on pick and check" aria-label="Sound feedback" aria-pressed="${FB.sound}">${ICON.speaker}</button><div class="av">${esc(initials(name))}</div><div class="nm"><b>${esc(name)}</b>${roles && roles.length ? `<span>${esc(roles.map(r => ROLE_NAMES[r] || r).join(' · '))}</span>` : ''}</div><button class="btn small" id="signout">Sign out</button></div>
     </div></div>
     ${tabs}
-    ${title ? `<div class="lms-title">${crumb}<h1>${esc(title)}</h1></div>` : ''}`;
+    ${title ? `<div class="lms-title"><div>${crumb}<h1>${esc(title)}</h1></div><div class="chips-r"><span class="saved" id="savedchip" aria-live="polite">✓ Saved</span><span class="fresh" id="freshchip"></span></div></div>` : ''}`;
+  if (title) document.title = title + ' — ' + LMS_NAME;
+  paintFresh();
+  const snd = document.getElementById('sndbtn');
+  snd.onclick = () => { setSound(!FB.sound); snd.classList.toggle('on', FB.sound); snd.setAttribute('aria-pressed', FB.sound); toast(FB.sound ? 'Sound on' : 'Sound off'); if (FB.sound) feedback('ok'); };
   document.getElementById('signout').onclick = signOut;
   // On a phone the strip scrolls sideways; keep the current page's tab in view.
   const on = el.querySelector('.lms-tabs a.on'), strip = el.querySelector('.lms-tabs-in');
@@ -214,14 +298,14 @@ async function startPage({ page, role, title, onReady, onEnvChange }) {
                  ['invoicing.html', 'Invoicing', 'supervisor'], ['dashboard.html', 'Dashboard', ['manager', 'supervisor'], 'dashboard']]
     .filter(([, , r]) => [].concat(r).some(x => me.roles.includes(x)))
     .map(([href, label, r, key]) => [href, label, (key || r) === page]);
-  drawChrome({ title, nav: links, name: me.name || session.user.email });
+  drawChrome({ title, nav: links, name: me.name || session.user.email, roles: me.roles });
   document.getElementById('app').innerHTML = `
     <div id="envbar"></div>
-    <div id="main"><div class="empty">Loading…</div></div>`;
+    <div id="main">${skeleton(3)}</div>`;
   renderEnvBar(onEnvChange);
 
   try { await Promise.all([loadTruckTypes(), loadCodes()]); }
-  catch (e) { document.getElementById('main').innerHTML = `<div class="err">Couldn't load setup data. ${esc(errMsg(e))}</div>`; return; }
+  catch (e) { document.getElementById('main').innerHTML = errBox(e, "Couldn't load setup data"); return; }
   onReady();
 }
 
@@ -308,6 +392,7 @@ async function fetchLoads(date, opts) {
   }
   const rows = ls.length ? await shipmentsByNbr(ls.map(x => x.shipment_nbr)) : [];
   const byNbr = new Map(rows.map(r => [r.shipment_nbr, r]));
+  markFresh();
   return (loads || []).map(l => {
     const mine = ls.filter(x => x.load_id === l.id).map(x => ({ ...x, row: byNbr.get(x.shipment_nbr) || null }));
     return { ...l, ships: mine, events: evs.filter(e => e.load_id === l.id), ...loadStats(mine.map(x => x.row).filter(Boolean)) };
@@ -389,7 +474,7 @@ function keepFresh(refresh, skip, tables) {
     if (document.hidden) return;
     if (skip()) { held = true; return; }
     held = false; last = Date.now();
-    await refresh();
+    await refresh(); markFresh();
   };
   const soon = ms => { if (!timer) timer = setTimeout(run, ms); };
   try {

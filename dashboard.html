@@ -44,7 +44,7 @@
 </style>
 </head>
 <body>
-<div class="page" id="app"><div class="empty">Loading…</div></div>
+<div class="page" id="app"><div class="skel-wrap"><div class="skel-card"><div class="skel w40"></div><div class="skel w70"></div><div class="skel w55"></div></div></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
 <script src="common.js"></script>
@@ -258,7 +258,7 @@
 
   async function refresh() {
     try { await loadAll(); render(); }
-    catch (e) { console.error('[dashboard]', e); document.getElementById('main').innerHTML = `<div class="err">Couldn't load. ${esc(errMsg(e))}</div>`; }
+    catch (e) { console.error('[dashboard]', e); document.getElementById('main').innerHTML = errBox(e); }
   }
   function editing() { const a = document.activeElement; return a && /^(INPUT|SELECT)$/.test(a.tagName); }
 

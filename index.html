@@ -50,7 +50,7 @@
 </style>
 </head>
 <body>
-<div class="page" id="app"><div class="empty">Loading…</div></div>
+<div class="page" id="app"><div class="skel-wrap"><div class="skel-card"><div class="skel w40"></div><div class="skel w70"></div><div class="skel w55"></div></div></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
 <script src="common.js"></script>
@@ -114,6 +114,12 @@ const GROUPS = [
     return;
   }
   if (count === 1) { location.replace(groups[0][1][0][0]); return; }
+  // Floor roles go straight to the one screen they work in. Supervisors and managers, people with
+  // more than one floor role, and anyone arriving from the header's grid icon (?all=1) get the tiles.
+  const LANDING = { picker: 'picking.html', checker: 'checker.html', clerk: 'clerk.html', batcher: 'batcher.html', security: 'security.html' };
+  const mine = [...new Set(me.roles.filter(r => LANDING[r]).map(r => LANDING[r]))];
+  const lead = me.roles.some(r => r === 'supervisor' || r === 'manager');
+  if (!lead && mine.length === 1 && !new URLSearchParams(location.search).has('all')) { location.replace(mine[0]); return; }
 
   const name = me.name || session.user.email;
   const first = String(name).split(/[\s@]/)[0];
