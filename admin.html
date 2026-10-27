@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f2044">
+<meta name="robots" content="noindex, nofollow">
+<title>Admin — Logistics Management System</title>
+<link rel="icon" type="image/png" href="assets/dfl-logo-color.png">
+<!--
+  Admin page (admin role only). Four tabs, each backed by security-definer functions that check
+  the caller is an admin (supabase/migrations/20261027130000_admin_core.sql):
+
+    Users        who has which dispatch roles, pending invites, invite / change roles / remove.
+                 admin_users, admin_set_roles.
+    Audit log    who changed what and when (role changes, ShipVia changes, reprints, reopens,
+                 return releases). admin_audit.
+    Load query   find a load by number (or shipment / order number): status timeline, trucker,
+                 pick and check progress, shipments with invoice and Acumatica write state, and
+                 the ShipVia history. admin_load_find, admin_load_detail.
+    Sync health  cron jobs, data freshness, recent failed HTTP calls, write queues, items that
+                 need attention, and run-now buttons. admin_sync_health, admin_run_sync.
+
+  #users  #audit  #load  #load=ID  #sync
+-->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="common.css">
+<style>
+  .tabs { margin-bottom:16px; }
+  .panel { padding:16px 18px; margin-bottom:16px; }
+  .panel h3 { font-family:'Montserrat','Inter',sans-serif; font-size:14px; font-weight:800; color:var(--navy); margin-bottom:10px; }
+  .ctl { display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-bottom:14px; }
+  .ctl .field { min-width:150px; }
+  .rolebox { display:flex; gap:6px 14px; flex-wrap:wrap; }
+  .rolebox label { display:inline-flex; align-items:center; gap:5px; font-size:13px; font-weight:500; cursor:pointer; }
+  .rolechips { display:flex; gap:4px; flex-wrap:wrap; }
+  table.ships td.act { white-space:nowrap; text-align:right; }
+  table.ships tr.edit td { background:var(--accent-bg); }
+  .kv { display:grid; grid-template-columns:repeat(auto-fill, minmax(190px, 1fr)); gap:10px 18px; margin-bottom:6px; }
+  .kv div { font-size:13px; }
+  .kv small { display:block; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.3px; color:var(--text-muted); }
+  .tl { list-style:none; border-left:2px solid var(--border2); margin-left:6px; }
+  .tl li { position:relative; padding:0 0 9px 14px; font-size:13px; }
+  .tl li::before { content:''; position:absolute; left:-6px; top:5px; width:10px; height:10px; border-radius:50%; background:var(--navy); }
+  .tl li.pending { color:var(--text-dim); }
+  .tl li.pending::before { background:var(--border2); }
+  .tl li span { color:var(--text-muted); font-size:12px; margin-left:6px; }
+  .bar { height:8px; background:#e2e8f0; border-radius:999px; overflow:hidden; min-width:90px; display:inline-block; vertical-align:middle; }
+  .bar i { display:block; height:100%; background:var(--ok); }
+  .hits { display:flex; flex-direction:column; gap:6px; }
+  .hit { text-align:left; display:flex; gap:12px; align-items:center; flex-wrap:wrap; font:inherit; background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:8px 12px; cursor:pointer; }
+  .hit:hover { border-color:var(--accent); }
+  .mono { font-family:ui-monospace, Consolas, monospace; font-size:12px; }
+  .wrap { overflow-x:auto; }
+  .code { background:#f8fafc; border:1px solid var(--border); border-radius:6px; padding:3px 6px; font-size:11.5px; white-space:pre-wrap; word-break:break-word; }
+  .runs { display:flex; gap:8px; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<div class="page" id="app"><div class="empty">Loading…</div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
+<script src="common.js"></script>
+<script>
+  const ADMIN_ROLES = ['admin', 'manager', 'supervisor', 'batcher', 'clerk', 'picker', 'checker', 'security'];
+  const RN = { ...ROLE_NAMES, admin: 'Admin' };
+  const A = { tab: 'users', users: null, editing: null, audit: [], auditDone: false, load: null, hits: null, health: null, busy: false };
+
+  const rpc = async (fn, args) => { const { data, error } = await sb.rpc(fn, args || {}); if (error) throw error; return data; };
+  const main = () => document.getElementById('main');
+  const rolePill = r => `<span class="pill ${r === 'admin' ? 'bad' : 'info'}">${esc(RN[r] || r)}</span>`;
+  const fullStamp = iso => iso ? new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+  function ago(iso) {
+    if (!iso) return 'never';
+    const m = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+    return m < 1 ? 'just now' : m < 120 ? m + ' min ago' : m < 2880 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' days ago';
+  }
+  const hashLoadId = () => { const m = /^#load=(\d+)/.exec(location.hash); return m ? Number(m[1]) : null; };
+
+  // ------------------------------------------------------------------
+  // Shell
+  // ------------------------------------------------------------------
+  const TABS = [['users', 'Users'], ['audit', 'Audit log'], ['load', 'Load query'], ['sync', 'Sync health']];
+  function tabsHtml() {
+    return `<div class="seg tabs" role="tablist">${TABS.map(([k, l]) => `<button role="tab" data-tab="${k}" class="${A.tab === k ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+  }
+  async function route() {
+    const h = location.hash.replace('#', '').split('=')[0];
+    A.tab = TABS.some(([k]) => k === h) ? h : 'users';
+    draw();
+    try {
+      if (A.tab === 'users') await loadUsers();
+      else if (A.tab === 'audit') await loadAudit(true);
+      else if (A.tab === 'load') { const id = hashLoadId(); if (id) await openLoad(id); }
+      else if (A.tab === 'sync') await loadHealth();
+    } catch (e) { main().innerHTML = tabsHtml() + `<div class="err">${esc(errMsg(e))}</div>`; bindTabs(); return; }
+    draw();
+  }
+  function bindTabs() {
+    main().querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { location.hash = b.dataset.tab; });
+  }
+  function draw() {
+    const body = { users: usersHtml, audit: auditHtml, load: loadHtml, sync: syncHtml }[A.tab]();
+    main().innerHTML = tabsHtml() + body;
+    bindTabs();
+    ({ users: bindUsers, audit: bindAudit, load: bindLoad, sync: bindSync })[A.tab]();
+  }
+
+  // ------------------------------------------------------------------
+  // Users
+  // ------------------------------------------------------------------
+  async function loadUsers() { A.users = await rpc('admin_users'); }
+  function roleBoxes(name, have) {
+    return `<div class="rolebox" data-rolebox="${esc(name)}">${ADMIN_ROLES.map(r =>
+      `<label><input type="checkbox" value="${r}" ${have.includes(r) ? 'checked' : ''}>${esc(RN[r] || r)}</label>`).join('')}</div>`;
+  }
+  function usersHtml() {
+    if (!A.users) return '<div class="empty">Loading…</div>';
+    const { users, invites } = A.users;
+    const row = (key, name, email, roles, extra, pending) => A.editing === key
+      ? `<tr class="edit"><td colspan="4"><b>${esc(name || email)}</b> <span class="muted">${esc(email)}</span>
+          <div style="margin:8px 0">${roleBoxes('edit', roles)}</div>
+          <button class="btn primary small" data-save="${esc(email)}">Save roles</button>
+          <button class="btn small" data-cancel>Cancel</button></td></tr>`
+      : `<tr><td><b>${esc(name || email)}</b>${name ? `<div class="muted">${esc(email)}</div>` : ''}</td>
+          <td><div class="rolechips">${roles.map(rolePill).join('')}</div></td>
+          <td class="muted hide-m">${esc(extra)}</td>
+          <td class="act"><button class="btn small" data-edit="${esc(key)}">Edit roles</button>
+            <button class="btn small danger" data-remove="${esc(email)}" data-pending="${pending ? 1 : 0}">${pending ? 'Cancel invite' : 'Remove access'}</button></td></tr>`;
+    return `
+      <div class="card panel"><h3>Invite or add roles</h3>
+        <div class="ctl"><label class="field">Email<input class="txt" id="inv-email" type="email" placeholder="name@dflimporters.com" autocomplete="off"></label></div>
+        ${roleBoxes('invite', [])}
+        <div style="margin-top:10px"><button class="btn primary" id="inv-go">Save</button>
+          <span class="muted" style="margin-left:8px">If the person has signed in before, the roles apply now; otherwise they apply when they first sign in. This replaces their current roles.</span></div>
+      </div>
+      <div class="card panel"><h3>People with access (${users.length})</h3>
+        <div class="wrap"><table class="ships"><thead><tr><th>Person</th><th>Roles</th><th class="hide-m">Last sign-in</th><th></th></tr></thead><tbody>
+          ${users.map(u => row('u:' + u.user_id, u.name, u.email, u.roles, u.last_sign_in_at ? 'Signed in ' + ago(u.last_sign_in_at) : 'Never signed in', false)).join('')}
+        </tbody></table></div>
+      </div>
+      ${invites.length ? `<div class="card panel"><h3>Pending invites (${invites.length}) <span class="muted">— haven't signed in yet</span></h3>
+        <div class="wrap"><table class="ships"><thead><tr><th>Email</th><th>Roles</th><th class="hide-m">Invited</th><th></th></tr></thead><tbody>
+          ${invites.map(i => row('i:' + i.email, '', i.email, i.roles, stamp(i.created_at), true)).join('')}
+        </tbody></table></div></div>` : ''}
+      <p class="muted">Removing access takes away every logistics role and any pending invite. It doesn't touch their Microsoft or DFLHQ account.</p>`;
+  }
+  const picked = box => [...box.querySelectorAll('input:checked')].map(i => i.value);
+  async function saveRoles(email, roles, okMsg) {
+    try {
+      const r = await rpc('admin_set_roles', { p_email: email, p_roles: roles });
+      toast(r.changed ? okMsg : 'No change');
+      A.editing = null;
+      await loadUsers();
+    } catch (e) { toast(errMsg(e), true); }
+    draw();
+  }
+  function bindUsers() {
+    const m = main();
+    m.querySelector('#inv-go')?.addEventListener('click', () => {
+      const email = m.querySelector('#inv-email').value.trim();
+      const roles = picked(m.querySelector('[data-rolebox=invite]'));
+      if (!email) return toast('Enter an email address', true);
+      if (!roles.length) return toast('Tick at least one role', true);
+      saveRoles(email, roles, 'Saved');
+    });
+    m.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => { A.editing = b.dataset.edit; draw(); });
+    m.querySelector('[data-cancel]')?.addEventListener('click', () => { A.editing = null; draw(); });
+    m.querySelector('[data-save]')?.addEventListener('click', e => {
+      const roles = picked(m.querySelector('[data-rolebox=edit]'));
+      if (!roles.length && !confirm('No roles ticked: this removes their access. Continue?')) return;
+      saveRoles(e.currentTarget.dataset.save, roles, roles.length ? 'Roles updated' : 'Access removed');
+    });
+    m.querySelectorAll('[data-remove]').forEach(b => b.onclick = () => {
+      if (!confirm(`${b.dataset.pending === '1' ? 'Cancel the invite for' : 'Remove all logistics access for'} ${b.dataset.remove}?`)) return;
+      saveRoles(b.dataset.remove, [], 'Access removed');
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Audit log
+  // ------------------------------------------------------------------
+  const AUDIT_FILTER = { action: '', q: '', from: '', to: '' };
+  const ACTION_LABELS = {
+    'user.invited': 'User invited', 'user.roles': 'Roles changed', 'user.removed': 'Access removed',
+    'load.ship_via': 'Load trucker (ShipVia) changed', 'load.reassign': 'Trucker reassigned', 'load.closed': 'Load closed', 'load.reopened': 'Load reopened',
+    'load.sheet_reprint': 'Load sheet reprinted', 'load.unconfirm': 'Trucker confirmation undone', 'load.pick_reopen': 'Pick reopened',
+    'load.check_reopen': 'Check reopened', 'load.unstick': 'Marked stuck', 'load.delete': 'Load deleted', 'load.pull_back': 'Pulled back', 'load.return': 'Sent back to coordinator',
+    'shipment.ship_via': 'Shipment ShipVia changed', 'return.status': 'Return status', 'sync.run_now': 'Sync run now',
+  };
+  const actionLabel = a => ACTION_LABELS[a] || a;
+  async function loadAudit(reset) {
+    const before = reset || !A.audit.length ? null : A.audit[A.audit.length - 1].id;
+    const f = AUDIT_FILTER;
+    const rows = await rpc('admin_audit', {
+      p_action: f.action || null, p_q: f.q || null,
+      p_from: f.from ? f.from + 'T00:00:00-05:00' : null,          // Jamaica, no DST
+      p_to: f.to ? addDays(f.to, 1) + 'T00:00:00-05:00' : null,
+      p_limit: 100, p_before: before,
+    });
+    A.audit = reset ? rows : A.audit.concat(rows);
+    A.auditDone = rows.length < 100;
+  }
+  function auditRowsHtml(rows, withLoad) {
+    return rows.map(a => `<tr><td class="mono">${esc(fullStamp(a.at))}</td>
+      <td>${esc(a.actor_name || 'System / Acumatica')}</td>
+      <td><b>${esc(actionLabel(a.action))}</b></td>
+      ${withLoad ? `<td>${a.load_nbr ? `<a href="#load=${a.load_id || ''}" class="mono">${esc(a.load_nbr)}</a>` : ''}${a.shipment_nbr ? ` <span class="mono">${esc(a.shipment_nbr)}</span>` : ''}${a.entity === 'user' ? `<span class="muted">${esc(a.after && a.after.email || '')}</span>` : ''}</td>` : ''}
+      <td>${esc(a.note || '')}</td></tr>`).join('');
+  }
+  function auditHtml() {
+    const f = AUDIT_FILTER;
+    const groups = [['', 'Everything'], ['user.', 'Users and roles'], ['load.ship_via', 'Load ShipVia changes'], ['shipment.ship_via', 'Shipment ShipVia changes'],
+      ['load.', 'All load changes'], ['load.sheet_reprint', 'Reprints'], ['return.', 'Returns'], ['sync.', 'Sync run-now']];
+    return `<div class="card panel">
+      <div class="ctl">
+        <label class="field">What<select id="af-action">${groups.map(([v, l]) => `<option value="${v}" ${f.action === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        <label class="field">Search<input class="txt" id="af-q" value="${esc(f.q)}" placeholder="Load, shipment, person, text" autocomplete="off"></label>
+        <label class="field">From<input type="date" id="af-from" value="${esc(f.from)}"></label>
+        <label class="field">To<input type="date" id="af-to" value="${esc(f.to)}"></label>
+        <button class="btn primary" id="af-go">Search</button>
+      </div>
+      ${A.audit.length ? `<div class="wrap"><table class="ships"><thead><tr><th>When</th><th>Who</th><th>What</th><th>Where</th><th>Detail</th></tr></thead><tbody>${auditRowsHtml(A.audit, true)}</tbody></table></div>
+        ${A.auditDone ? '' : '<div style="margin-top:10px"><button class="btn" id="af-more">Load older</button></div>'}`
+        : '<div class="empty">Nothing recorded for that filter. The log starts when the audit migration was applied.</div>'}
+    </div>`;
+  }
+  function bindAudit() {
+    const m = main();
+    const go = async () => {
+      AUDIT_FILTER.action = m.querySelector('#af-action').value; AUDIT_FILTER.q = m.querySelector('#af-q').value.trim();
+      AUDIT_FILTER.from = m.querySelector('#af-from').value; AUDIT_FILTER.to = m.querySelector('#af-to').value;
+      try { await loadAudit(true); } catch (e) { toast(errMsg(e), true); }
+      draw();
+    };
+    m.querySelector('#af-go').onclick = go;
+    m.querySelector('#af-q').onkeydown = e => { if (e.key === 'Enter') go(); };
+    m.querySelector('#af-action').onchange = go;
+    m.querySelector('#af-more')?.addEventListener('click', async () => { try { await loadAudit(false); } catch (e) { toast(errMsg(e), true); } draw(); });
+  }
+
+  // ------------------------------------------------------------------
+  // Load query
+  // ------------------------------------------------------------------
+  let lastQ = '';
+  async function searchLoads(q) {
+    lastQ = q;
+    A.hits = q ? await rpc('admin_load_find', { p_q: q }) : null;
+  }
+  async function openLoad(id) {
+    A.load = await rpc('admin_load_detail', { p_load_id: id });
+  }
+  function timeline(l, c) {
+    const steps = [
+      ['Created', l.created_at, ''], ['Sent to liaison', l.sent_at, ''], ['Trucker confirmed', l.confirmed_at, ''],
+      ['Written to Acumatica', l.applied_at, l.status === 'partial' ? 'partly' : ''],
+      ['Checker finished', l.checker_done_at, l.checker_done_name || ''], ['Confirmed in Acumatica', l.check_status === 'confirmed' ? l.checked_at : null, ''],
+      ['Driver claimed', c && c.claimed_at, c && c.claimed_name || ''], ['Delivering', c && c.delivering_at, ''],
+      ['Delivered', c && c.completed_at, ''], ['Closed', l.closed_at || (c && c.closed_at), l.closed_reason || ''],
+    ];
+    return `<ul class="tl">${steps.map(([n, at, who]) => `<li class="${at ? '' : 'pending'}">${esc(n)}${at ? `<span>${esc(fullStamp(at))}${who ? ' · ' + esc(who) : ''}</span>` : ''}</li>`).join('')}</ul>`;
+  }
+  const resultPillA = (r, d) => !r ? '<span class="muted">—</span>' :
+    `<span class="pill ${{ applied: 'ok', confirmed: 'ok', refused: 'warn', failed: 'bad', skipped: 'done' }[r] || 'info'}" title="${esc(d || '')}">${esc(r)}</span>`;
+  function loadDetailHtml(d) {
+    const l = d.load, p = d.pick, c = d.check, claim = d.claim;
+    const pct = p.required ? Math.min(100, Math.round(100 * p.picked / p.required)) : 0;
+    const vias = d.audit.filter(a => ['load.ship_via', 'load.reassign', 'shipment.ship_via'].includes(a.action));
+    return `
+      <div class="card panel">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+          <h3 style="margin:0;font-size:17px" class="mono">${esc(l.load_nbr)}</h3>
+          ${waveTag(l.wave)} <span class="pill ${l.env === 'live' ? 'ok' : 'info'}">${l.env === 'live' ? 'Live' : 'Test'}</span>
+          ${statusPill(l.status)} ${l.check_status ? `<span class="pill ${l.check_status === 'confirmed' ? 'ok' : 'warn'}">Check: ${esc(l.check_status)}</span>` : ''}
+          ${loadOriginTags(l)}
+        </div>
+        <div class="kv">
+          <div><small>Date</small>${esc(niceDate(l.load_date))}</div>
+          <div><small>Trucker (ShipVia)</small>${esc(l.ship_via || '—')}${l.contractor ? ' · ' + esc(l.contractor) : ''}</div>
+          <div><small>Truck</small>${esc(l.truck_type || '—')}</div>
+          <div><small>Shipments</small>${d.shipments.length}</div>
+          <div><small>Driver</small>${claim ? esc(claim.claimed_name || 'Not claimed') + ' · ' + esc(claim.status) : '—'}</div>
+          <div><small>Notes</small>${esc(l.notes || '—')}</div>
+        </div>
+        ${l.sheet_stale_at ? '<div class="warnbox">The printed load sheet is out of date (trucker or shipments changed). Reprint it.</div>' : ''}
+      </div>
+      <div class="card panel" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px">
+        <div><h3>Timeline</h3>${timeline(l, claim)}</div>
+        <div><h3>Picking</h3>
+          <div class="kv" style="grid-template-columns:1fr 1fr">
+            <div><small>Items picked</small>${p.picked_items} of ${p.items}</div>
+            <div><small>Units</small>${fmt(p.picked)} of ${fmt(p.required)}</div>
+            <div><small>Short items</small>${p.short_items}</div>
+            <div><small>Last pick</small>${p.last_pick_at ? esc(stamp(p.last_pick_at)) : '—'}</div>
+          </div>
+          <div style="margin:6px 0"><span class="bar"><i style="width:${pct}%"></i></span> <span class="muted">${pct}%</span></div>
+          <div class="muted">Areas done: ${p.areas_done.length ? p.areas_done.map(a => `${a.area} (${esc(a.by || '')})`).join(', ') : 'none'}<br>
+            Staged: ${p.areas_staged.length ? p.areas_staged.map(a => a.area).join(', ') : 'none'}</div></div>
+        <div><h3>Checking</h3>
+          <div class="kv" style="grid-template-columns:1fr 1fr">
+            <div><small>Status</small>${esc(c.status || 'not started')}</div>
+            <div><small>Finished by</small>${esc(c.done_by || '—')}</div>
+            <div><small>Lines saved</small>${c.lines_saved}</div>
+            <div><small>Lines lowered</small>${c.lines_lowered}</div>
+          </div></div>
+      </div>
+      <div class="card panel"><h3>Shipments</h3>
+        <div class="wrap"><table class="ships"><thead><tr><th>Shipment</th><th>Order</th><th>Customer</th><th>ShipVia</th><th>Status</th><th>Invoice</th><th>Trucker write</th><th>Confirm</th></tr></thead><tbody>
+          ${d.shipments.map(s => `<tr>
+            <td class="mono">${esc(s.shipment_nbr)}</td><td class="mono">${esc(s.order_nbr || '')}</td>
+            <td class="cust">${esc(s.customer_name || '')} <span class="muted">${esc(s.customer_id || '')}</span></td>
+            <td>${esc(s.ship_via || '—')}${s.ship_via_before && s.ship_via_before !== s.ship_via ? `<div class="muted">was ${esc(s.ship_via_before)}</div>` : ''}${s.in_data ? '' : '<div class="muted">not in Acumatica data</div>'}</td>
+            <td>${esc(s.status || '')}</td>
+            <td>${(s.invoices || []).map(i => `<div class="mono">${esc(i.nbr)} <span class="tag">${esc(i.status || '')}</span>${i.deliver_via ? ` <span class="tag" title="${esc(i.deliver_detail || '')}">DELIVERVIA ${esc(i.deliver_via)} · ${esc(i.deliver_state)}</span>` : ''}</div>`).join('') || '<span class="muted">—</span>'}
+              ${s.invoicing ? `<div>${resultPillA(s.invoicing.state, s.invoicing.detail)} <span class="muted">prepare invoice</span></div>` : ''}</td>
+            <td>${resultPillA(s.write_result, s.write_detail)}${s.write_detail ? `<div class="muted">${esc(s.write_detail)}</div>` : ''}</td>
+            <td>${resultPillA(s.check_result, s.check_detail)}${s.check_detail ? `<div class="muted">${esc(s.check_detail)}</div>` : ''}</td></tr>`).join('')}
+        </tbody></table></div></div>
+      <div class="card panel"><h3>ShipVia history</h3>
+        ${vias.length ? `<div class="wrap"><table class="ships"><thead><tr><th>When</th><th>Who</th><th>What</th><th>Detail</th></tr></thead><tbody>
+          ${vias.map(a => `<tr><td class="mono">${esc(fullStamp(a.at))}</td><td>${esc(a.actor_name || 'System / Acumatica')}</td>
+            <td><b>${esc(actionLabel(a.action))}</b>${a.shipment_nbr ? ` <span class="mono">${esc(a.shipment_nbr)}</span>` : ''}</td><td>${esc(a.note || '')}</td></tr>`).join('')}</tbody></table></div>`
+          : '<div class="muted">No ShipVia changes recorded for this load or its shipments since auditing began.</div>'}</div>
+      <div class="card panel"><h3>Load history</h3>
+        ${d.events.length ? `<ul class="evs" style="list-style:none">${d.events.map(e => `<li style="padding:3px 0;font-size:13px"><b>${esc(e.kind)}</b>${e.ship_via ? ' · ' + esc(e.ship_via) : ''}${e.note ? ' — ' + esc(e.note) : ''}
+          <span class="muted" style="float:right">${esc(e.actor_name || '')}, ${esc(stamp(e.created_at))}</span></li>`).join('')}</ul>` : '<div class="muted">No events.</div>'}</div>`;
+  }
+  function loadHtml() {
+    const hits = A.hits;
+    return `<div class="card panel"><div class="ctl">
+        <label class="field">Load, shipment or order number<input class="txt" id="lq" value="${esc(lastQ)}" placeholder="e.g. L-1027-AM-03" autocomplete="off"></label>
+        <button class="btn primary" id="lq-go">Find</button></div>
+      ${hits ? (hits.length ? `<div class="hits">${hits.map(h => `<button class="hit" data-open="${h.id}">
+          <b class="mono">${esc(h.load_nbr)}</b><span>${esc(niceDate(h.load_date))}</span><span class="pill ${h.env === 'live' ? 'ok' : 'info'}">${h.env === 'live' ? 'Live' : 'Test'}</span>
+          ${statusPill(h.status)}<span>${esc(h.ship_via || '—')}</span><span class="muted">${plural(h.shipments, 'shipment')}</span>${h.closed_at ? '<span class="tag">Closed</span>' : ''}</button>`).join('')}</div>`
+        : '<div class="empty">No load matches.</div>') : ''}
+    </div>${A.load && hashLoadId() === A.load.load.id ? loadDetailHtml(A.load) : ''}`;
+  }
+  function bindLoad() {
+    const m = main();
+    const go = async () => {
+      const q = m.querySelector('#lq').value.trim();
+      try { await searchLoads(q); } catch (e) { toast(errMsg(e), true); }
+      draw();
+      if (A.hits && A.hits.length === 1) location.hash = 'load=' + A.hits[0].id;
+    };
+    m.querySelector('#lq-go').onclick = go;
+    m.querySelector('#lq').onkeydown = e => { if (e.key === 'Enter') go(); };
+    m.querySelectorAll('[data-open]').forEach(b => b.onclick = () => { location.hash = 'load=' + b.dataset.open; });
+  }
+
+  // ------------------------------------------------------------------
+  // Sync health
+  // ------------------------------------------------------------------
+  // What a cron job feeds, and the table whose newest synced_at shows it actually worked.
+  const FUNCS = [
+    { fn: 'sync-shipments', label: 'Shipments', fresh: 'shipments', run: 'browser', note: 'Headers every 5 minutes, then line items.' },
+    { fn: 'dispatch-acu:sync_live_lines', label: 'Shipment lines (dispatch-acu)', fresh: 'shipment_lines', run: 'rpc' },
+    { fn: 'sync-invoices', label: 'Invoices', fresh: 'invoices', run: 'browser' },
+    { fn: 'sync-so-invoices', label: 'Sales-order invoices', fresh: null, run: 'browser' },
+    { fn: 'sync-so-ordered-items', label: 'Sales-order items', fresh: 'so_ordered_items', run: 'rpc' },
+    { fn: 'sync-ship-via-codes', label: 'Ship Via codes', fresh: 'ship_via_codes', run: 'browser' },
+  ];
+  async function loadHealth() { A.health = await rpc('admin_sync_health'); }
+  function freshPill(iso, maxMin) {
+    if (!iso) return '<span class="pill bad">never</span>';
+    const m = (Date.now() - new Date(iso).getTime()) / 60000;
+    return `<span class="pill ${m <= maxMin ? 'ok' : m <= maxMin * 6 ? 'warn' : 'bad'}">${esc(ago(iso))}</span>`;
+  }
+  function syncHtml() {
+    const h = A.health;
+    if (!h) return '<div class="empty">Loading…</div>';
+    const q = h.queue, n = h.http_last_hour || {};
+    return `
+      <div class="card panel"><h3>Run now</h3>
+        <div class="runs">${FUNCS.map(f => `<button class="btn" data-run="${esc(f.fn)}" ${A.busy ? 'disabled' : ''}>${esc(f.label)}</button>`).join('')}</div>
+        <p class="muted" style="margin-top:8px">Same jobs cron runs; safe to repeat. The Acumatica job lease means two never overlap.</p></div>
+      <div class="card panel"><h3>Data freshness</h3>
+        <div class="kv">
+          <div><small>Shipments (live)</small>${freshPill(h.fresh.shipments, 15)}</div>
+          <div><small>Shipment lines (live)</small>${freshPill(h.fresh.shipment_lines, 15)}</div>
+          <div><small>Invoices</small>${freshPill(h.fresh.invoices, 15)}</div>
+          <div><small>Sales-order items</small>${freshPill(h.fresh.so_ordered_items, 15)}</div>
+          <div><small>Ship Via codes</small>${freshPill(h.fresh.ship_via_codes, 90)}</div>
+          <div><small>Customers</small>${freshPill(h.fresh.customers, 780)}</div>
+        </div>
+        <p class="muted">The 5-minute syncs only run about 5am to 8pm Jamaica, so overnight ages are normal.</p></div>
+      <div class="card panel"><h3>Acumatica queues</h3>
+        <div class="kv">
+          <div><small>Loads waiting to write</small>${q.writes_waiting}</div>
+          <div><small>Loads waiting to confirm</small>${q.confirms_waiting}</div>
+          <div><small>Invoices queued</small>${q.invoices_queued}</div>
+          <div><small>Held by a job now</small>${q.leases.length ? q.leases.map(x => esc(x.target + ' · ' + (x.job || ''))).join(', ') : 'nothing'}</div>
+        </div></div>
+      <div class="card panel"><h3>Needs attention (${h.attention.length})</h3>
+        ${h.attention.length ? `<div class="wrap"><table class="ships"><thead><tr><th>Since</th><th>What</th><th>Where</th><th>Detail</th></tr></thead><tbody>
+          ${h.attention.map(a => `<tr><td class="mono">${esc(fullStamp(a.at))}</td><td><span class="pill ${/failed/.test(a.kind) ? 'bad' : 'warn'}">${esc(a.kind.replace(/_/g, ' '))}</span></td>
+            <td>${a.load_id ? `<a class="mono" href="#load=${a.load_id}">${esc(a.load_nbr)}</a>` : esc(a.load_nbr || a.shipment_nbr || '')}</td><td>${esc(a.note || '')}</td></tr>`).join('')}</tbody></table></div>`
+          : '<div class="muted">Nothing stuck or failed.</div>'}</div>
+      <div class="card panel"><h3>Recent failed calls <span class="muted">— last 6 hours, any function (HTTP result of cron's request)</span></h3>
+        <div class="muted" style="margin-bottom:8px">Last hour: ${n.error ? esc(n.error) : `${n.ok || 0} ok, ${n.failed || 0} failed`}</div>
+        ${h.http_failures.length ? `<div class="wrap"><table class="ships"><thead><tr><th>When</th><th>Status</th><th>Response</th></tr></thead><tbody>
+          ${h.http_failures.map(r => `<tr><td class="mono">${esc(fullStamp(r.at))}</td><td>${r.timed_out ? 'timed out' : esc(r.status || r.error || '')}</td><td><div class="code">${esc(r.error || r.body || '')}</div></td></tr>`).join('')}</tbody></table></div>`
+          : '<div class="muted">No failures.</div>'}</div>
+      <div class="card panel"><h3>Cron jobs</h3>
+        <div class="wrap"><table class="ships"><thead><tr><th>Job</th><th>Schedule (UTC)</th><th>Last run</th><th>Result</th></tr></thead><tbody>
+          ${h.jobs.map(j => `<tr><td class="mono">${esc(j.name)}${j.active ? '' : ' <span class="tag old">off</span>'}</td><td class="mono">${esc(j.schedule)}</td>
+            <td>${esc(ago(j.last_start))}</td><td>${j.last_status ? `<span class="pill ${j.last_status === 'succeeded' ? 'ok' : 'bad'}">${esc(j.last_status)}</span>` : '—'}${j.last_status && j.last_status !== 'succeeded' ? `<div class="code">${esc(j.last_message || '')}</div>` : ''}</td></tr>`).join('')}
+        </tbody></table></div>
+        <p class="muted" style="margin-top:8px">"Succeeded" means cron sent the request. Whether the function did its work is shown by data freshness and failed calls above.</p></div>`;
+  }
+  async function runSync(fn) {
+    A.busy = true; draw();
+    try {
+      const f = FUNCS.find(x => x.fn === fn);
+      if (f.run === 'rpc') await rpc('admin_run_sync', { p_fn: fn });
+      else {
+        const { data: { session } } = await sb.auth.getSession();
+        const res = await fetch(`${SUPABASE_URL}/functions/v1/${fn}`, {
+          method: 'POST', body: '{}',
+          headers: { 'Content-Type': 'application/json', apikey: SUPABASE_PUBLISHABLE_KEY, Authorization: `Bearer ${session.access_token}` },
+        });
+        let j = null; try { j = await res.json(); } catch (e) {}
+        if (!res.ok || (j && j.success === false) || (j && j.error)) throw new Error((j && (j.error || j.message)) || `${fn} returned ${res.status}`);
+      }
+      toast(`${f.label}: started`);
+      setTimeout(async () => { try { await loadHealth(); if (A.tab === 'sync') draw(); } catch (e) {} }, 8000);
+    } catch (e) { toast(errMsg(e), true); }
+    A.busy = false; draw();
+  }
+  function bindSync() {
+    main().querySelectorAll('[data-run]').forEach(b => b.onclick = () => runSync(b.dataset.run));
+  }
+
+  // ------------------------------------------------------------------
+  startPage({
+    page: 'admin', role: 'admin', title: 'Admin',
+    onEnvChange: () => {},
+    onReady: () => {
+      const eb = document.getElementById('envbar'); if (eb) eb.remove();   // nothing here depends on Test / Live
+      window.addEventListener('hashchange', route);
+      route();
+    },
+  });
+</script>
+</body>
+</html>
