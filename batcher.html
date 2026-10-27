@@ -384,6 +384,7 @@
     onEnvChange: () => { B.sel.clear(); refresh(); },
     onReady: () => {
       refresh();
+      keepFresh(refresh, () => B.busy || editing() || B.sel.size > 0, ['loads', 'load_shipments']);
       setInterval(() => { if (!B.busy && !editing() && !B.sel.size) refresh(); }, 60 * 1000);
     },
   });

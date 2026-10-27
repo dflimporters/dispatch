@@ -372,6 +372,7 @@
     onReady: () => {
       fillShipVias();
       refresh();
+      keepFresh(refresh, () => C.busy || editing(), ['loads', 'load_shipments', 'load_events']);
       setInterval(() => { if (!C.busy && !editing()) refresh(); }, 60 * 1000);
     },
   });

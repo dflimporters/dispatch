@@ -227,7 +227,8 @@
     onEnvChange: () => refresh(),
     onReady: () => {
       refresh();
-      setInterval(() => { if (document.visibilityState === 'visible') refresh(); }, 20 * 1000);
+      setInterval(() => { if (document.visibilityState === 'visible') { refresh(); markFresh(); } }, 20 * 1000);
+      markFresh();
     },
   });
 </script>

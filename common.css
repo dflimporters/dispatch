@@ -298,3 +298,33 @@ button { touch-action:manipulation; }
   .page { padding:0; max-width:none; }
   .card, .lcard { box-shadow:none; break-inside:avoid; }
 }
+
+@media (pointer:coarse) { input[type=checkbox], input[type=radio] { width:24px; height:24px; accent-color:var(--navy); } table.ships td { padding-top:9px; padding-bottom:9px; } }
+
+/* Dark mode: opt-in per device (header toggle), default light for bright floors. */
+.lms-who .thm { width:32px; height:32px; border-radius:8px; display:inline-flex; align-items:center; justify-content:center; color:rgba(255,255,255,.8); background:none; border:0; cursor:pointer; }
+.lms-who .thm:hover { background:rgba(255,255,255,.15); color:#fff; }
+.lms-who .thm .ico { width:18px; height:18px; }
+@media (pointer:coarse) { .lms-who .thm { width:40px; height:40px; } }
+:root[data-theme=dark] {
+  color-scheme:dark;
+  --bg:#0b1220; --surface:#131c2e; --border:#26334b; --border2:#3a4a68;
+  --text:#e5ebf5; --text-muted:#a3b1c6; --text-dim:#7d8ca5;
+  --navy:#cfdcf5; --navy2:#1a3260; --accent:#6aa0ff; --accent-bg:#14264a;
+  --ok-bg:#0d2a22; --ok-text:#5ee0b0; --warn-bg:#2f2410; --warn-text:#fbbf24; --bad-bg:#32151a; --bad-text:#fca5a5;
+  --test-bg:#221a3d; --shadow:0 1px 3px rgba(0,0,0,.5);
+}
+:root[data-theme=dark] .lms-top, :root[data-theme=dark] .gate-wrap { --navy:#0f2044; }
+:root[data-theme=dark] .btn, :root[data-theme=dark] select, :root[data-theme=dark] .field input, :root[data-theme=dark] .field textarea,
+:root[data-theme=dark] input.txt, :root[data-theme=dark] input[type=date], :root[data-theme=dark] .searchbox, :root[data-theme=dark] input[type=number],
+:root[data-theme=dark] input[type=search], :root[data-theme=dark] input[type=text] { background:var(--surface); color:var(--text); }
+:root[data-theme=dark] .btn:hover:not(:disabled) { background:#1b2740; }
+:root[data-theme=dark] .btn.primary, :root[data-theme=dark] .seg button.on, :root[data-theme=dark] .chip.on { background:#2f5fc4; border-color:#2f5fc4; color:#fff; }
+:root[data-theme=dark] .donebar, :root[data-theme=dark] .sumbar, :root[data-theme=dark] .selbar, :root[data-theme=dark] #toasts .toast:not(.bad) { background:#1a3260; color:#fff; }
+:root[data-theme=dark] .lms-tabs, :root[data-theme=dark] .zhead, :root[data-theme=dark] tr.lines-row > td, :root[data-theme=dark] .skel-card { background:var(--surface); }
+:root[data-theme=dark] .skel, :root[data-theme=dark] .empty-state .es-ico, :root[data-theme=dark] .cap .bar, :root[data-theme=dark] .prog-bar { background:#26334b; }
+:root[data-theme=dark] .pill.done, :root[data-theme=dark] .tag, :root[data-theme=dark] .achip { background:#26334b; color:var(--text-muted); }
+:root[data-theme=dark] .lms-title h1, :root[data-theme=dark] .es-msg { color:var(--text); }
+:root[data-theme=dark] .gate { background:var(--surface); }
+:root[data-theme=dark] .item, :root[data-theme=dark] .pload { background:var(--surface); }
+:root[data-theme=dark] .item.ok { background:var(--ok-bg); } :root[data-theme=dark] .item.short { background:var(--warn-bg); }

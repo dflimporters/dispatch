@@ -144,6 +144,9 @@ function flashSaved() {
 
 // Haptic + optional sound on pick / check actions. Haptic on by default (phones only);
 // sound is off until someone turns it on; both remembered per device.
+// Theme: light by default; the header toggle switches to dark for this device.
+function applyTheme(t) { document.documentElement.setAttribute('data-theme', t); const m = document.querySelector('meta[name=theme-color]'); if (m) m.content = t === 'dark' ? '#0b1220' : '#0f2044'; }
+try { applyTheme(localStorage.getItem('dispatch-theme') === 'dark' ? 'dark' : 'light'); } catch (e) {}
 const FB = { sound: false, haptic: true };
 try { FB.sound = localStorage.getItem('dispatch-sound') === '1'; FB.haptic = localStorage.getItem('dispatch-haptic') !== '0'; } catch (e) {}
 let _ac = null;
@@ -165,6 +168,7 @@ const ICON = {
   sun:    '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
   moon:   '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>',
   inbox:  '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13l3-8h12l3 8v6H3zM3 13h5l1 3h6l1-3h5"/></svg>',
+  moon2:  '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>',
   speaker:'<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9zM16.5 8.5a5 5 0 0 1 0 7"/></svg>',
   grid:   '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg>',
   chev:   '<svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
@@ -239,12 +243,13 @@ function drawChrome({ title, nav, name, roles }) {
   el.innerHTML = `
     <div class="lms-top"><div class="lms-top-in">
       <a class="lms-brand" href="index.html" title="${LMS_NAME}"><img src="assets/dfl-logo-white.png" alt="DFL Importers"><span>${LMS_NAME}</span></a>
-      <div class="lms-who"><a class="home" href="index.html?all=1" title="All my pages" aria-label="All my pages">${ICON.grid}</a><button class="snd${FB.sound ? ' on' : ''}" id="sndbtn" title="Sound on pick and check" aria-label="Sound feedback" aria-pressed="${FB.sound}">${ICON.speaker}</button><div class="av">${esc(initials(name))}</div><div class="nm"><b>${esc(name)}</b>${roles && roles.length ? `<span>${esc(roles.map(r => ROLE_NAMES[r] || r).join(' · '))}</span>` : ''}</div><button class="btn small" id="signout">Sign out</button></div>
+      <div class="lms-who"><a class="home" href="index.html?all=1" title="All my pages" aria-label="All my pages">${ICON.grid}</a><button class="thm" id="thmbtn" title="Dark mode" aria-label="Toggle dark mode">${ICON.moon2}</button><button class="snd${FB.sound ? ' on' : ''}" id="sndbtn" title="Sound on pick and check" aria-label="Sound feedback" aria-pressed="${FB.sound}">${ICON.speaker}</button><div class="av">${esc(initials(name))}</div><div class="nm"><b>${esc(name)}</b>${roles && roles.length ? `<span>${esc(roles.map(r => ROLE_NAMES[r] || r).join(' · '))}</span>` : ''}</div><button class="btn small" id="signout">Sign out</button></div>
     </div></div>
     ${tabs}
     ${title ? `<div class="lms-title"><div>${crumb}<h1>${esc(title)}</h1></div><div class="chips-r"><span class="saved" id="savedchip" aria-live="polite">✓ Saved</span><span class="fresh" id="freshchip"></span></div></div>` : ''}`;
   if (title) document.title = title + ' — ' + LMS_NAME;
   paintFresh();
+  document.getElementById('thmbtn').onclick = () => { const t = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'; applyTheme(t); try { localStorage.setItem('dispatch-theme', t); } catch (e) {} };
   const snd = document.getElementById('sndbtn');
   snd.onclick = () => { setSound(!FB.sound); snd.classList.toggle('on', FB.sound); snd.setAttribute('aria-pressed', FB.sound); toast(FB.sound ? 'Sound on' : 'Sound off'); if (FB.sound) feedback('ok'); };
   document.getElementById('signout').onclick = signOut;
