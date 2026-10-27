@@ -67,7 +67,7 @@
 <script src="common.js"></script>
 <script>
   const V = { ships: [], loadOf: new Map(), inv: new Map(), sel: new Set(), date: '', busy: false, poll: null, was: false,
-              pend: [], picks: new Map(), items: new Map(), checks: [], final: new Map(), notes: new Map(), openL: new Set(), wasConf: new Map() };
+              pend: [], picks: new Map(), items: new Map(), checks: [], final: new Map(), notes: new Map(), openL: new Set(), wasConf: new Map(), odate: new Map() };
 
   // ------------------------------------------------------------------
   // Loads the checker has finished, waiting to be confirmed in Acumatica.
@@ -97,6 +97,13 @@
     const redo = new Set(loads.filter(l => l.check_status === 'partial').flatMap(l => ls.filter(x => x.load_id === l.id).map(x => x.shipment_nbr)));
     const need = nbrs.filter(n => !D.lines.has(n) || redo.has(n));
     if (need.length) await loadLines(need);
+    // Order dates drive the default split of a short SKU (oldest order first). Optional: no date sorts last.
+    V.odate = new Map();
+    const onbrs = [...new Set(rows.flatMap(x => String(x.order_nbr || '').split(',').map(o => o.trim()).filter(Boolean)))];
+    if (onbrs.length) {
+      const od = await sb.rpc('dispatch_order_dates', { p_orders: onbrs });
+      if (!od.error) (od.data || []).forEach(o => V.odate.set(o.order_nbr, o.order_date));
+    }
     V.pend = loads.map(l => ({ ...l, ships: ls.filter(x => x.load_id === l.id).map(x => ({ ...x, row: byNbr.get(x.shipment_nbr) || null })) }));
     V.picks = new Map(ids.map(id => [id, (bundle.picks || []).filter(x => x.load_id === id)]));
     V.items = new Map(ids.map(id => [id, new Map((bundle.items || []).filter(x => x.load_id === id).map(x => [x.inventory_id, x]))]));
@@ -110,15 +117,17 @@
   }
 
   const pkey = (nbr, ln) => nbr + '|' + ln;
+  // Oldest sales order first, then shipment number: the order a short SKU is filled in.
+  const shipOdate = s => String(String((s.row && s.row.order_nbr) || '').split(',').map(o => V.odate.get(o.trim())).filter(Boolean).sort()[0] || '');
   function pLinesOf(l) {
-    return l.ships.slice().sort((a, b) => a.shipment_nbr.localeCompare(b.shipment_nbr)).flatMap(s =>
+    return l.ships.slice().sort((a, b) => (shipOdate(a) || '9999').localeCompare(shipOdate(b) || '9999') || a.shipment_nbr.localeCompare(b.shipment_nbr)).flatMap(s =>
       (D.lines.get(s.shipment_nbr) || []).filter(x => Number(x.shipped_qty) > 0).map(x => ({
         nbr: s.shipment_nbr, customer: (s.row && (s.row.customer_name || s.row.customer_id)) || '', line_nbr: x.line_nbr,
-        item: x.inventory_id, desc: x.description, uom: x.uom, shipped: Number(x.shipped_qty),
+        item: x.inventory_id, desc: x.description, uom: x.uom, shipped: Number(x.shipped_qty), odate: shipOdate(s),
       })));
   }
   // What goes out per shipment line: a saved split wins; else the checker's count per SKU
-  // spread over the shipments in order (the shortfall lands on the last ones); else as shipped.
+  // filled oldest sales order first (the shortfall lands on the newest orders; the supervisor can change it); else as shipped.
   function pDefaults(l) {
     const lines = pLinesOf(l), saved = V.checks.filter(c => c.load_id === l.id), m = new Map();
     if (saved.length) {
@@ -192,7 +201,7 @@
       <td class="r num">${fmt(i.onShip)}</td><td class="r num"><b>${fmt(i.out)}</b></td></tr>
       ${i.xs.map(x => {
         const k = pkey(x.nbr, x.line_nbr), fv = fin.get(k);
-        return `<tr class="cust ${fv === 0 ? 'zero' : fv < x.shipped ? 'low' : ''}"><td>${esc(x.customer)} <span class="muted num">${esc(x.nbr)}</span>
+        return `<tr class="cust ${fv === 0 ? 'zero' : fv < x.shipped ? 'low' : ''}"><td>${esc(x.customer)} <span class="muted num">${esc(x.nbr)}${x.odate ? ' · ordered ' + esc(x.odate) : ''}</span>
           ${fv < x.shipped ? `<div><input type="text" maxlength="200" data-lnote="${esc(k)}" data-load="${l.id}" value="${esc(notes.get(k) || '')}" placeholder="${fv === 0 ? 'Why removed? e.g. substituted with item…' : 'Why lowered?'}" style="width:100%;margin-top:4px" ${locked ? 'disabled' : ''}></div>` : ''}</td>
           <td class="r num">${fmt(x.shipped)}</td>
           <td class="r"><input type="number" min="0" max="${x.shipped}" step="1" data-lfinal="${esc(k)}" data-load="${l.id}" value="${fv}" ${locked ? 'disabled' : ''} aria-label="Going out for ${esc(i.item)} to ${esc(x.customer)}"></td></tr>`;
