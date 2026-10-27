@@ -17,6 +17,8 @@ portal's pull-request flow. Both use the same Supabase project (`hzagwndglwhceps
 | `picking.html` | **Picking** by load, split by area 1–4, phone/tablet first. Records picked qty per item. | Microsoft, `picker` role |
 | `checker.html` | **Checker**: picked vs shipped per shipment line, lowers/zeroes lines, then Confirm Shipment in Acumatica. | Microsoft, `checker` role |
 
+| `admin.html` | **Admin**: users and roles (invite, edit, remove), audit log, load lookup, sync health with run-now. Backed by `admin_*` functions that check the caller has the `admin` role (migration `20261027130000_admin_core.sql`); changes are written to `audit_log`. | Microsoft, `admin` role |
+
 `common.js` / `common.css` are shared by the signed-in pages (top bar with the DFL logo over the system name, tab strip, page title, sign-in gate; logos in `assets/`). Role keys in the database stay
 `batcher` / `clerk`; only the visible names changed.
 

@@ -66,6 +66,7 @@ const SVG = {
   go:       '<svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>',
   qr:       '<svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h3v3h-3zM20 14v3M14 20h3M20 20h0"/></svg>',
   return:   '<svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3"/></svg>',
+  admin:    '<svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6zM9 12l2 2 4-4"/></svg>',
   tower:    '<svg viewBox="0 0 24 24"><path d="M12 3v4M8 7h8l1 14H7zM9.5 12h5M9 16.5h6M5 5l2 2M19 5l-2 2"/></svg>',
 };
 // [href, label, role(s), blurb, icon, colour, tint]
@@ -89,6 +90,7 @@ const GROUPS = [
   ['Finish and monitor', [
     ['invoicing.html', 'Invoicing',       'supervisor', 'Convert confirmed shipments to invoices in bulk.', 'invoice', '#16337a', '#e0e7ff'],
     ['dashboard.html', 'Dashboard',       ['manager', 'supervisor'], 'Orders, shipments, picking and checking at a glance.', 'chart', '#dc2626', '#fef2f2'],
+    ['admin.html',     'Admin',           ['admin', 'supervisor'], 'Who has access, audit log, load lookup and sync health (supervisors: load lookup only).', 'admin', '#475569', '#f1f5f9'],
   ]],
 ];
 

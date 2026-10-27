@@ -23,7 +23,7 @@ const STALE_MIN = 15;
 const LIVE_ENABLED = true;
 
 const ROLE_NAMES = { batcher: 'Logistics Coordinator', clerk: 'Trucker Liaison', picker: 'Picker', checker: 'Checker',
-  supervisor: 'Supervisor', manager: 'Operations Manager', security: 'Security' };
+  supervisor: 'Supervisor', manager: 'Operations Manager', security: 'Security', admin: 'Admin' };
 
 const D = { env: 'test', me: null, truckTypes: [], codes: [], acuStatus: null,
   lines: new Map(),       // shipment_nbr -> its line items (shipment_lines)
@@ -211,7 +211,8 @@ async function startPage({ page, role, title, onReady, onEnvChange }) {
                  ['returns.html', 'Returns', ['batcher', 'clerk', 'supervisor', 'manager'], 'returns'],
                  ['security.html', 'Security check', ['security', 'supervisor', 'manager'], 'security'],
                  ['contacts.html', 'Contacts', ['supervisor', 'manager'], 'contacts'],
-                 ['invoicing.html', 'Invoicing', 'supervisor'], ['dashboard.html', 'Dashboard', ['manager', 'supervisor'], 'dashboard']]
+                 ['invoicing.html', 'Invoicing', 'supervisor'], ['dashboard.html', 'Dashboard', ['manager', 'supervisor'], 'dashboard'],
+                 ['admin.html', 'Admin', ['admin', 'supervisor']]]
     .filter(([, , r]) => [].concat(r).some(x => me.roles.includes(x)))
     .map(([href, label, r, key]) => [href, label, (key || r) === page]);
   drawChrome({ title, nav: links, name: me.name || session.user.email });
