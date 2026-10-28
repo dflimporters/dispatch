@@ -468,7 +468,7 @@
   }
 
   startPage({
-    page: 'tower', role: ['batcher', 'clerk', 'supervisor', 'manager'], title: 'Control Tower',
+    page: 'tower', role: ['supervisor', 'manager'], title: 'Control Tower',
     onEnvChange: () => { T.find = null; refreshAll(); },
     onReady: async () => { await loadBoard().catch(e => { document.getElementById('main').innerHTML = errBox(e); }); await route(); startLive(); },
   });
