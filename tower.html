@@ -283,7 +283,7 @@
     delivered: '<span class="pill ok">Delivered</span>', partial: '<span class="pill warn">Partial</span>', failed: '<span class="pill bad">Failed</span>' };
   const EV_LABEL = { ready: 'Sheet issued', claim: 'Claimed', rescan: 'Rescanned', shortage: 'Driver says something is missing', unassign: 'Unassigned', close: 'Closed',
     seq_edit: 'Changed the stop order', on_the_way: 'On the way', cancel_on_the_way: 'Cancelled On the way', arrived: 'Arrived', complete: 'Finished the stop',
-    file: 'Photo added', abort_stop: "Couldn't deliver", abort_load: 'Stopped the load' };
+    file: 'Photo added', abort_stop: "Couldn't deliver", abort_load: 'Stopped the load', office_complete: 'Office completed the load' };
   const OUTCOME = { delivered: 'delivered in full', partial: 'partly delivered', failed: 'nothing delivered' };
   const FLAG = { no_photo: 'no photo', no_receiver: 'no receiver name' };
 
@@ -296,6 +296,7 @@
     }
     if (e.kind === 'abort_stop') return `${esc(stopName(d, e.stop_id))} · ${esc(reasonName(p.reason_code))}${p.note ? ' · ' + esc(p.note) : ''}`;
     if (e.kind === 'abort_load') return `${esc(reasonName(p.reason_code))}${p.note ? ' · ' + esc(p.note) : ''}${p.stops_closed != null ? ' · ' + plural(p.stops_closed, 'open stop') + ' closed' : ''}`;
+    if (e.kind === 'office_complete') return `${esc(p.note || '')}${p.stops_closed != null ? ' · ' + plural(p.stops_closed, 'open stop') + ' closed' : ''}`;
     if (e.kind === 'file') return `${esc(stopName(d, e.stop_id))} · ${esc({ pod: 'signed invoice', damage: 'damage', abort: "couldn't deliver", shortage: 'shortage' }[p.kind] || p.kind || '')}`;
     if (e.kind === 'seq_edit') return p.changed === false ? 'same order' : 'driver put the stops in a different order';
     if (e.kind === 'claim') return `${esc(p.name || '')}${p.soft_mismatch ? ' · phone last ran ' + esc(p.previous_trucker || 'another trucker') + ', driver confirmed' : ''}`;
@@ -352,6 +353,7 @@
           <div class="lactions" style="margin:0">
             <button class="btn small" data-act="printsheet">${m ? 'Reprint load sheet' : 'Print load sheet'}</button>
             ${claimed && canAct() ? '<button class="btn small danger" data-act="unassign">Unassign</button>' : ''}
+            ${m && ['collected', 'delivering'].includes(m.status) && canAct() ? '<button class="btn small" data-act="completeload" title="For a load the driver cannot finish on the phone">Complete load</button>' : ''}
             ${m && m.status === 'completed' && canAct() ? (d.sec && d.sec.result === 'clear' ? '<button class="btn small primary" data-act="closeload">Close load</button>' : '<button class="btn small" disabled title="Security has to clear the truck first">Close load</button>') : ''}
           </div></div>
         ${att.length ? att.map(a => `<div class="warnbox ${a.level === 'bad' ? 'bad' : a.level === 'info' ? 'info' : ''}">${esc(a.text)}</div>`).join('') : ''}
@@ -427,6 +429,14 @@
           if (r.error) throw r.error;
           toast('Load closed');
         });
+        break;
+      }
+      case 'completeload': {
+        const l = T.detail.load, open = (T.detail.stops || []).filter(s => ['pending', 'on_the_way', 'arrived'].includes(s.status)).length;
+        const why = prompt(`Complete ${l.load_nbr} from the office?\n\n${plural(open, 'open stop')} will be marked not delivered (or partly delivered if some items were already handed over), and return sheets are made for whatever did not go out. The driver's phone shows the load as finished. You can then close it once security has cleared the truck.\n\nWhy is it being completed from the office?`);
+        if (why == null) break;
+        if (!why.trim()) { toast('Say why the load is being completed', true); break; }
+        act(async () => { const { error } = await sb.rpc('lm_complete_load', { p_load_id: id, p_note: why.trim() }); if (error) throw error; toast('Load completed'); });
         break;
       }
       case 'unassign': {
