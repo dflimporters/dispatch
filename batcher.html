@@ -42,6 +42,44 @@
   function visFree() { return B.free.filter(inWave).filter(inTab); }
   function visLoads() { return B.loads.filter(loadInWave).filter(l => (B.tab === 'special') === isSpecialLoad(l)); }
 
+  // Search box + sort for the Loads column. Newest first by default (ids only ever go up).
+  const LOAD_SORTS = {
+    newest: ['Newest first', (a, b) => b.id - a.id],
+    oldest: ['Oldest first', (a, b) => a.id - b.id],
+    nbr: ['Load number', (a, b) => String(a.load_nbr).localeCompare(String(b.load_nbr), undefined, { numeric: true })],
+    status: ['Status', (a, b) => String(a.status).localeCompare(String(b.status)) || b.id - a.id],
+    vol: ['Volume (high first)', (a, b) => b.vol - a.vol],
+    value: ['Value (high first)', (a, b) => b.value - a.value],
+    drops: ['Drops (most first)', (a, b) => b.drops - a.drops],
+  };
+  B.q = ''; B.status = 'all'; B.sortBy = 'newest';
+  function loadMatches(l, terms) {
+    const hay = [l.load_nbr, l.status, l.wave, l.truck_type, l.ship_via, l.contractor, l.notes, ...l.zones,
+      ...l.ships.flatMap(s => [s.shipment_nbr, s.row && s.row.customer_name, s.row && s.row.customer_id, s.row && s.row.ship_via, s.row && s.row.shipping_zone])]
+      .filter(Boolean).join(' ').toLowerCase();
+    return terms.every(t => hay.includes(t));
+  }
+  function shownLoads() {
+    const terms = B.q.toLowerCase().split(/\s+/).filter(Boolean);
+    return visLoads()
+      .filter(l => B.status === 'all' || (B.status === 'written' ? ['confirmed', 'writing', 'done', 'partial'].includes(l.status) : l.status === B.status))
+      .filter(l => !terms.length || loadMatches(l, terms))
+      .sort(LOAD_SORTS[B.sortBy][1]);
+  }
+  function loadsListHtml() {
+    const all = visLoads(), loads = shownLoads();
+    if (!all.length) return `<div class="card"><div class="empty">No ${B.wave !== 'all' ? B.wave + ' ' : ''}loads yet. Use <b>Suggest loads</b>, or tick shipments and add them to a new load.</div></div>`;
+    if (!loads.length) return `<div class="card"><div class="empty">No loads match the filter. <button class="btn small" data-act="clear_filter">Clear filter</button></div></div>`;
+    return loads.map(loadCard).join('');
+  }
+  function loadFilterHtml() {
+    return `<div class="controls" id="loadFilter">
+      <input class="txt" type="search" id="loadQ" value="${esc(B.q)}" placeholder="Filter: load no., shipment no., ship via, zone, customer…" aria-label="Filter loads" style="flex:1;min-width:180px">
+      <select id="loadStatus" aria-label="Status">${[['all', 'All statuses'], ['draft', 'Draft'], ['ready', 'With liaison'], ['written', 'Trucker confirmed / written']].map(([v, n]) => `<option value="${v}" ${B.status === v ? 'selected' : ''}>${n}</option>`).join('')}</select>
+      <select id="loadSort" aria-label="Sort loads">${Object.entries(LOAD_SORTS).map(([k, [n]]) => `<option value="${k}" ${B.sortBy === k ? 'selected' : ''}>Sort: ${n}</option>`).join('')}</select>
+    </div>`;
+  }
+
   // ------------------------------------------------------------------
   // Data
   // ------------------------------------------------------------------
@@ -145,7 +183,8 @@
         </div>
         <div>
           <h2>Loads <span class="muted">${esc(niceDate(B.date))}</span></h2>
-          ${loads.length ? loads.map(loadCard).join('') : `<div class="card"><div class="empty">No ${B.wave !== 'all' ? B.wave + ' ' : ''}loads yet. Use <b>Suggest loads</b>, or tick shipments and add them to a new load.</div></div>`}
+          ${loadFilterHtml()}
+          <div id="loadsList">${loadsListHtml()}</div>
         </div>
       </div>
       ${selBar()}`;
@@ -295,6 +334,7 @@
     const id = card && Number(card.dataset.load);
     const a = btn.dataset.act;
     if (a === 'clear') { B.sel.clear(); render(); return; }
+    if (a === 'clear_filter') { B.q = ''; B.status = 'all'; render(); return; }
     if (a === 'suggest') { suggest(); return; }
     if (a === 'sync_test') {
       btn.disabled = true; btn.textContent = 'Pulling from TEST…';
@@ -335,8 +375,17 @@
     }
   });
 
+  // Typing only redraws the list, so the box keeps focus.
+  document.getElementById('app').addEventListener('input', e => {
+    if (e.target.id !== 'loadQ') return;
+    B.q = e.target.value;
+    document.getElementById('loadsList').innerHTML = loadsListHtml();
+  });
+
   document.getElementById('app').addEventListener('change', e => {
     const t = e.target;
+    if (t.id === 'loadStatus') { B.status = t.value; render(); return; }
+    if (t.id === 'loadSort') { B.sortBy = t.value; render(); return; }
     if (t.id === 'datePick') { if (t.value) setDate(t.value); return; }
     if (t.dataset.pick) { t.checked ? B.sel.add(t.dataset.pick) : B.sel.delete(t.dataset.pick); render(); return; }
     if (t.dataset.zone != null) {
