@@ -177,6 +177,53 @@ async function listTestOrders() {
   } finally { await acu.logout(); }
 }
 
+// Read-only: what this tenant's Create Shipment action accepts, and the date fields on one order,
+// so TEST and live can be compared when a shipment comes back with the wrong date.
+async function probeCreateShipment(env: string, order?: string) {
+  const t = TARGETS[env]; const why = t.check(); if (why) return { ok: false, error: why };
+  const acu = new Acu(t, `orders probe ${env}`);
+  try {
+    await acu.login();
+    await acu.lease();
+    const sw = await fetch(`${t.base}/entity/Default/${t.version}/swagger.json`, { headers: { Cookie: acu.cookie, Accept: 'application/json' } });
+    let params: Record<string, string[]> = {};
+    if (sw.ok) {
+      const s = await sw.json();
+      const defs = s.definitions ?? s.components?.schemas ?? {};
+      params = Object.fromEntries(Object.keys(defs).filter(k => /CreateShipment/i.test(k))
+        .map(k => [k, Object.keys(defs[k]?.properties?.parameters?.properties ?? defs[k]?.properties ?? {})]));
+    } else await sw.body?.cancel();
+    let orderInfo: any = null;
+    if (order && /^[A-Za-z0-9-]{1,15}$/.test(order)) {
+      const r = await acu.call('GET', `/SalesOrder/SO/${encodeURIComponent(order)}?$expand=Details`);
+      if (r.ok) {
+        const flat = (x: any) => x && Object.fromEntries(Object.entries(x).filter(([k]) => /date|on$|ship|status|schedule/i.test(k) && k !== 'ShipVia')
+          .map(([k, val]: any) => [k, val && typeof val === 'object' && 'value' in val ? val.value : val]));
+        orderInfo = { header: flat(r.data), line1: flat(r.data?.Details?.[0]) };
+      } else orderInfo = { error: `${r.status} ${acuError(r.data)}` };
+    }
+    return { ok: true, env, tenant: t.tenant, version: t.version, swagger: sw.status, createShipmentParams: params, order: orderInfo };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  } finally { await acu.logout(); }
+}
+
+// Returns a note for the request log, or '' when the date was already right.
+async function fixShipmentDate(acu: Acu, nbr: string, date: string): Promise<string> {
+  const url = `/Shipment/${encodeURIComponent(nbr)}?$select=ShipmentNbr,ShipmentDate`;
+  const read = async () => {
+    const r = await acu.call('GET', url);
+    if (!r.ok) throw new Error(`read ${r.status} ${acuError(r.data)}`);
+    return { id: r.data?.id as string, date: String(v(r.data?.ShipmentDate) ?? '').split('T')[0] };
+  };
+  const cur = await read();
+  if (cur.date === date) return '';
+  const put = await acu.call('PUT', `/Shipment?$select=ShipmentNbr,ShipmentDate`, { id: cur.id, ShipmentDate: { value: date } });
+  if (!put.ok) return `${nbr}: Acumatica dated it ${cur.date || 'blank'} and refused the change to ${date} (${put.status} ${acuError(put.data)})`;
+  const now = await read();
+  return now.date === date ? `${nbr}: date set to ${date} (Acumatica had ${cur.date})` : `${nbr}: date still ${now.date} after trying to set ${date}`;
+}
+
 // ------------------------------------------------------------------
 const BUDGET_MS = 110_000;
 async function createShipments(env: string, orders: string[], date: string, actor: string) {
@@ -211,8 +258,16 @@ async function createShipments(env: string, orders: string[], date: string, acto
           if (!after.ok) throw new Error(`created, but couldn't read ${nbr} back: ${after.status} ${acuError(after.data)}`);
           const fresh = shipmentsOf(after.data).filter(s => !had.has(s));
           const nowStatus = v(after.data?.Status);
+          // Live Acumatica has come back with today's date whatever the action was given, so read each new
+          // shipment back and set the date ourselves if it differs. A failure here is reported, never fatal:
+          // the shipment exists either way.
+          const dateNotes: string[] = [];
+          for (const sn of fresh) {
+            try { dateNotes.push(await fixShipmentDate(acu, sn, date)); } catch (e: any) { dateNotes.push(`${sn}: couldn't confirm the date (${String(e?.message ?? e).slice(0, 120)})`); }
+          }
+          const dateNote = dateNotes.filter(Boolean).join('; ');
           r = fresh.length
-            ? { order_nbr: nbr, state: 'created', shipments: fresh, detail: `Order is ${nowStatus}` }
+            ? { order_nbr: nbr, state: 'created', shipments: fresh, detail: `Order is ${nowStatus}${dateNote ? `. ${dateNote}` : ''}` }
             : nowStatus !== status
               ? { order_nbr: nbr, state: 'created', detail: `Order moved to ${nowStatus}; the shipment number wasn't returned (see the Coordinator page after the next sync)` }
               : { order_nbr: nbr, state: 'none', detail: 'Acumatica made no shipment (nothing available to ship?)' };
@@ -251,6 +306,8 @@ Deno.serve(async (req) => {
         return json({ ok: true, test: TARGETS.test.check() === null, test_why: TARGETS.test.check(), live: TARGETS.live.check() === null, live_why: TARGETS.live.check() });
       case 'list_test_orders':
         return json({ ok: true, orders: await listTestOrders() });
+      case 'probe_create_shipment':
+        return json(await probeCreateShipment(p.env === 'live' ? 'live' : 'test', p.order ? String(p.order) : undefined));
       case 'create_shipments': {
         const env = p.env === 'live' ? 'live' : 'test';
         const date = String(p.shipment_date ?? '');
