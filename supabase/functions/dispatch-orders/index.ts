@@ -266,6 +266,12 @@ async function createShipments(env: string, orders: string[], date: string, acto
             try { dateNotes.push(await fixShipmentDate(acu, sn, date)); } catch (e: any) { dateNotes.push(`${sn}: couldn't confirm the date (${String(e?.message ?? e).slice(0, 120)})`); }
           }
           const dateNote = dateNotes.filter(Boolean).join('; ');
+          // Production orders are listed from our synced sales_orders table. Write the status Acumatica
+          // just reported so the order leaves the list now, not at the next sync (which writes the same value).
+          if (env === 'live' && nowStatus && nowStatus !== status) {
+            const upd = await admin.from('sales_orders').update({ status: nowStatus }).eq('order_nbr', nbr).eq('order_type', 'SO');
+            if (upd.error) console.error('sales_orders status update', nbr, upd.error.message);
+          }
           r = fresh.length
             ? { order_nbr: nbr, state: 'created', shipments: fresh, detail: `Order is ${nowStatus}${dateNote ? `. ${dateNote}` : ''}` }
             : nowStatus !== status
