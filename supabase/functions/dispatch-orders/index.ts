@@ -246,14 +246,19 @@ async function createShipments(env: string, orders: string[], date: string, acto
         await acu.lease();
         // No $select: with one, Acumatica drops the expanded Shipments, which read back as "no new shipment".
         const url = `/SalesOrder/SO/${encodeURIComponent(nbr)}?$expand=Shipments`;
-        const before = await acu.call('GET', url);
+        const before = await acu.call('GET', `${url},Details`);
         if (!before.ok) throw new Error(`couldn't read order ${nbr}: ${before.status} ${acuError(before.data)}`);
         const status = v(before.data?.Status);
         if (!['Open', 'Back Order'].includes(status)) {
           r = { order_nbr: nbr, state: 'refused', detail: `Order is ${status} in Acumatica, not Open or Back Order` };
         } else {
           const had = new Set(shipmentsOf(before.data));
-          await acu.action('/SalesOrder/SalesOrderCreateShipment', { entity: { id: before.data.id }, parameters: { ShipmentDate: { value: date } } });
+          // The Acumatica screen always sends the warehouse with the date; live has ignored the date when it
+          // was missing. Send it when every line is in one warehouse (so nothing changes about what ships).
+          const sites = [...new Set((before.data?.Details ?? []).map((d: any) => v(d.WarehouseID)).filter(Boolean))] as string[];
+          const parameters: Record<string, unknown> = { ShipmentDate: { value: date } };
+          if (sites.length === 1) parameters.WarehouseID = { value: sites[0] };
+          await acu.action('/SalesOrder/SalesOrderCreateShipment', { entity: { id: before.data.id }, parameters });
           const after = await acu.call('GET', url);
           if (!after.ok) throw new Error(`created, but couldn't read ${nbr} back: ${after.status} ${acuError(after.data)}`);
           const fresh = shipmentsOf(after.data).filter(s => !had.has(s));
