@@ -156,7 +156,7 @@
             <td class="cust" title="${esc(r.customer_name || '')}">${kindTag(kindOf(r))}${esc(r.customer_name || r.customer_id || '')}</td>
             <td>${esc(r.shipping_zone || '')}</td>
             <td>${statusPill(r.status)}</td>
-            <td>${esc(r.order_date ? niceDate(r.order_date) : '')}</td>
+            <td>${esc(r.order_date ? niceDate(r.order_date) + ' ' + r.order_date.slice(0, 4) : '')}</td>
             <td class="r">${fmt(r.open_qty)}</td><td class="r">${fmt(r.open_volume)}</td><td class="r">${money(r.order_total)}</td>
             <td>${r.open_shipments ? `<span class="tag" title="Already on an open shipment">On shipment${r.open_shipments > 1 ? ' ×' + r.open_shipments : ''}</span> ` : ''}${r.short_lines ? `<span class="tag old" title="Open qty is more than on hand at 71 on these lines">Short ${r.short_lines}</span>` : ''}${CANT_SHIP.includes(r.status) ? '<span class="tag old">Can\'t ship</span>' : ''}</td>
           </tr>`).join('')}</tbody></table>` : `<div class="empty">No ${S.tab === 'special' ? 'pickup / donation / promotion ' : ''}${esc(S.statuses.join(' / '))} orders${S.q || S.zone !== 'all' ? ' match that search' : ''}.</div>`}
@@ -189,7 +189,7 @@
     if (!orders.length) return;
     if (orders.length > 20) { toast('Select 20 orders or fewer at a time', true); return; }
     const where = D.env === 'test' ? 'Acumatica TEST' : 'live Acumatica';
-    if (!confirm(`Create shipments for ${plural(orders.length, 'order')} dated ${niceDate(S.date)} in ${where}?\n\nAcumatica ships only what's available; orders with nothing in stock get no shipment.`)) return;
+    if (!confirm(`Create shipments for ${plural(orders.length, 'order')} dated ${niceDate(S.date)} ${S.date.slice(0, 4)} in ${where}?\n\nAcumatica ships only what's available; orders with nothing in stock get no shipment.`)) return;
     S.busy = true; render();
     try {
       const r = await callOrders('create_shipments', { env: D.env, orders, shipment_date: S.date });
