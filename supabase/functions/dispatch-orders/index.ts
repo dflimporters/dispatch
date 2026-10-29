@@ -256,7 +256,8 @@ async function createShipments(env: string, orders: string[], date: string, acto
           // The Acumatica screen always sends the warehouse with the date; live has ignored the date when it
           // was missing. Send it when every line is in one warehouse (so nothing changes about what ships).
           const sites = [...new Set((before.data?.Details ?? []).map((d: any) => v(d.WarehouseID)).filter(Boolean))] as string[];
-          const parameters: Record<string, unknown> = { ShipmentDate: { value: date } };
+          // Full date-time like the screen sends; a bare date may be what live's parser drops.
+          const parameters: Record<string, unknown> = { ShipmentDate: { value: `${date}T00:00:00` } };
           if (sites.length === 1) parameters.WarehouseID = { value: sites[0] };
           await acu.action('/SalesOrder/SalesOrderCreateShipment', { entity: { id: before.data.id }, parameters });
           const after = await acu.call('GET', url);
@@ -278,7 +279,7 @@ async function createShipments(env: string, orders: string[], date: string, acto
             if (upd.error) console.error('sales_orders status update', nbr, upd.error.message);
           }
           r = fresh.length
-            ? { order_nbr: nbr, state: 'created', shipments: fresh, detail: `Order is ${nowStatus}${dateNote ? `. ${dateNote}` : ''}` }
+            ? { order_nbr: nbr, state: 'created', shipments: fresh, detail: `Order is ${nowStatus}${dateNote ? `. ${dateNote}` : ''} [sent ${Object.entries(parameters).map(([k, x]) => `${k}=${(x as any).value}`).join(', ')}]` }
             : nowStatus !== status
               ? { order_nbr: nbr, state: 'created', detail: `Order moved to ${nowStatus}; the shipment number wasn't returned (see the Coordinator page after the next sync)` }
               : { order_nbr: nbr, state: 'none', detail: 'Acumatica made no shipment (nothing available to ship?)' };
