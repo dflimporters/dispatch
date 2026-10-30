@@ -75,6 +75,7 @@
   const withAcumatica = l => confirmQueued(l) || ['confirming', 'confirmed', 'partial'].includes(l.check_status);
   function checkPill(l) {
     const s = checkState(l);
+    if (l.released_at) return '<span class="pill info">Released without check</span>';
     if (l.check_status === 'confirmed') return '<span class="pill ok">Confirmed in Acumatica</span>';
     if (l.check_status === 'partial') return '<span class="pill bad">Acumatica problem · Invoicing</span>';
     if (confirmQueued(l) || l.check_status === 'confirming') return '<span class="pill warn">Invoicing is confirming…</span>';

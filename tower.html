@@ -92,6 +92,8 @@
   const T = { date: jmDate(0), board: [], generated: null, filter: 'all', detailId: null, detail: null, find: null,
               rt: 'connecting', busy: false, reasons: new Map(), debounce: null };
   const canAct = () => D.me && (D.me.roles.includes('supervisor') || D.me.roles.includes('manager'));
+  const canRelease = () => D.me && (D.me.roles.includes('admin') || D.me.roles.includes('supervisor'));
+  const UNCONFIRMED = ['picking', 'checking', 'with_invoicing', 'confirming', 'invoicing_problem'];
   const reasonName = c => T.reasons.get(c) || c || '';
   const hhmm = iso => iso ? new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '';
   const minsSince = iso => iso ? Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000)) : null;
@@ -114,7 +116,7 @@
 
   async function loadDetail(id) {
     const [ld, lm, ev, st, sc] = await Promise.all([
-      sb.from('loads').select('id,load_nbr,load_date,wave,ship_via,contractor,truck_type,env,status,check_status').eq('id', id).maybeSingle(),
+      sb.from('loads').select('id,load_nbr,load_date,wave,ship_via,contractor,truck_type,env,status,check_status,released_at').eq('id', id).maybeSingle(),
       sb.from('lm_loads').select(LM_COLS).eq('load_id', id).maybeSingle(),
       sb.from('lm_events').select('id,stop_id,kind,source,actor_name,server_at,applied,reject_reason,lat,lng,accuracy_m,payload').eq('load_id', id).order('id', { ascending: false }).limit(600),
       sb.from('lm_stops').select('id,customer_id,customer_name,zone,seq_suggested,seq_final,status,on_the_way_at,arrived_at,completed_at,receiver_name,fail_reason,fail_note').eq('load_id', id).order('seq_final'),
@@ -163,6 +165,12 @@
   // Board
   // ------------------------------------------------------------------
   const STATUS = {
+    // before the checker confirms there is no sheet yet: say which screen the load is on
+    picking:           { label: 'In picking · Picking page',     pill: 'info', group: 'waiting', rank: 6, cls: '' },
+    checking:          { label: 'In checking · Checker page',    pill: 'info', group: 'waiting', rank: 6, cls: '' },
+    with_invoicing:    { label: 'Checked · with Invoicing',      pill: 'info', group: 'waiting', rank: 6, cls: '' },
+    confirming:        { label: 'Invoicing is confirming…',      pill: 'warn', group: 'waiting', rank: 6, cls: '' },
+    invoicing_problem: { label: 'Acumatica problem · Invoicing', pill: 'bad',  group: 'waiting', rank: 6, cls: '' },
     no_sheet:   { label: 'Sheet not printed',        pill: 'done', group: 'waiting', rank: 3, cls: '' },
     ready:      { label: 'Waiting for the driver',   pill: 'info', group: 'waiting', rank: 2, cls: 's-ready' },
     collected:  { label: 'Collected',                pill: 'warn', group: 'out',     rank: 1, cls: 's-out' },
@@ -237,7 +245,7 @@
     return `${findView()}${attentionStrip(rows)}
       <div class="chips" style="margin-bottom:12px">${FILTERS.map(([k, l]) => `<button class="chip ${T.filter === k ? 'on' : ''}" data-act="filter" data-filter="${k}">${l} ${count(k)}</button>`).join('')}</div>
       ${shown.length ? `<div class="tgrid">${shown.map(boardCard).join('')}</div>`
-        : `<div class="card"><div class="empty">${rows.length ? 'Nothing matches that filter.' : 'No checker-confirmed loads on this day yet.'}</div></div>`}`;
+        : `<div class="card"><div class="empty">${rows.length ? 'Nothing matches that filter.' : 'No loads on this day yet.'}</div></div>`}`;
   }
 
   // ------------------------------------------------------------------
@@ -335,7 +343,8 @@
     const d = T.detail;
     if (!d) return '<div class="empty">Loading…</div>';
     const l = d.load, m = d.lm, row = d.row;
-    const status = !m ? 'no_sheet' : m.status;
+    const unconfirmed = !!row && UNCONFIRMED.includes(row.status);
+    const status = unconfirmed ? row.status : !m ? 'no_sheet' : m.status;
     const s = STATUS[status] || { label: status, pill: 'done' };
     // the load's current round: nothing from before its sheet was made
     const evs = d.events.filter(e => e.kind !== 'line_set' && (!m || new Date(e.server_at) >= new Date(m.created_at)));
@@ -351,11 +360,14 @@
             <div class="lstats"><span><b>${esc(l.ship_via || '—')}</b>${l.contractor ? ' · ' + esc(l.contractor) : ''}</span>${l.truck_type ? `<span>${esc(l.truck_type)}</span>` : ''}<span>${esc(niceDate(l.load_date))}</span></div>
             ${m && m.claimed_at ? `<div class="muted">Taken by <b>${esc(m.claimed_name || '')}</b>${m.claimed_phone ? ` · <a href="tel:${esc(String(m.claimed_phone).replace(/[^0-9+]/g, ''))}">${esc(m.claimed_phone)}</a>` : ''} at ${esc(stamp(m.claimed_at))}${m.completed_at ? ' · finished ' + esc(stamp(m.completed_at)) : ''}${m.closed_at ? ' · closed ' + esc(stamp(m.closed_at)) : ''}</div>` : ''}</div>
           <div class="lactions" style="margin:0">
-            <button class="btn small" data-act="printsheet">${m ? 'Reprint load sheet' : 'Print load sheet'}</button>
+            ${unconfirmed ? '' : `<button class="btn small" data-act="printsheet">${m ? 'Reprint load sheet' : 'Print load sheet'}</button>`}
+            ${unconfirmed && canRelease() && row.status !== 'confirming' ? '<button class="btn small danger" data-act="release" title="For a load that already left without being picked and checked here">Release without check</button>' : ''}
             ${claimed && canAct() ? '<button class="btn small danger" data-act="unassign">Unassign</button>' : ''}
             ${m && ['collected', 'delivering'].includes(m.status) && canAct() ? '<button class="btn small" data-act="completeload" title="For a load the driver cannot finish on the phone">Complete load</button>' : ''}
             ${m && m.status === 'completed' && canAct() ? (d.sec && d.sec.result === 'clear' ? '<button class="btn small primary" data-act="closeload">Close load</button>' : '<button class="btn small" disabled title="Security has to clear the truck first">Close load</button>') : ''}
           </div></div>
+        ${unconfirmed ? `<div class="warnbox info">The checker has not confirmed this load yet, so there is no load sheet. ${esc(({ picking: 'It is on the Picking page.', checking: 'It is on the Checker page.', with_invoicing: 'It is with Invoicing to confirm in Acumatica.', confirming: 'Invoicing is confirming it in Acumatica now.', invoicing_problem: 'Invoicing hit a problem confirming it in Acumatica.' })[row.status])} ${canRelease() ? 'If the goods already left and were invoiced, use Release without check.' : ''}</div>` : ''}
+        ${l.released_at ? '<div class="warnbox info">Released without pick / check.</div>' : ''}
         ${att.length ? att.map(a => `<div class="warnbox ${a.level === 'bad' ? 'bad' : a.level === 'info' ? 'info' : ''}">${esc(a.text)}</div>`).join('') : ''}
         ${m && ['completed', 'closed'].includes(m.status) ? securityBox(d.sec, m) : ''}
         ${retLines ? `<div class="warnbox info">${plural(retLines, 'item')} to hand back across ${plural(row.return_sheets, 'stop')}. <a href="returns.html?date=${esc(l.load_date)}">Open the return sheet</a>.</div>` : ''}
@@ -416,6 +428,14 @@
       case 'clearfind': T.find = null; render(); break;
       case 'photo': e.stopPropagation(); openPhoto(b.dataset.path).catch(err => toast(errMsg(err), true)); break;
       case 'printsheet': window.open('loadsheet.html?print=' + id, '_blank'); break;
+      case 'release': {
+        const l = T.detail.load;
+        const why = prompt(`Release ${l.load_nbr} without pick / check?\n\nUse this only when the goods already left and the invoices are already done. It leaves Picking, Checker and Invoicing, and appears here ready for a load sheet. Nothing is written to Acumatica.\n\nWhy is it being released?`);
+        if (why == null) break;
+        if (!why.trim()) { toast('Say why the load is being released', true); break; }
+        act(async () => { const { error } = await sb.rpc('dispatch_release_unchecked', { p_load_id: id, p_reason: why.trim() }); if (error) throw error; toast(`${l.load_nbr} released`); });
+        break;
+      }
       case 'closeload': {
         const l = T.detail.load;
         if (!confirm(`Close ${l.load_nbr}?\n\nThe driver's phone is released and no more photos are accepted for this load.`)) break;
