@@ -338,8 +338,9 @@ function renderReview(notice) {
     ${p.soft_mismatch ? `<div class="banner bad"><b>Check this is the right load.</b> This load is for ${esc(p.trucker_key)}. This phone last ran ${esc(p.last_trucker)}.</div>` : ''}
 
     ${p.can_claim ? `
+      <label class="fld">Your name<input class="txt" id="c_name" type="text" autocomplete="name" autocapitalize="words" placeholder="First and last name" value="${esc(LS.get('lm.driver') || '')}"></label>
       <label class="fld">Your phone number<input class="txt" id="c_phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="For example: 876 555 1234" value="${esc(LS.get('lm.phone') || '')}"></label>
-      <label class="check"><input type="checkbox" id="c_me"><span><b>Yes, this is me.</b> I am ${esc(p.trucker)}.</span></label>
+      <label class="check"><input type="checkbox" id="c_me"><span><b>Yes, this is my load.</b> I am driving for ${esc(p.trucker)}.</span></label>
       ${p.soft_mismatch ? `<label class="check red"><input type="checkbox" id="c_soft"><span>I know this phone last ran ${esc(p.last_trucker)}. This is my load anyway.</span></label>` : ''}
       ${heldOther ? `<label class="check amber"><input type="checkbox" id="c_take"><span>Move this load to my phone.</span></label>` : ''}
       <div class="btns">
@@ -361,10 +362,11 @@ function wireReview() {
   const btn = el('claimbtn');
   if (!btn) return;
   const boxes = ['c_me', 'c_soft', 'c_take'].map(el).filter(Boolean);
-  const ph = el('c_phone');
-  const sync = () => { btn.disabled = !boxes.every(b => b.checked) || !phoneOk(ph && ph.value); };
+  const ph = el('c_phone'), nm = el('c_name');
+  const sync = () => { btn.disabled = !boxes.every(b => b.checked) || !phoneOk(ph && ph.value) || String((nm && nm.value) || '').trim().length < 2; };
   boxes.forEach(b => b.addEventListener('change', sync));
   if (ph) ph.addEventListener('input', sync);
+  if (nm) nm.addEventListener('input', sync);
   sync();
 }
 
@@ -374,13 +376,14 @@ async function doClaim() {
   S.busy = true;
   const btn = el('claimbtn'); if (btn) { btn.disabled = true; btn.textContent = 'Taking responsibility…'; }
   const phone = ((el('c_phone') || {}).value || '').trim();
+  const driver = ((el('c_name') || {}).value || '').trim().replace(/\s+/g, ' ');
   try {
     const r = await rpc('lm_claim', {
-      p_code: S.code, p_device: deviceId(), p_name: p.trucker, p_phone: phone,
+      p_code: S.code, p_device: deviceId(), p_name: driver, p_phone: phone,
       p_override_soft: !!(el('c_soft') && el('c_soft').checked),
       p_takeover: !!(el('c_take') && el('c_take').checked),
     });
-    LS.set('lm.phone', phone);
+    LS.set('lm.phone', phone); LS.set('lm.driver', driver);
     S.session = { token: r.token, code: S.code, load_nbr: p.load_nbr, claimed_at: Date.now() };
     S.data = r.data;
     S.queue = []; S.editing = false; S.warmed = false; S.screen = null; resetForm();
@@ -546,6 +549,7 @@ function enqueue(events) {
 
 async function press(kind, stopId, payload, withGps, screen) {
   if (S.pressing) return;
+  if (['on_the_way', 'arrived', 'complete'].includes(kind) && navigator.vibrate) navigator.vibrate(40);
   S.pressing = true;
   let pos = null;
   if (withGps) {
@@ -625,13 +629,38 @@ function rerender() { if (S.session && !typing()) renderLoad(); }
 // Redrawing the same screen (ticking an item, a background refresh) keeps the scroll place;
 // moving to a different screen starts at the top.
 let lastScreenKey = null;
+// Banners and status pills appear above what the driver is looking at, so the page is also
+// anchored on the first stop/item in view: after the redraw it sits at the same spot on screen.
 function renderLoad() {
   const y = window.scrollY, before = lastScreenKey;
+  let anchor = null;
+  for (const n of document.querySelectorAll('[data-key]')) {
+    const r = n.getBoundingClientRect();
+    if (r.bottom > 40) { anchor = { key: n.dataset.key, top: r.top }; break; }
+  }
   drawLoad();
   const key = S.session ? JSON.stringify(S.screen || 'route') : null;
   lastScreenKey = key;
-  if (key && key === before) window.scrollTo(0, y);
+  if (key && key === before) {
+    window.scrollTo(0, y);
+    const n = anchor && [...document.querySelectorAll('[data-key]')].find(x => x.dataset.key === anchor.key);
+    if (n) window.scrollBy(0, n.getBoundingClientRect().top - anchor.top);
+  }
+  syncHistory();
 }
+
+// The phone's Back button: a checklist / abort / QR screen has its own history entry, so Back
+// returns to the route instead of leaving the app.
+let histPushed = false;
+function syncHistory() {
+  if (S.session && S.screen && !histPushed) { history.pushState({ lm: 1 }, ''); histPushed = true; }
+  else if (!(S.session && S.screen) && histPushed) { histPushed = false; history.back(); }
+}
+window.addEventListener('popstate', () => {
+  if (!histPushed) return;
+  histPushed = false;
+  if (S.session && S.screen) { S.screen = null; S.form.editing = null; S.form.edit = null; S.form.refuseAll = null; renderLoad(); }
+});
 function drawLoad() {
   const d = view();
   if (!d) { renderScan(); return; }
@@ -788,11 +817,12 @@ function stopCard(s, i, ctx) {
   } else {
     state = `<span class="pill bad">Not delivered${s.fail_reason ? ' · ' + esc(reasonLabel(s.fail_reason)) : ''}</span>`;
   }
-  return `<div class="card stopcard ${DONE.includes(s.status) ? 'done' : ctx.active && ctx.active.id === s.id ? 'active' : ''}">
+  const mapHref = addr ? 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent((s.customer_name ? s.customer_name + ', ' : '') + addr + ', Jamaica') : '';
+  return `<div class="card stopcard ${DONE.includes(s.status) ? 'done' : ctx.active && ctx.active.id === s.id ? 'active' : ''}" data-key="s${s.id}">
     <div class="stop"><div class="n">${i + 1}</div>
       <div>
         <div class="who">${esc(s.customer_name || s.customer_id)}</div>
-        ${addr ? `<div class="addr">${esc(addr)}</div>` : ''}
+        ${addr ? `<div class="addr">${esc(addr)} ${DONE.includes(s.status) ? '' : `<a class="tel" href="${esc(mapHref)}" target="_blank" rel="noopener">🗺 Directions</a>`}</div>` : ''}
         <div class="meta">${plural((s.invoices || []).length, 'invoice')} · ${fmt(items)} items${s.phone ? ` · <a class="tel" href="tel:${esc(String(s.phone).replace(/[^0-9+]/g, ''))}">${esc(s.phone)}</a>` : ''}</div>
         ${state ? `<div style="margin-top:8px">${state}</div>` : ''}
         ${s.status === 'delivered' ? '' : contactRow(s)}
@@ -906,7 +936,7 @@ function lineRow(stop, l, reasons) {
         <button class="btn link" data-act="lcancel">Cancel</button></div>
     </div>`;
   }
-  return `<div class="line ${l.result ? (l.result === 'delivered' ? 'm-ok' : 'm-bad') : ''}">
+  return `<div class="line ${l.result ? (l.result === 'delivered' ? 'm-ok' : 'm-bad') : ''}" data-key="l${l.id}">
     <div class="ld"><b>${esc(l.description || l.inventory_id)}</b><span>${num(l.expected)}${unit}</span></div>
     ${editing ? '' : state}${editor}</div>`;
 }
@@ -928,10 +958,12 @@ function renderChecklist(d, stop) {
     <h1>${esc(stop.customer_name || stop.customer_id)}</h1>
     <p class="lead">Check what you handed over. Tap <b>In full</b> for each item, or <b>Not all</b> if something wasn't delivered.</p>
     ${statusBanners()}
+    <div class="stickyprog">
+      <div class="kv" style="border:0;padding:0 0 4px"><span>Items checked</span><b>${marked} of ${lines.length}</b></div>
+      <div class="prog" style="margin-top:0"><i style="width:${lines.length ? Math.round(100 * marked / lines.length) : 0}%"></i></div>
+    </div>
     <div class="card">
-      <div class="kv" style="border:0"><span>Items checked</span><b>${marked} of ${lines.length}</b></div>
-      <div class="prog"><i style="width:${lines.length ? Math.round(100 * marked / lines.length) : 0}%"></i></div>
-      <div class="btns" style="margin-top:12px">
+      <div class="btns" style="margin-top:0">
         <button class="btn" data-act="allfull" ${marked === lines.length ? 'disabled' : ''}>Everything delivered in full</button>
         <button class="btn warn" data-act="refuseall">Customer refused everything</button>
       </div>
@@ -961,6 +993,8 @@ function startEdit(lineId) {
   S.form.editing = lineId;
   S.form.edit = { qty: prev ? num(l.delivered) : '', reason: prev ? l.reason || '' : '', note: prev ? l.note || '' : '' };
   renderLoad();
+  const q = el('e_qty');                       // ready to type: any old number is selected so typing replaces it
+  if (q) { q.focus(); q.select(); }
 }
 
 function saveLine(lineId) {
@@ -1060,7 +1094,7 @@ document.addEventListener('click', e => {
     case 'missing': { const m = el('missingbox'); m.hidden = !m.hidden; if (!m.hidden) el('missingnote').focus(); break; }
     case 'sendmissing': sendMissing(); break;
     case 'review': renderReview(); break;
-    case 'refresh': refreshLoad(); break;
+    case 'refresh': refreshLoad().then(() => { if (!S.offline) toast('Up to date'); }); break;
     case 'qr': S.screen = { kind: 'qr' }; renderLoad(); break;
     case 'otw': press('on_the_way', stop, {}, true); break;
     case 'arr': press('arrived', stop, {}, true, { kind: 'check', stop }); break;
