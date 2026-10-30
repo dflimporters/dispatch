@@ -92,11 +92,14 @@
     }
     await loadKinds();
     S.rows = data.map(r => ({ ...r, order_total: Number(r.order_total) || 0, open_qty: Number(r.open_qty) || 0, open_volume: Number(r.open_volume) || 0 }));
-    const have = new Set(S.rows.map(r => r.order_nbr));
+    const have = new Set(S.rows.filter(canShip).map(r => r.order_nbr));
     S.sel = new Set([...S.sel].filter(n => have.has(n)));
   }
 
-  const canShip = r => !CANT_SHIP.includes(r.status) && r.open_qty > 0;
+  // Acumatica only ships lines whose Ship On date is on or before the shipment date, so an order whose Ship On is
+  // after the date picked below can't be shipped on it.
+  const notDue = r => !!r.sched_shipment && r.sched_shipment > S.date;
+  const canShip = r => !CANT_SHIP.includes(r.status) && r.open_qty > 0 && !notDue(r);
   function visible() {
     const q = S.q.trim().toLowerCase();
     const k = S.sort.key, d = S.sort.dir;
@@ -149,7 +152,7 @@
       <div class="card"><div class="so-wrap">
         ${rows.length ? `<table class="so"><thead><tr>
           <th><input type="checkbox" id="all" aria-label="Select all orders that can ship" ${ready.length && ready.every(r => S.sel.has(r.order_nbr)) ? 'checked' : ''} ${ready.length ? '' : 'disabled'}></th>
-          ${sortTh('Order', 'order_nbr')}${sortTh('Customer', 'customer_name')}${sortTh('Zone', 'shipping_zone')}${sortTh('Status', 'status')}${sortTh('Ordered', 'order_date')}${sortTh('Open qty', 'open_qty', 'r')}${sortTh('Volume', 'open_volume', 'r')}${sortTh('Value', 'order_total', 'r')}<th>Notes</th></tr></thead>
+          ${sortTh('Order', 'order_nbr')}${sortTh('Customer', 'customer_name')}${sortTh('Zone', 'shipping_zone')}${sortTh('Status', 'status')}${sortTh('Ordered', 'order_date')}${sortTh('Ship on', 'sched_shipment')}${sortTh('Open qty', 'open_qty', 'r')}${sortTh('Volume', 'open_volume', 'r')}${sortTh('Value', 'order_total', 'r')}<th>Notes</th></tr></thead>
           <tbody>${rows.map(r => `<tr class="${canShip(r) ? '' : 'blocked'} ${S.sel.has(r.order_nbr) ? 'sel' : ''}">
             <td><input type="checkbox" data-pick="${esc(r.order_nbr)}" aria-label="Select order ${esc(r.order_nbr)}" ${S.sel.has(r.order_nbr) ? 'checked' : ''} ${canShip(r) ? '' : 'disabled'}></td>
             <td class="nbr">${esc(r.order_nbr)}</td>
@@ -157,8 +160,9 @@
             <td>${esc(r.shipping_zone || '')}</td>
             <td>${statusPill(r.status)}</td>
             <td>${esc(r.order_date ? niceDate(r.order_date) + ' ' + r.order_date.slice(0, 4) : '')}</td>
+            <td>${esc(r.sched_shipment ? niceDate(r.sched_shipment) + ' ' + r.sched_shipment.slice(0, 4) : '')}</td>
             <td class="r">${fmt(r.open_qty)}</td><td class="r">${fmt(r.open_volume)}</td><td class="r">${money(r.order_total)}</td>
-            <td>${r.open_shipments ? `<span class="tag" title="Already on an open shipment">On shipment${r.open_shipments > 1 ? ' ×' + r.open_shipments : ''}</span> ` : ''}${r.short_lines ? `<span class="tag old" title="Open qty is more than on hand at 71 on these lines">Short ${r.short_lines}</span>` : ''}${CANT_SHIP.includes(r.status) ? '<span class="tag old">Can\'t ship</span>' : ''}</td>
+            <td>${notDue(r) ? `<span class="tag old" title="Acumatica won't ship lines before their Ship On date. Set the shipment date to ${esc(niceDate(r.sched_shipment))} or later.">Ship on ${esc(niceDate(r.sched_shipment))}: set that date</span>` : ''}${r.open_shipments ? `<span class="tag" title="Already on an open shipment">On shipment${r.open_shipments > 1 ? ' ×' + r.open_shipments : ''}</span> ` : ''}${r.short_lines ? `<span class="tag old" title="Open qty is more than on hand at 71 on these lines">Short ${r.short_lines}</span>` : ''}${CANT_SHIP.includes(r.status) ? '<span class="tag old">Can\'t ship</span>' : ''}</td>
           </tr>`).join('')}</tbody></table>` : `<div class="empty">No ${S.tab === 'special' ? 'pickup / donation / promotion ' : ''}${esc(S.statuses.join(' / '))} orders${S.q || S.zone !== 'all' ? ' match that search' : ''}.</div>`}
       </div></div>
       <div class="so-bar">
@@ -224,7 +228,7 @@
   document.getElementById('app').addEventListener('change', e => {
     const t = e.target;
     if (t.id === 'zone') { S.zone = t.value; render(); return; }
-    if (t.id === 'shipDate') { S.date = t.value || jmDate(0); return; }
+    if (t.id === 'shipDate') { S.date = t.value || jmDate(0); S.sel = new Set([...S.sel].filter(n => { const r = S.rows.find(x => x.order_nbr === n); return r && canShip(r); })); render(); return; }
     if (t.id === 'all') { visible().filter(canShip).forEach(r => t.checked ? S.sel.add(r.order_nbr) : S.sel.delete(r.order_nbr)); render(); return; }
     if (t.dataset.pick) { t.checked ? S.sel.add(t.dataset.pick) : S.sel.delete(t.dataset.pick); render(); }
   });
