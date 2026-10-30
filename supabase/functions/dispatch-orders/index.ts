@@ -224,6 +224,33 @@ async function fixShipmentDate(acu: Acu, nbr: string, date: string): Promise<str
   return now.date === date ? `${nbr}: date set to ${date} (Acumatica had ${cur.date})` : `${nbr}: date still ${now.date} after trying to set ${date}`;
 }
 
+// Live Acumatica picks the lines to ship by today's date, not the ShipmentDate we send, and refuses when no line's
+// Ship On has arrived. For lines due by `date` but not yet today, move Ship On to today so the shipment can be made.
+// Returns what was moved so restoreShipOn can put it back; nothing is touched when no line needs it.
+type Moved = { id: string; line: string; from: string };
+async function moveShipOnToToday(acu: Acu, order: string, orderId: string, date: string): Promise<Moved[]> {
+  const today = jmToday();
+  const r = await acu.call('GET', `/SalesOrder/SO/${encodeURIComponent(order)}?$expand=Details`);
+  if (!r.ok) throw new Error(`couldn't read lines of ${order}: ${r.status} ${acuError(r.data)}`);
+  const moved: Moved[] = (r.data?.Details ?? [])
+    .map((d: any) => ({ id: d.id as string, line: String(v(d.LineNbr) ?? '?'), from: String(v(d.ShipOn) ?? '').split('T')[0] }))
+    .filter((d: Moved) => d.id && d.from > today && d.from <= date);
+  if (!moved.length) return [];
+  const put = await acu.call('PUT', `/SalesOrder?$expand=Details`, { id: orderId, Details: moved.map(m => ({ id: m.id, ShipOn: { value: today } })) });
+  if (!put.ok) {
+    // Part of the change may have gone through: put back whatever we can before giving up.
+    await restoreShipOn(acu, orderId, moved);
+    throw new Error(`couldn't move Ship On to today on ${order}: ${put.status} ${acuError(put.data)}`);
+  }
+  return moved;
+}
+// Returns '' when restored, else a warning for the request log and the results panel.
+async function restoreShipOn(acu: Acu, orderId: string, moved: Moved[]): Promise<string> {
+  if (!moved.length) return '';
+  const put = await acu.call('PUT', `/SalesOrder?$expand=Details`, { id: orderId, Details: moved.map(m => ({ id: m.id, ShipOn: { value: m.from } })) });
+  return put.ok ? '' : `WARNING: couldn't put Ship On back on line ${moved.map(m => `${m.line} (was ${m.from})`).join(', ')}: ${put.status} ${acuError(put.data)}`;
+}
+
 // ------------------------------------------------------------------
 const BUDGET_MS = 110_000;
 async function createShipments(env: string, orders: string[], date: string, actor: string) {
@@ -256,7 +283,22 @@ async function createShipments(env: string, orders: string[], date: string, acto
           // Live Acumatica ignores this date whatever is sent (tried a full date-time and the warehouse too),
           // hence fixShipmentDate below; the parameters are logged with each request.
           const parameters: Record<string, unknown> = { ShipmentDate: { value: date } };
-          await acu.action('/SalesOrder/SalesOrderCreateShipment', { entity: { id: before.data.id }, parameters });
+          const create = () => acu.action('/SalesOrder/SalesOrderCreateShipment', { entity: { id: before.data.id }, parameters });
+          let moved: Moved[] = [];
+          let restoreWarn = '';
+          let createErr: any = null;
+          try {
+            try { await create(); }
+            catch (e: any) {
+              if (!/does not contain any items planned for shipment/i.test(String(e?.message ?? e))) throw e;
+              moved = await moveShipOnToToday(acu, nbr, before.data.id, date);
+              if (!moved.length) throw e;
+              await create();
+            }
+          } catch (e: any) { createErr = e; }
+          // Always put the dates back, whether or not the shipment was made.
+          if (moved.length) restoreWarn = await restoreShipOn(acu, before.data.id, moved);
+          if (createErr) throw new Error(`${String(createErr?.message ?? createErr)}${restoreWarn ? ` ${restoreWarn}` : ''}`);
           const after = await acu.call('GET', url);
           if (!after.ok) throw new Error(`created, but couldn't read ${nbr} back: ${after.status} ${acuError(after.data)}`);
           const fresh = shipmentsOf(after.data).filter(s => !had.has(s));
@@ -268,7 +310,8 @@ async function createShipments(env: string, orders: string[], date: string, acto
           for (const sn of fresh) {
             try { dateNotes.push(await fixShipmentDate(acu, sn, date)); } catch (e: any) { dateNotes.push(`${sn}: couldn't confirm the date (${String(e?.message ?? e).slice(0, 120)})`); }
           }
-          const dateNote = dateNotes.filter(Boolean).join('; ');
+          const shipOnNote = moved.length ? (restoreWarn || `Ship On moved to today and back on line ${moved.map(m => m.line).join(', ')}`) : '';
+          const dateNote = [...dateNotes, shipOnNote].filter(Boolean).join('; ');
           // Production orders are listed from our synced sales_orders table. Write the status Acumatica
           // just reported so the order leaves the list now, not at the next sync (which writes the same value).
           if (env === 'live' && nowStatus && nowStatus !== status) {
@@ -281,7 +324,7 @@ async function createShipments(env: string, orders: string[], date: string, acto
               ? { order_nbr: nbr, state: 'created', detail: `Order moved to ${nowStatus}; the shipment number wasn't returned (see the Coordinator page after the next sync)` }
               : { order_nbr: nbr, state: 'none', detail: 'Acumatica made no shipment (nothing available to ship?)' };
         }
-      } catch (e: any) { r = { order_nbr: nbr, state: 'failed', detail: String(e?.message ?? e).slice(0, 400) }; }
+      } catch (e: any) { r = { order_nbr: nbr, state: 'failed', detail: String(e?.message ?? e).slice(0, 700) }; }
       results.push(r);
       await record(r);
     }
