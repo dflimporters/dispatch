@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Invoice print test</title>
+<style>
+  body { margin:0; padding:16px; background:#888; font:14px Arial,sans-serif; }
+  h2 { color:#fff; margin:20px 0 6px; }
+  .guard { background:#fff; border-left:5px solid #c00; padding:8px 12px; margin:6px 0; max-width:8.5in; }
+  .guard.ok { border-color:#080; }
+  .ip-sheet { margin:0 0 14px; box-shadow:0 2px 8px rgba(0,0,0,.5); }
+  #printWrap { display:none; }
+  button { padding:6px 12px; margin-right:8px; }
+</style>
+</head>
+<body>
+<div id="out"></div>
+<div id="printWrap" aria-hidden="true"></div>
+<script src="invoice-print.js"></script>
+<script>
+(function () {
+  const bravo = {
+    ref: '1059165', doc_type: 'INV', date: '2026-10-28', due_date: '2026-11-27', status: 'Balanced',
+    customer_id: 'C000000540', currency: 'JMD', terms: 'Due in 30 Days', salesperson: 'KC',
+    so_number: '208825', shipment_nbr: '282168', customer_po: null, customer_ref: null, ship_via: null,
+    bill: { name: 'BRAVO SUPERMARKET (no Friday delivery)', lines: ['BRAVO SUPERMARKET, 5 BRAVO STREET', 'ST. ANNS BAY', 'Jamaica'] },
+    ship: { name: 'BRAVO SUPERMARKET (no Friday delivery)', lines: ['BRAVO SUPERMARKET, 5 BRAVO STREET', 'ST. ANNS BAY', 'Jamaica'] },
+    sales_total: 114710.60, discount_total: 0, tax_total: 17206.60, total: 131917.20,
+    lines: [
+      { n: 1, item: '10000527', descr: 'Friendly Flame Gel Cooking Fuel 2.5 hour (72cans x 200g)', qty: 5, uom: 'CASE', unit_price: 8912.00, tax_cat: 'TX', amount: 44560.00, discount: 0, note: null },
+      { n: 2, item: '10000575', descr: 'CoveBay Half Size Deep Foil Pan (Barcoded) (AU0902D) 100C/S', qty: 5, uom: 'CASE', unit_price: 9047.46, tax_cat: 'TX', amount: 45237.30, discount: 0, note: null },
+      { n: 3, item: '10000576', descr: 'CoveBay Half Size Deep Foil Pan Lids (AU0902L) 100C/S', qty: 5, uom: 'CASE', unit_price: 4982.66, tax_cat: 'TX', amount: 24913.30, discount: 0, note: null }
+    ]
+  };
+
+  // (b) 60 lines: every 7th non-taxable, every 9th with a note, long descriptions on a few
+  const lines = [];
+  let sales = 0, tax = 0;
+  for (let i = 1; i <= 60; i++) {
+    const qty = (i % 5) + 1, price = 1000 + i * 137.25, amt = Math.round(qty * price * 100) / 100;
+    const nt = i % 7 === 0;
+    lines.push({
+      n: i, item: String(10000000 + i * 13),
+      descr: i % 4 === 0 ? 'Assorted Imported Premium Gourmet Seasoning Blend Family Pack Extra Large Catering Size (24 x 750g) with Free Dispenser' : 'Item description ' + i + ' 12 x 500g',
+      qty, uom: i % 3 ? 'CASE' : 'EACH', unit_price: price, tax_cat: nt ? 'NT' : 'TX', amount: amt, discount: 0,
+      note: i % 9 === 0 ? 'Customer asked for short-dated stock to be swapped at next delivery. Check expiry before loading the truck.' : null
+    });
+    sales += amt;
+    if (!nt) tax += Math.floor((Math.round(amt * 100) * 15 + 50) / 100) / 100;
+  }
+  sales = Math.round(sales * 100) / 100; tax = Math.round(tax * 100) / 100;
+  const long = Object.assign({}, bravo, { ref: '1059200', lines, sales_total: sales, tax_total: tax, total: Math.round((sales + tax) * 100) / 100 });
+
+  // (d) tax that does not reconcile
+  const bad = Object.assign({}, bravo, { ref: '1059999', tax_total: 17000.00, total: 131710.60 });
+
+  const out = document.getElementById('out');
+  function block(title, inv, opts) {
+    const c = InvoicePrint.check(inv);
+    const h = document.createElement('div');
+    h.innerHTML = '<h2>' + title + '</h2>' + '<div class="guard ' + (c.ok ? 'ok' : '') + '">' + (c.ok ? 'Guard: OK' : 'Guard: REFUSED<br>' + c.problems.map(p => p.replace(/</g, '&lt;')).join('<br>')) + '</div>';
+    out.appendChild(h);
+    if (!c.ok && !(opts && opts.force)) return;
+    const pg = InvoicePrint.pages(inv, opts);
+    const d = document.createElement('div');
+    d.innerHTML = pg.join('');
+    out.appendChild(d);
+    h.insertAdjacentHTML('beforeend', '<div style="color:#fff">' + pg.length + ' page(s) <button onclick="InvoicePrint.show(window.__p' + title[1] + ')">Print this</button></div>');
+    window['__p' + title[1]] = pg;
+  }
+  block('(a) 1059165 as in the sample', bravo);
+  block('(b) Long invoice, 60 lines', long);
+  block('(c) Reprint 2 of (a)', bravo, { reprint: { n: 2 } });
+  block('(d) Tax does not reconcile', bad);
+})();
+</script>
+</body>
+</html>

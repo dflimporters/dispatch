@@ -20,7 +20,9 @@ create table public.invoice_prints (
   method        text not null default 'browser',
   printed_by    uuid default auth.uid(),
   printed_name  text,
-  printed_at    timestamptz not null default now()
+  printed_at    timestamptz not null default now(),
+  voided_at     timestamptz,                 -- set when the person says it didn't print; voided rows don't count
+  voided_note   text
 );
 create index invoice_prints_ship on public.invoice_prints (env, shipment_nbr, printed_at desc);
 create index invoice_prints_load on public.invoice_prints (load_id, printed_at desc) where load_id is not null;
@@ -42,6 +44,7 @@ declare
   why    text := nullif(btrim(coalesce(p_reason, '')), '');
   out    jsonb := '[]'::jsonb;
   lock_k text;
+  pid    bigint;
 begin
   if auth.uid() is null or not dispatch_has_role('supervisor') then
     raise exception 'Only a supervisor can print invoices' using errcode = '42501';
@@ -54,7 +57,7 @@ begin
   for it in select * from jsonb_array_elements(p_items) loop
     nbr := btrim(it ->> 'shipment_nbr');
     if nbr is null or nbr = '' then raise exception 'Shipment number missing'; end if;
-    select count(*) into n from invoice_prints where env = p_env and shipment_nbr = nbr;
+    select count(*) into n from invoice_prints where env = p_env and shipment_nbr = nbr and voided_at is null;
     if n > 0 and why is null then
       raise exception 'Reprints need a reason (% was printed before)', nbr;
     end if;
@@ -65,24 +68,46 @@ begin
     inv := nullif(btrim(coalesce(it ->> 'invoice_nbr', '')), '');
     lock_k := 'invprint:' || p_env || ':' || nbr;
     perform pg_advisory_xact_lock(hashtext(lock_k));
-    select count(*) + 1 into n from invoice_prints where env = p_env and shipment_nbr = nbr;
+    select count(*) + 1 into n from invoice_prints where env = p_env and shipment_nbr = nbr and voided_at is null;
     select l.id, l.load_nbr into ld from load_shipments ls join loads l on l.id = ls.load_id
      where ls.env = p_env and ls.shipment_nbr = nbr order by l.id desc limit 1;
     insert into invoice_prints (env, shipment_nbr, invoice_nbr, load_id, load_nbr, print_no, reprint, reason, printed_name)
-    values (p_env, nbr, inv, ld.id, ld.load_nbr, n, n > 1, case when n > 1 then why end, dispatch_actor_name());
+    values (p_env, nbr, inv, ld.id, ld.load_nbr, n, n > 1, case when n > 1 then why end, dispatch_actor_name())
+    returning id into pid;
     perform _audit(case when n > 1 then 'invoice.reprint' else 'invoice.print' end, 'shipment', nbr,
       case when n > 1 then 'Reprint #' || n || ': ' || why else 'Printed' end || coalesce(' (invoice ' || inv || ')', ''),
       null, jsonb_build_object('invoice_nbr', inv, 'print_no', n), p_env, ld.id, ld.load_nbr, nbr);
-    out := out || jsonb_build_object('shipment_nbr', nbr, 'invoice_nbr', inv, 'print_no', n, 'reprint', n > 1);
+    out := out || jsonb_build_object('id', pid, 'shipment_nbr', nbr, 'invoice_nbr', inv, 'print_no', n, 'reprint', n > 1);
   end loop;
   return out;
 end $$;
 revoke all on function public.invoice_print_record(text, jsonb, text) from public, anon;
 grant execute on function public.invoice_print_record(text, jsonb, text) to authenticated;
 
+-- The print dialog can be cancelled and the browser can't tell, so the page asks "did it print?" afterwards.
+-- "No" voids those rows: kept for the record (and audited), but they no longer count as a print.
+create function public.invoice_print_void(p_ids bigint[], p_note text default null) returns int
+language plpgsql security definer set search_path = public as $$
+declare r record; n int := 0;
+begin
+  if auth.uid() is null or not dispatch_has_role('supervisor') then
+    raise exception 'Only a supervisor can print invoices' using errcode = '42501';
+  end if;
+  for r in select * from invoice_prints where id = any (p_ids) and voided_at is null and printed_by = auth.uid()
+             and printed_at > now() - interval '1 hour' loop
+    update invoice_prints set voided_at = now(), voided_note = nullif(btrim(coalesce(p_note, '')), '') where id = r.id;
+    perform _audit('invoice.print_void', 'shipment', r.shipment_nbr, 'Print #' || r.print_no || ' did not print',
+      null, null, r.env, r.load_id, r.load_nbr, r.shipment_nbr);
+    n := n + 1;
+  end loop;
+  return n;
+end $$;
+revoke all on function public.invoice_print_void(bigint[], text) from public, anon;
+grant execute on function public.invoice_print_void(bigint[], text) to authenticated;
+
 -- Invoice headers (so_invoices, synced from Acumatica) for these sales orders, newest first.
 -- so_invoices has no policy for the panel, so it is read here, supervisor / manager only.
-create function public.invoice_print_headers(p_orders text[]) returns jsonb
+create function public.invoice_print_so_headers(p_orders text[]) returns jsonb
 language plpgsql stable security definer set search_path = public as $$
 begin
   if auth.uid() is null or not (dispatch_has_role('supervisor') or dispatch_has_role('manager')) then
@@ -96,10 +121,11 @@ begin
        where i.order_number = any (p_orders) and coalesce(i.status, '') not in ('Canceled', 'Cancelled', 'Voided')
        limit 1000) x), '[]'::jsonb);
 end $$;
-revoke all on function public.invoice_print_headers(text[]) from public, anon;
-grant execute on function public.invoice_print_headers(text[]) to authenticated;
+revoke all on function public.invoice_print_so_headers(text[]) from public, anon;
+grant execute on function public.invoice_print_so_headers(text[]) to authenticated;
 
 -- Rollback:
---   drop function public.invoice_print_headers(text[]);
+--   drop function public.invoice_print_void(bigint[], text);
+--   drop function public.invoice_print_so_headers(text[]);
 --   drop function public.invoice_print_record(text, jsonb, text);
 --   drop table public.invoice_prints;

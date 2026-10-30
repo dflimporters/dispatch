@@ -17,12 +17,15 @@
   Live also needs DISPATCH_LIVE_INVOICE = 'on' in dispatch-acu.
 
   Printing: prepared invoices (last 3 days) are listed under "Prepared invoices to print", single or
-  by load. Needs migration 20261027140000_invoice_prints.sql. Layout is 96 x 66 characters on
-  9.5in x 11in stock; reprints are decided and logged server-side (invoice_print_record).
+  by load. The invoice is Acumatica's own data (GI DFLInvoicePrint, docs/invoice-print-gi.md) laid out on
+  US Letter by invoice-print.js. Needs migrations 20261027140000_invoice_prints.sql and
+  20261030100000_invoice_print_data.sql and the sync-invoice-print function. Reprints are decided and
+  logged server-side (invoice_print_record).
 -->
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="common.css">
 <style>
+  #printWrap { display:none; }
   .grp { background:var(--surface); border:1px solid var(--border); border-radius:12px; margin-bottom:12px; overflow:hidden; }
   .grp .gh { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:10px 14px; background:#f8fafc; border-bottom:1px solid var(--border); }
   .grp .gh label { display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:600; color:var(--navy); }
@@ -53,16 +56,6 @@
   table.pc tr.zero td { background:var(--bad-bg); }
   table.pc .mis-note { font-size:12px; color:var(--warn-text); font-weight:600; }
   table.pc input[type=number] { width:80px; text-align:right; font:inherit; font-size:14px; padding:5px 8px; border:1px solid var(--border2); border-radius:6px; }
-  /* Invoice print: one <pre> per 9.5in x 11in page, 96 columns x 66 lines (12 cpi, 6 lpi), the grid the FX-2190II uses. */
-  #printWrap { display:none; }
-  .psheet { position:relative; width:9.5in; height:11in; box-sizing:border-box; padding:0 .75in; overflow:hidden; background:#fff; color:#000; break-after:page; page-break-after:always; }
-  .psheet:last-child { break-after:auto; page-break-after:auto; }
-  .psheet pre { margin:0; font:10pt/12pt 'Courier New',Courier,monospace; white-space:pre; }
-  .psheet .wm { position:absolute; left:0; right:0; top:4.2in; text-align:center; font:700 90pt/1 Arial,sans-serif; color:rgba(0,0,0,.10); transform:rotate(-25deg); pointer-events:none; }
-  body.printing { background:#fff; }
-  body.printing > *:not(#printWrap) { display:none !important; }
-  body.printing #printWrap { display:block; }
-  @page { size:9.5in 11in; margin:0; }
   @media (max-width:900px) { .filt .frow { grid-template-columns:repeat(2,minmax(0,1fr)); } }
   @media (max-width:640px) {
     table.inv .hide-m { display:none; }
@@ -80,6 +73,7 @@
 <div id="printWrap" aria-hidden="true"></div>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
 <script src="common.js"></script>
+<script src="invoice-print.js"></script>
 <script>
   const V = { ships: [], loadOf: new Map(), inv: new Map(), sel: new Set(), date: '', busy: false, poll: null, was: false,
               pr: [], prints: new Map(), hdr: new Map(), psel: new Set(), pbusy: false,
@@ -277,7 +271,7 @@
       const c = nbrs.slice(i, i + 150);
       const [a, b] = await Promise.all([
         sb.from('load_shipments').select('shipment_nbr, loads(id, load_nbr, wave, load_date, ship_via, truck_type)').eq('env', D.env).in('shipment_nbr', c),
-        sb.from('invoice_prints').select('shipment_nbr,print_no,printed_at,printed_name').eq('env', D.env).in('shipment_nbr', c).order('print_no'),
+        sb.from('invoice_prints').select('shipment_nbr,print_no,printed_at,printed_name').eq('env', D.env).is('voided_at', null).in('shipment_nbr', c).order('print_no'),
       ]);
       if (a.error) throw a.error;
       if (b.error) throw b.error;
@@ -287,7 +281,7 @@
     pr.forEach(x => V.prints.set(x.shipment_nbr, x));            // ordered, so the last wins
     const orders = [...new Set(rows.map(x => x.order_nbr).filter(Boolean))];
     if (orders.length) {
-      const h = await sb.rpc('invoice_print_headers', { p_orders: orders });
+      const h = await sb.rpc('invoice_print_so_headers', { p_orders: orders });
       if (h.error) throw h.error;
       (h.data || []).forEach(x => { if (!V.hdr.has(x.order_number)) V.hdr.set(x.order_number, x); });   // newest first
     }
@@ -327,85 +321,70 @@
         <button class="btn small" data-act="pclear">Clear</button><button class="btn primary small" data-act="print" ${V.pbusy ? 'disabled' : ''}>Print ${plural(V.psel.size, 'invoice')}</button></div>` : ''}`;
   }
 
-  // Page layout: text on a 96 x 66 grid, so the same text can go to the FX-2190II as ESC/P later.
-  const COLS = 96, ROWS_PER_PAGE = 36;
-  const padR = (t, w) => String(t == null ? '' : t).slice(0, w).padEnd(w);
-  const padL = (t, w) => String(t == null ? '' : t).slice(0, w).padStart(w);
-  const two = n => (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const both = (l, r) => l.slice(0, Math.max(0, COLS - r.length - 1)).padEnd(COLS - r.length) + r;
-  const RULE = '-'.repeat(COLS);
-  const lineAmt = l => l.line_value != null ? Number(l.line_value) : Number(l.shipped_qty) * (Number(l.unit_price) || 0);
-
-  function invoicePages(x, lines, pr) {
-    const s = x.ship, ld = x.load, inv = x.inv;
-    const shown = lines.filter(l => Number(l.shipped_qty) > 0);
-    const total = shown.reduce((t, l) => t + lineAmt(l), 0);
-    const npages = Math.max(1, Math.ceil(shown.length / ROWS_PER_PAGE));
-    const mark = pr.reprint ? `*** REPRINT ${pr.print_no - 1} ***  ` : '';
-    const stamp = new Date().toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-    return Array.from({ length: npages }, (_, pg) => {
-      const t = [];
-      t.push(both('DFL IMPORTERS & DISTRIBUTORS', mark + 'INVOICE'));
-      t.push('');
-      t.push(both('Invoice : ' + (inv ? inv.reference_number : '(not yet synced)'), 'Date : ' + (inv && inv.invoice_date ? niceDate(inv.invoice_date) : s.shipment_date ? niceDate(s.shipment_date) : '')));
-      t.push('Customer: ' + [s.customer_id, s.customer_name].filter(Boolean).join('  '));
-      t.push(both('Order   : ' + (s.order_nbr || ''), 'Shipment : ' + x.nbr));
-      t.push(both('Load    : ' + (ld ? ld.load_nbr : '—'), 'Ship via : ' + ((ld && ld.ship_via) || s.ship_via || '')));
-      t.push('');
-      t.push(padR('Item', 12) + ' ' + padR('Description', 38) + ' ' + padR('UOM', 4) + ' ' + padL('Qty', 7) + ' ' + padL('Price', 13) + ' ' + padL('Amount', 15));
-      t.push(RULE);
-      shown.slice(pg * ROWS_PER_PAGE, (pg + 1) * ROWS_PER_PAGE).forEach(l => {
-        t.push(padR(l.inventory_id, 12) + ' ' + padR(l.description, 38) + ' ' + padR(l.uom, 4) + ' ' + padL(fmt(l.shipped_qty), 7) + ' ' + padL(l.unit_price != null ? two(l.unit_price) : '', 13) + ' ' + padL(two(lineAmt(l)), 15));
-      });
-      while (t.length < 52) t.push('');          // footer sits at the bottom of the 66-line page
-      t.push(RULE);
-      t.push(pg === npages - 1 ? both('Prices before tax. Tax is on the final Acumatica invoice.', 'Total  J$ ' + padL(two(total), 14)) : 'Continued on next page');
-      t.push('');
-      t.push('Received in good order by: ______________________   Date: ____________   Sign: ____________');
-      t.push('');
-      t.push(both(`${pr.reprint ? 'REPRINT - ' : ''}Printed ${stamp}`, `Page ${pg + 1} of ${npages}`));
-      return `<div class="psheet">${pr.reprint ? '<div class="wm">REPRINT</div>' : ''}<pre>${esc(t.join('\n'))}</pre></div>`;
+  // The invoice itself comes from Acumatica (Generic Inquiry DFLInvoicePrint, synced by sync-invoice-print),
+  // laid out by invoice-print.js on US Letter. Before printing: refresh those invoices, refuse any that are
+  // missing or whose tax doesn't reconcile, log the print (first print free; a reprint needs a reason and is marked).
+  async function callSyncInvoicePrint(refs) {
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) throw new Error('Signed out; reload and sign in again');
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/sync-invoice-print`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: SUPABASE_PUBLISHABLE_KEY, Authorization: `Bearer ${session.access_token}` },
+      body: JSON.stringify({ refs }),
     });
+    let j = null;
+    try { j = await res.json(); } catch (e) {}
+    if (!res.ok || !(j && j.success)) throw new Error((j && j.error) || `Invoice refresh failed (${res.status})`);
+    return j;
   }
 
   async function printInvoices(nbrs) {
     const items = V.pr.filter(x => nbrs.includes(x.nbr));
     if (!items.length || V.pbusy) return;
-    const missing = items.filter(x => !x.inv), again = items.filter(x => V.prints.has(x.nbr));
+    const noInv = items.filter(x => !x.inv);
+    if (noInv.length) { toast(`No invoice number yet for ${noInv.slice(0, 4).map(x => x.nbr).join(', ')}. Try again in a few minutes.`, true); return; }
+    const again = items.filter(x => V.prints.has(x.nbr));
     let reason = null;
     if (again.length) {
       reason = prompt(`${plural(again.length, 'invoice')} already printed (${again.slice(0, 4).map(x => x.nbr).join(', ')}${again.length > 4 ? '…' : ''}).\nThese come out marked REPRINT and are logged.\n\nWhy are they being reprinted?`);
       if (reason == null) return;
       if (!reason.trim()) { toast('A reprint needs a reason', true); return; }
     }
-    if (missing.length && !confirm(`${plural(missing.length, 'invoice')} not synced from Acumatica yet (${missing.slice(0, 4).map(x => x.nbr).join(', ')}). They would print without an invoice number.\n\nPrint anyway?`)) return;
     V.pbusy = true; renderPrintPanel();
+    let ids = [];
     try {
-      const want = items.map(x => x.nbr), lines = [];
-      for (let i = 0; i < want.length; i += 100) {
-        const f = await sb.from('shipment_lines').select('shipment_nbr,line_nbr,inventory_id,description,uom,shipped_qty,unit_price,line_value')
-          .eq('env', D.env).in('shipment_nbr', want.slice(i, i + 100)).order('line_nbr').range(0, 4999);
-        if (f.error) throw f.error;
-        lines.push(...(f.data || []));
-      }
-      const noLines = items.filter(x => !lines.some(l => l.shipment_nbr === x.nbr && Number(l.shipped_qty) > 0));
-      if (noLines.length) { toast(`No item lines yet for ${noLines.slice(0, 4).map(x => x.nbr).join(', ')}. Nothing printed.`, true); return; }
-      const r = await sb.rpc('invoice_print_record', { p_env: D.env, p_items: items.map(x => ({ shipment_nbr: x.nbr, invoice_nbr: x.inv ? x.inv.reference_number : null })), p_reason: reason });
+      const refs = items.map(x => x.inv.reference_number);
+      await callSyncInvoicePrint(refs);
+      const f = await sb.rpc('invoice_print_fetch', { p_refs: refs });
+      if (f.error) throw f.error;
+      const byRef = new Map((f.data || []).map(i => [i.ref, i]));
+      const problems = [];
+      items.forEach(x => {
+        const inv = byRef.get(x.inv.reference_number);
+        if (!inv) { problems.push(`${x.inv.reference_number}: not in Acumatica data yet`); return; }
+        if (!(inv.lines || []).length) { problems.push(`${inv.ref}: no lines yet`); return; }
+        const c = InvoicePrint.check(inv);
+        if (!c.ok) problems.push(`${inv.ref}: ${c.problems.join('; ')}`);
+      });
+      if (problems.length) { toast(`Nothing printed. ${problems.slice(0, 3).join(' | ')}${problems.length > 3 ? ` (+${problems.length - 3} more)` : ''}`, true); return; }
+      const r = await sb.rpc('invoice_print_record', { p_env: D.env, p_items: items.map(x => ({ shipment_nbr: x.nbr, invoice_nbr: x.inv.reference_number })), p_reason: reason });
       if (r.error) throw r.error;
       const prs = new Map((r.data || []).map(p => [p.shipment_nbr, p]));
+      ids = (r.data || []).map(p => p.id);
       V.psel.clear();
-      showSheets(items.flatMap(x => invoicePages(x, lines.filter(l => l.shipment_nbr === x.nbr), prs.get(x.nbr))));
+      const pages = items.flatMap(x => {
+        const p = prs.get(x.nbr);
+        return InvoicePrint.pages(byRef.get(x.inv.reference_number), p.reprint ? { reprint: { n: p.print_no - 1 } } : {});
+      });
+      InvoicePrint.show(pages);       // returns once the print dialog is closed
+      // The browser can't tell a printed page from a cancelled dialog, so ask. "No" voids these prints.
+      if (!confirm(`Did the ${plural(items.length, 'invoice')} print?\n\nOK = yes, they printed.\nCancel = no, it was cancelled or failed (it won't count as a print).`)) {
+        const v = await sb.rpc('invoice_print_void', { p_ids: ids, p_note: 'Person said it did not print' });
+        if (v.error) throw v.error;
+        toast('Marked as not printed. You can print again.');
+      }
     } catch (e) { console.error('[invoicing print]', e); toast(errMsg(e), true); }
     finally { V.pbusy = false; await refresh(); }
-  }
-
-  function showSheets(pages) {
-    const w = document.getElementById('printWrap');
-    w.innerHTML = pages.join('');
-    document.body.classList.add('printing');
-    const done = () => { document.body.classList.remove('printing'); w.innerHTML = ''; window.removeEventListener('afterprint', done); };
-    window.addEventListener('afterprint', done);
-    window.print();
   }
 
   const stateOf = n => (V.inv.get(n) || {}).state;

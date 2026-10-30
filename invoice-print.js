@@ -1,0 +1,242 @@
+/* DFL tax invoice renderer (Acumatica report SO643000 look-alike) on US Letter.
+ *
+ *   InvoicePrint.check(inv)        -> { ok, problems[] }   tax / totals guard; refuse to print when not ok
+ *   InvoicePrint.pages(inv, opts)  -> [html, ...]          one string per 8.5in x 11in sheet
+ *   InvoicePrint.show(pages)       -> adds body.printing, fills #printWrap, calls window.print()
+ *
+ * opts.reprint = { n: 2 }   marks every sheet REPRINT 2 (header tag + diagonal watermark). First prints pass no reprint.
+ * opts.logo                 logo URL, default 'assets/dfl-logo-color.png' (relative to the host page)
+ *
+ * Host page contract (same pattern as invoicing.html):
+ *   <div id="printWrap" aria-hidden="true"></div>   direct child of <body>, hidden on screen by the host (display:none)
+ *   InvoicePrint.show(pages) fills it, sets body.printing and prints. On afterprint it clears both.
+ *   Print CSS here hides everything except #printWrap while body.printing is set and sets @page to letter, margin 0.
+ *   If the host has its own @page rule (invoicing.html uses 9.5in x 11in for the dot matrix), the host must not
+ *   apply it while printing these sheets, or the sheets will be scaled/cropped.
+ *
+ * Layout is deterministic: monospace type, descriptions wrapped by character count, every block a fixed height,
+ * so the line budget per page is computed rather than measured from the DOM.
+ */
+(function () {
+  'use strict';
+
+  // ---- constants ----
+  const GCT = 0.15;
+  const TOL = 0.05;
+  const TAXABLE = 'TX';
+  const COMPANY = ['Decasseres Farm Limited', '71 Molynes Rd', 'Kingston 10', 'Phone: 1-876-622-6718'];
+  const GCT_REF = 'GCT Ref # 000-439-363';
+  const DISCLAIMER = 'Damaged goods returned after 45 days will not be accepted by DFL. Returned cheques attract a fee of 1% of the total value returned.';
+
+  // page geometry in pt (Letter = 612 x 792). Every block has a fixed height so the body budget is exact.
+  const LH = 11;                 // line height
+  const ROW_GAP = 3;             // space under each invoice line
+  const ITEM_WRAP = 34;          // chars per line in the ITEM column
+  const NOTE_WRAP = 70;          // chars per line for a line note
+  const TOP_USED = 326;          // everything above the first line row
+  const BOTTOM_MORE = 40;        // continued/page row + bottom margin, non-last pages
+  const BOTTOM_LAST = 26 + 14 + 108 + 4;   // margin + page row + footer block + gap, last page
+  const BODY_MORE = 792 - TOP_USED - BOTTOM_MORE;
+  const BODY_LAST = 792 - TOP_USED - BOTTOM_LAST;
+
+  // ---- helpers ----
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const cents = n => Math.round((Number(n) || 0) * 100);
+  const money = n => (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  function niceDate(d) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d || ''));
+    return m ? `${m[3]}-${MON[+m[2] - 1]}-${m[1]}` : '';
+  }
+
+  // Tax for one line: 15% of the amount, rounded half up to the cent (integer arithmetic, no float drift).
+  const lineTaxCents = amount => Math.floor((cents(amount) * 15 + 50) / 100);
+
+  // ---- tax guard ----
+  function check(inv) {
+    const problems = [];
+    const lines = (inv && inv.lines) || [];
+    if (!inv) return { ok: false, problems: ['No invoice data'] };
+    if (!lines.length) problems.push('Invoice has no lines');
+    let sum = 0, disc = 0, tax = 0;
+    lines.forEach(l => {
+      sum += cents(l.amount);
+      disc += cents(l.discount);
+      if (String(l.tax_cat || '').toUpperCase() === TAXABLE) tax += lineTaxCents(l.amount);
+    });
+    const near = (a, b) => Math.abs(a - b) <= TOL * 100 + 1e-6;
+    if (!near(tax, cents(inv.tax_total)))
+      problems.push(`Tax does not reconcile: ${money(tax / 100)} at ${GCT * 100}% on lines tagged ${TAXABLE}, invoice says ${money(inv.tax_total)}`);
+    // Line amounts may or may not already be net of line discounts, so accept either reading.
+    if (!near(sum, cents(inv.sales_total)) && !near(sum - disc, cents(inv.sales_total)))
+      problems.push(`Lines do not add up to Sales: lines ${money(sum / 100)}, invoice says ${money(inv.sales_total)}`);
+    const t = cents(inv.sales_total) + cents(inv.tax_total);
+    if (!near(t, cents(inv.total)) && !near(t - cents(inv.discount_total), cents(inv.total)))
+      problems.push(`Total does not equal Sales + Tax (less discount): expected ${money(t / 100)}, invoice says ${money(inv.total)}`);
+    return { ok: !problems.length, problems };
+  }
+
+  // ---- wrapping ----
+  // Word wrap to w chars; a word longer than w is split.
+  function wrap(text, w) {
+    const out = [];
+    String(text == null ? '' : text).split(/\r?\n/).forEach(par => {
+      let cur = '';
+      par.split(/\s+/).filter(Boolean).forEach(word => {
+        while (word.length > w) {
+          if (cur) { out.push(cur); cur = ''; }
+          out.push(word.slice(0, w)); word = word.slice(w);
+        }
+        if (!cur) cur = word;
+        else if (cur.length + 1 + word.length <= w) cur += ' ' + word;
+        else { out.push(cur); cur = word; }
+      });
+      out.push(cur);
+    });
+    return out;
+  }
+
+  function prepLine(l) {
+    const itemTxt = (l.item ? l.item + ': ' : '') + (l.descr || '');
+    const item = wrap(itemTxt, ITEM_WRAP);
+    const note = l.note && String(l.note).trim() ? wrap(l.note, NOTE_WRAP) : [];
+    return { l, item, note, h: (item.length + note.length) * LH + ROW_GAP };
+  }
+
+  // Greedy fill at the non-last budget, then make sure the last sheet also fits beside the footer block.
+  function paginate(rows) {
+    const pages = [[]];
+    let used = 0;
+    rows.forEach(r => {
+      if (used + r.h > BODY_MORE && pages[pages.length - 1].length) { pages.push([]); used = 0; }
+      pages[pages.length - 1].push(r); used += r.h;
+    });
+    const hOf = p => p.reduce((t, r) => t + r.h, 0);
+    let last = pages[pages.length - 1];
+    if (hOf(last) > BODY_LAST) {
+      const spill = [];
+      while (last.length > 1 && hOf(last) > BODY_LAST) spill.unshift(last.pop());
+      if (hOf(last) > BODY_LAST) { spill.unshift(last.pop()); }
+      pages.push(spill);
+    }
+    return pages;
+  }
+
+  // ---- CSS (injected once) ----
+  const CSS = `
+.ip-sheet { position:relative; width:8.5in; height:11in; box-sizing:border-box; overflow:hidden; background:#fff; color:#000; font:9pt/${LH}pt 'Courier New',Courier,monospace; break-after:page; page-break-after:always; }
+.ip-sheet:last-child { break-after:auto; page-break-after:auto; }
+.ip-sheet * { box-sizing:border-box; }
+.ip-wm { position:absolute; left:-30%; top:-30%; width:160%; height:160%; transform:rotate(-28deg); display:flex; flex-wrap:wrap; align-content:flex-start; gap:46pt 54pt; opacity:.07; pointer-events:none; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+.ip-wm span { display:flex; align-items:center; gap:6pt; font:700 11pt/1 Arial,sans-serif; letter-spacing:2pt; }
+.ip-wm img { height:24pt; }
+.ip-rwm { position:absolute; left:0; right:0; top:4.3in; text-align:center; transform:rotate(-30deg); font:700 96pt/1 Arial,sans-serif; color:rgba(0,0,0,.11); pointer-events:none; white-space:nowrap; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+.ip-in { position:absolute; left:.4in; right:.4in; top:30pt; bottom:0; }
+.ip-head { display:flex; justify-content:space-between; height:112pt; }
+.ip-co img { height:48pt; display:block; margin-bottom:4pt; }
+.ip-co div { font-weight:700; }
+.ip-hr { width:3.5in; }
+.ip-title { border:1.2pt solid #000; text-align:center; padding:3pt 0; height:40pt; }
+.ip-title b { display:block; font:700 13pt/15pt 'Courier New',Courier,monospace; }
+.ip-rp { display:inline-block; margin-top:1pt; padding:0 6pt; border:1.2pt solid #000; font-weight:700; }
+.ip-meta { margin-top:6pt; }
+.ip-meta div { display:flex; justify-content:space-between; height:13pt; line-height:13pt; }
+.ip-meta span:first-child { font-weight:700; }
+.ip-addr { display:flex; gap:10pt; height:84pt; margin-top:6pt; }
+.ip-box { flex:1; border:1pt solid #000; padding:3pt 5pt; overflow:hidden; }
+.ip-box h6 { margin:0 0 2pt; font:700 9pt/${LH}pt 'Courier New',Courier,monospace; }
+.ip-ref { display:grid; height:30pt; margin-top:6pt; border:1pt solid #000; }
+.ip-ref.a { grid-template-columns:1.1fr 1.4fr 1.5fr; }
+.ip-ref.b { grid-template-columns:1fr 1.2fr 1.2fr 1.4fr; margin-top:4pt; }
+.ip-ref div { padding:2pt 5pt; border-left:1pt solid #000; overflow:hidden; white-space:nowrap; }
+.ip-ref div:first-child { border-left:0; }
+.ip-ref i { display:block; font-style:normal; font-weight:700; font-size:8pt; }
+.ip-th, .ip-row { display:grid; grid-template-columns:4ch 38ch 11ch 7ch 15ch 6ch 1fr; }
+.ip-th { margin-top:8pt; height:16pt; line-height:16pt; font-weight:700; border-top:1pt solid #000; border-bottom:1pt solid #000; }
+.ip-th .r, .ip-row .r { text-align:right; }
+.ip-th .c, .ip-row .c { text-align:center; }
+.ip-th .u, .ip-row .u { padding-left:2ch; }
+.ip-body { overflow:hidden; }
+.ip-row { white-space:pre; margin-bottom:${ROW_GAP}pt; }
+.ip-note { white-space:pre; padding-left:4ch; margin-bottom:0; }
+.ip-pg { position:absolute; left:0; right:0; bottom:26pt; height:14pt; display:flex; justify-content:space-between; }
+.ip-foot { position:absolute; left:0; right:0; bottom:44pt; height:108pt; display:flex; gap:14pt; border-top:1pt solid #000; padding-top:4pt; }
+.ip-fl { flex:1; }
+.ip-fl p { margin:0 0 4pt; }
+.ip-sig { white-space:nowrap; }
+.ip-tot { width:2.6in; border:1pt solid #000; align-self:flex-start; }
+.ip-tot div { display:flex; justify-content:space-between; padding:0 6pt; height:17pt; line-height:17pt; border-top:1pt solid #000; }
+.ip-tot div:first-child { border-top:0; }
+.ip-tot div:last-child { font-weight:700; }
+@media print {
+  @page { size:letter; margin:0; }
+  body.printing { background:#fff; }
+  body.printing > *:not(#printWrap) { display:none !important; }
+  body.printing #printWrap { display:block; }
+  .ip-sheet { box-shadow:none !important; margin:0 !important; border:0 !important; }
+}`;
+
+  function injectCss() {
+    if (document.getElementById('ip-css')) return;
+    const s = document.createElement('style');
+    s.id = 'ip-css';
+    s.textContent = CSS;
+    document.head.appendChild(s);
+  }
+
+  // ---- sheet pieces ----
+  const addrBox = (title, a) => {
+    a = a || {};
+    return `<div class="ip-box"><h6>${title}</h6>${[a.name].concat(a.lines || []).filter(Boolean).map(t => `<div>${esc(t)}</div>`).join('')}</div>`;
+  };
+  const refCell = (label, val) => `<div><i>${label}</i>${esc(val)}</div>`;
+
+  function watermark(logo) {
+    const one = `<span><img src="${esc(logo)}" alt="">IMPORTERS</span>`;
+    return `<div class="ip-wm">${one.repeat(60)}</div>`;
+  }
+
+  function sheet(inv, rows, pg, npages, opts) {
+    const last = pg === npages - 1;
+    const rp = opts.reprint && opts.reprint.n ? opts.reprint.n : 0;
+    const cur = inv.currency || 'JMD';
+    const body = rows.map(r => {
+      const l = r.l;
+      return `<div class="ip-row"><div>${esc(l.n)}</div><div>${r.item.map(esc).join('\n')}</div><div class="r">${money(l.qty)}</div><div class="u">${esc(l.uom)}</div><div class="r">${money(l.unit_price)}</div><div class="c">${esc(l.tax_cat)}</div><div class="r">${money(l.amount)}</div></div>`
+        + (r.note.length ? `<div class="ip-row ip-note" style="display:block;margin-bottom:${ROW_GAP}pt">${r.note.map(esc).join('\n')}</div>` : '');
+    }).join('');
+    const foot = last ? `<div class="ip-foot"><div class="ip-fl"><p>${esc(DISCLAIMER)}</p><p>RECEIVED IN GOOD CONDITION BY:</p><div class="ip-sig">CUSTOMER NAME:_____________ SIGNATURE:_________________</div><div class="ip-sig" style="margin-top:4pt">TRUCKER NAME: ________________ SIGNATURE:____________________</div></div>`
+      + `<div class="ip-tot"><div><span>Sales</span><span>${money(inv.sales_total)}</span></div><div><span>Discount:</span><span>${money(inv.discount_total)}</span></div><div><span>Tax Total:</span><span>${money(inv.tax_total)}</span></div><div><span>Total (${esc(cur)}):</span><span>${money(inv.total)}</span></div></div></div>` : '';
+    return `<div class="ip-sheet">${watermark(opts.logo)}${rp ? `<div class="ip-rwm">REPRINT ${rp}</div>` : ''}<div class="ip-in">`
+      + `<div class="ip-head"><div class="ip-co"><img src="${esc(opts.logo)}" alt="DFL">${COMPANY.map(t => `<div>${esc(t)}</div>`).join('')}</div>`
+      + `<div class="ip-hr"><div class="ip-title"><b>TAX INVOICE</b>${esc(GCT_REF)}${rp ? `<br><span class="ip-rp">REPRINT ${rp}</span>` : ''}</div>`
+      + `<div class="ip-meta"><div><span>Invoice No.:</span><span>${esc(inv.ref)}</span></div><div><span>Date:</span><span>${esc(niceDate(inv.date))}</span></div><div><span>Due Date:</span><span>${esc(niceDate(inv.due_date))}</span></div><div><span>Customer ID:</span><span>${esc(inv.customer_id)}</span></div><div><span>Currency:</span><span>${esc(cur)}</span></div></div></div></div>`
+      + `<div class="ip-addr">${addrBox('BILL TO:', inv.bill)}${addrBox('SHIP TO:', inv.ship)}</div>`
+      + `<div class="ip-ref a">${refCell('CUSTOMER REF. NUMBER', inv.customer_ref)}${refCell('TERMS', inv.terms)}${refCell('CONTACT', inv.salesperson)}</div>`
+      + `<div class="ip-ref b">${refCell('SHIP VIA', inv.ship_via)}${refCell('SO NUMBER', inv.so_number)}${refCell('SHIPMENT NUMBER', inv.shipment_nbr)}${refCell('CUSTOMER P.O. NO.', inv.customer_po)}</div>`
+      + `<div class="ip-th"><div>NO.</div><div>ITEM</div><div class="r">QTY.</div><div class="u">UOM</div><div class="r">UNIT PRICE</div><div class="c">TAX</div><div class="r">EXTENDED</div></div>`
+      + `<div class="ip-body" style="height:${last ? BODY_LAST : BODY_MORE}pt">${body}</div>`
+      + foot
+      + `<div class="ip-pg"><span>${last ? '' : 'Continued...'}</span><span>Page: ${pg + 1} of ${npages}</span></div></div></div>`;
+  }
+
+  function pages(inv, opts) {
+    opts = Object.assign({ logo: 'assets/dfl-logo-color.png' }, opts || {});
+    injectCss();
+    const sets = paginate((inv.lines || []).map(prepLine));
+    return sets.map((rows, i) => sheet(inv, rows, i, sets.length, opts));
+  }
+
+  // Fill #printWrap, switch the page to print mode, print, then restore. Same flow as invoicing.html's showSheets.
+  function show(pgs) {
+    injectCss();
+    const w = document.getElementById('printWrap');
+    w.innerHTML = pgs.join('');
+    document.body.classList.add('printing');
+    const done = () => { document.body.classList.remove('printing'); w.innerHTML = ''; window.removeEventListener('afterprint', done); };
+    window.addEventListener('afterprint', done);
+    window.print();
+  }
+
+  window.InvoicePrint = { check, pages, show, niceDate };
+})();
