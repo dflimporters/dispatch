@@ -23,7 +23,11 @@
   // ---- constants ----
   const GCT = 0.15;
   const TOL = 0.05;
+  // Tax categories: the stock item's category is TAXABLE or NONTAXABLE; the sample form shows TX. Accept both.
+  const TAXABLE_CATS = ['TX', 'TAXABLE'];
   const TAXABLE = 'TX';
+  const isTaxable = cat => TAXABLE_CATS.includes(String(cat || '').toUpperCase());
+  const taxLabel = cat => isTaxable(cat) ? 'TX' : /^NON/i.test(String(cat || '')) ? 'NT' : String(cat || '');
   const COMPANY = ['Decasseres Farm Limited', '71 Molynes Rd', 'Kingston 10', 'Phone: 1-876-622-6718'];
   const GCT_REF = 'GCT Ref # 000-439-363';
   const DISCLAIMER = 'Damaged goods returned after 45 days will not be accepted by DFL. Returned cheques attract a fee of 1% of the total value returned.';
@@ -62,7 +66,7 @@
     lines.forEach(l => {
       sum += cents(l.amount);
       disc += cents(l.discount);
-      if (String(l.tax_cat || '').toUpperCase() === TAXABLE) tax += lineTaxCents(l.amount);
+      if (isTaxable(l.tax_cat)) tax += lineTaxCents(l.amount);
     });
     const near = (a, b) => Math.abs(a - b) <= TOL * 100 + 1e-6;
     if (!near(tax, cents(inv.tax_total)))
@@ -202,7 +206,7 @@
     const cur = inv.currency || 'JMD';
     const body = rows.map(r => {
       const l = r.l;
-      return `<div class="ip-row"><div>${esc(l.n)}</div><div>${r.item.map(esc).join('\n')}</div><div class="r">${money(l.qty)}</div><div class="u">${esc(l.uom)}</div><div class="r">${money(l.unit_price)}</div><div class="c">${esc(l.tax_cat)}</div><div class="r">${money(l.amount)}</div></div>`
+      return `<div class="ip-row"><div>${esc(l.n)}</div><div>${r.item.map(esc).join('\n')}</div><div class="r">${money(l.qty)}</div><div class="u">${esc(l.uom)}</div><div class="r">${money(l.unit_price)}</div><div class="c">${esc(taxLabel(l.tax_cat))}</div><div class="r">${money(l.amount)}</div></div>`
         + (r.note.length ? `<div class="ip-row ip-note" style="display:block;margin-bottom:${ROW_GAP}pt">${r.note.map(esc).join('\n')}</div>` : '');
     }).join('');
     const foot = last ? `<div class="ip-foot"><div class="ip-fl"><p>${esc(DISCLAIMER)}</p><p>RECEIVED IN GOOD CONDITION BY:</p><div class="ip-sig">CUSTOMER NAME:_____________ SIGNATURE:_________________</div><div class="ip-sig" style="margin-top:4pt">TRUCKER NAME: ________________ SIGNATURE:____________________</div></div>`

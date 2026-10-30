@@ -90,7 +90,8 @@ Per line:
 | Qty | Tran.Qty |
 | UOM | Tran.UOM |
 | UnitPrice | Tran.CuryUnitPrice |
-| TaxCategory | Tran.TaxCategoryID (shows `TX`, or the non-taxable code) |
+| TaxCategory | Tran.TaxCategoryID (`TAXABLE` or `NONTAXABLE`; the form shows TX for taxable) |
+| ItemTaxCategory | Item.TaxCategoryID (the stock item's Tax Category, same two values; kept as a cross-check) |
 | ExtAmount | Tran.CuryTranAmt |
 | LineDiscount | Tran.CuryDiscAmt |
 | LineNote | LineNote.NoteText |
@@ -103,7 +104,7 @@ Sales 114,710.60, Discount 0.00, Tax 17,206.60, Total 131,917.20; three lines at
 
 ## 2. Tax rule used by the print
 
-GCT is 15%. Each taxable line is rounded to 2 decimals (half up) and the rounded line taxes are summed; that must equal `TaxTotal` within 0.05. A line is taxable when `TaxCategory` is the taxable code (`TX`). If the numbers don't reconcile, the portal refuses to print and says why. Non-taxable lines print their own category code (e.g. `NT`).
+GCT is 15%. Each taxable line is rounded to 2 decimals (half up) and the rounded line taxes are summed; that must equal `TaxTotal` within 0.05. A line is taxable when `TaxCategory` is `TAXABLE` (or `TX`) and prints `TX`; `NONTAXABLE` prints `NT`. If the numbers don't reconcile, the portal refuses to print and says why. Only the one rate (15% GCT) exists.
 
 ## 3. Data contract (what the sync stores and the layout renders)
 

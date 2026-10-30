@@ -287,6 +287,16 @@ async function runSync(body: any) {
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
 
+  // Supervisor or manager only (the people who print invoices). verify_jwt may be on or off; the token is checked here.
+  const token = (req.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '');
+  const { data: u } = token ? await supabase.auth.getUser(token) : { data: null } as any;
+  const { data: roleRows } = u?.user ? await supabase.from('dispatch_roles').select('role').eq('user_id', u.user.id) : { data: [] } as any;
+  if (!(roleRows ?? []).some((r: any) => ['supervisor', 'manager'].includes(r.role))) {
+    return new Response(JSON.stringify({ success: false, error: 'Only a supervisor or manager can refresh invoices for printing' }), {
+      status: 403, headers: { 'Content-Type': 'application/json', ...CORS },
+    });
+  }
+
   let body: any = {};
   if (req.method === 'POST') {
     try { body = await req.json(); } catch { body = {}; }
