@@ -277,12 +277,12 @@
       const l = V.loadOf.get(s.shipment_nbr) || {};
       if (F.status && stateKind(s.shipment_nbr) !== F.status) return false;
       if (F.via && (l.ship_via || '') !== F.via) return false;
-      if (load && !norm(l.load_nbr).includes(load)) return false;
+      if (load && !norm(l.load_nbr).includes(load) && !nbrMatches(l.load_nbr, load)) return false;
       if (cust && !(norm(s.customer_name) + ' ' + norm(s.customer_id)).includes(cust)) return false;
       if (ship && !norm(s.shipment_nbr).includes(ship)) return false;
       if (terms.length) {
         const hay = [l.load_nbr, l.ship_via, l.truck_type, s.customer_name, s.customer_id, s.shipment_nbr, s.order_nbr].map(norm).join(' ');
-        if (!terms.every(t => hay.includes(t))) return false;
+        if (!nbrMatches(l.load_nbr, F.q) && !terms.every(t => hay.includes(t))) return false;
       }
       return true;
     });

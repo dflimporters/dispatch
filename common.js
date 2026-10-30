@@ -448,9 +448,13 @@ function saveKindTab(t) { try { localStorage.setItem('dispatch-kindtab', t); } c
 
 // Search box on the picker / checker lists: every word has to appear in the load's number,
 // ship via, trucker, truck, zones, or any of its shipments' customer, zone or number.
+// Load numbers are found with or without dashes and spaces: "L-1030-PM-05", "l 1030 pm 05", "1030pm05".
+function compactNbr(s) { return String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]/g, ''); }
+function nbrMatches(nbr, q) { const c = compactNbr(q); return c.length >= 3 && compactNbr(nbr).includes(c); }
 function loadMatches(l, q) {
   const words = String(q || '').toLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length) return true;
+  if (nbrMatches(l.load_nbr, q)) return true;
   if (!l._hay) {
     l._hay = [l.load_nbr, l.ship_via, l.contractor, l.truck_type, (l.zones || []).join(' '),
       ...l.ships.map(s => [s.shipment_nbr, s.row && s.row.customer_name, s.row && s.row.customer_id, s.row && s.row.shipping_zone].join(' '))

@@ -63,7 +63,7 @@
     const terms = B.q.toLowerCase().split(/\s+/).filter(Boolean);
     return visLoads()
       .filter(l => B.status === 'all' || (B.status === 'written' ? ['confirmed', 'writing', 'done', 'partial'].includes(l.status) : l.status === B.status))
-      .filter(l => !terms.length || loadMatches(l, terms))
+      .filter(l => !terms.length || nbrMatches(l.load_nbr, B.q) || loadMatches(l, terms))
       .sort(LOAD_SORTS[B.sortBy][1]);
   }
   function loadsListHtml() {
