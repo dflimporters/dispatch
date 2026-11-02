@@ -49,6 +49,23 @@
   .sheet td { border-bottom:1px solid #999; padding:5px; vertical-align:top; }
   .sheet td.n { width:8mm; font-weight:800; }
   .sheet .foot { margin-top:10px; font-size:11px; color:#444; display:flex; justify-content:space-between; }
+  .sheet .cmeta { display:flex; gap:22px; flex-wrap:wrap; font-size:13px; margin-bottom:10px; }
+  .sheet .cmeta b { font-size:10.5px; letter-spacing:.6px; text-transform:uppercase; color:#444; margin-right:4px; }
+  .sheet.cs th.r, .sheet.cs td.r { text-align:right; }
+  .sheet.cs th.b, .sheet.cs td.b { width:19mm; text-align:center; }
+  .sheet.cs td.nt { min-width:24mm; }
+  .sheet.cs tr.tot td { border-top:2px solid #000; border-bottom:0; }
+  .sheet.cs td.mono { font-family:ui-monospace,Consolas,monospace; white-space:nowrap; }
+  .sheet .box { display:inline-block; width:4.5mm; height:4.5mm; border:1.5px solid #000; vertical-align:middle; }
+  .sheet .stop { break-inside:avoid; margin-bottom:12px; border:1.5px solid #000; border-radius:4px; padding:6px 8px; }
+  .sheet .stop table { margin-top:4px; }
+  .sheet .stophd { display:flex; gap:10px; flex-wrap:wrap; align-items:baseline; font-size:13px; }
+  .sheet .stophd .n { display:inline-block; min-width:7mm; text-align:center; background:#000; color:#fff; font-weight:800; border-radius:3px; padding:0 4px; }
+  .sheet .stophd .z { font-weight:700; border:1px solid #000; border-radius:3px; padding:0 4px; font-size:11px; }
+  .sheet .stophd .sp { flex:1; }
+  .sheet tr.inv td { background:#eee; font-weight:700; font-size:11.5px; border-bottom:1px solid #000; }
+  .sheet .stopft { display:flex; justify-content:space-between; gap:12px; margin-top:8px; font-size:12px; }
+  .sheet .csign { display:flex; justify-content:space-between; gap:12px; margin-top:16px; font-size:12.5px; break-inside:avoid; }
   @media print {
     @page { margin:12mm; }
     body { background:#fff; }
@@ -114,6 +131,8 @@
           ${canReassign() && (!m || m.status === 'ready') ? `<button class="btn small" data-act="reassign">Change trucker…</button>` : ''}
           <a class="btn small" href="tower.html#load=${l.id}">Open in Control Tower</a>
           ${m && ['ready', 'collected', 'delivering'].includes(m.status) ? '<button class="btn small" data-act="copylink" title="The link the QR code opens, for a driver whose camera is not working">Copy driver link</button><button class="btn small" data-act="sharelink">Send by WhatsApp</button>' : ''}
+          <button class="btn small" data-act="printsum" title="One row per stop, with tick boxes for the trucker">Check-off: summary</button>
+          <button class="btn small" data-act="printdet" title="Every item on every invoice, with tick boxes for the trucker">Check-off: detailed</button>
           <button class="btn small primary" data-act="print">${m ? 'Reprint load sheet' : 'Print load sheet'}</button>
         </div></div>
       <div class="lstats"><span><b>${esc(l.ship_via || '—')}</b>${l.contractor ? ' · ' + esc(l.contractor) : ''}</span>${l.truck_type ? `<span>${esc(l.truck_type)}</span>` : ''}</div>
@@ -307,6 +326,52 @@
     </div>`;
   }
 
+  // Trucker check-off sheet: what the trucker ticks off while loading and delivering. Summary = one row per stop;
+  // detailed = every item line under each customer's invoice. Quantities are what is going out (the checker's final
+  // qty), from lm_check_sheet. Works at any stage of the load.
+  const qn = n => Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
+  function checkHead(s, title) {
+    return `<div class="sh"><img src="assets/dfl-logo-color.png" alt="DFL Importers"><div class="t">${title}<b>${esc(s.load_nbr)}</b></div></div>
+      <div class="cmeta"><span><b>Trucker</b> ${esc(s.trucker || s.ship_via || '')}</span><span><b>Ship via</b> ${esc(s.ship_via || '')}${s.truck_type ? ' · ' + esc(s.truck_type) : ''}</span>
+        <span><b>Date</b> ${esc(niceDate(s.load_date))}${s.wave && s.wave !== 'ACU' ? ' · ' + esc(s.wave) : ''}</span></div>`;
+  }
+  const stopUnits = st => (st.shipments || []).reduce((t, x) => t + (x.lines || []).reduce((u, l) => u + Number(l.qty || 0), 0), 0);
+  const stopLines = st => (st.shipments || []).reduce((t, x) => t + (x.lines || []).length, 0);
+  function checkFoot(s) {
+    return `<div class="csign"><span>Checker: ____________________</span><span>Trucker: ____________________</span><span>Loaded at: ________</span></div>
+      <div class="foot"><span>${esc(s.check_status === 'confirmed' ? 'Quantities as confirmed by the checker.' : 'Not confirmed by the checker yet: quantities may change. Reprint after confirming.')}</span><span>Printed ${esc(stamp(new Date().toISOString()))}</span></div>`;
+  }
+  function checkSummaryHtml(s) {
+    const stops = s.stops || [];
+    return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: summary')}
+      <table><thead><tr><th>#</th><th>Customer</th><th>Area</th><th>Invoices</th><th class="r">Lines</th><th class="r">Units</th><th class="b">Loaded</th><th class="b">Delivered</th><th>Notes</th></tr></thead><tbody>
+        ${stops.map(x => `<tr><td class="n">${x.seq}</td><td><b>${esc(x.customer_name || x.customer_id)}</b></td><td>${esc(x.zone || x.city || '')}</td>
+          <td>${esc((x.shipments || []).map(i => i.invoice_nbr || i.shipment_nbr).join(', '))}</td><td class="r">${stopLines(x)}</td><td class="r">${qn(stopUnits(x))}</td>
+          <td class="b"><span class="box"></span></td><td class="b"><span class="box"></span></td><td class="nt"></td></tr>`).join('')}
+        <tr class="tot"><td></td><td><b>Total</b></td><td></td><td>${plural(stops.reduce((t, x) => t + (x.shipments || []).length, 0), 'invoice')}</td><td class="r">${stops.reduce((t, x) => t + stopLines(x), 0)}</td><td class="r">${qn(stops.reduce((t, x) => t + stopUnits(x), 0))}</td><td></td><td></td><td></td></tr>
+      </tbody></table>${checkFoot(s)}</div>`;
+  }
+  function checkDetailHtml(s) {
+    const stops = s.stops || [];
+    return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: detailed')}
+      ${stops.map(x => `<div class="stop"><div class="stophd"><span class="n">${x.seq}</span><b>${esc(x.customer_name || x.customer_id)}</b>
+          <span>${esc([x.address, x.city].filter(Boolean).join(', '))}</span>${x.zone ? `<span class="z">${esc(x.zone)}</span>` : ''}${x.phone ? `<span>${esc(x.phone)}</span>` : ''}
+          <span class="sp"></span><span>${plural(stopLines(x), 'line')} · ${qn(stopUnits(x))} units</span></div>
+        ${(x.shipments || []).map(i => `<table><thead><tr><th class="b"></th><th>Item</th><th>Description</th><th>UOM</th><th class="r">Qty</th><th class="b">Delivered</th></tr>
+          <tr class="inv"><td colspan="6">Invoice ${esc(i.invoice_nbr || i.shipment_nbr)}${i.invoice_nbr ? ` · shipment ${esc(i.shipment_nbr)}` : ''}</td></tr></thead><tbody>
+          ${(i.lines || []).map(l => `<tr><td class="b"><span class="box"></span></td><td class="mono">${esc(l.inventory_id || '')}</td><td>${esc(l.description || '')}</td><td>${esc(l.uom || '')}</td><td class="r"><b>${qn(l.qty)}</b></td><td class="b"><span class="box"></span></td></tr>`).join('')}
+          </tbody></table>`).join('')}
+        <div class="stopft"><span>Received by: ______________________</span><span>Notes: ______________________________</span></div></div>`).join('')}
+      ${checkFoot(s)}</div>`;
+  }
+  async function printCheck(id, detail) {
+    const { data, error } = await sb.rpc('lm_check_sheet', { p_load_id: id });
+    if (error) throw error;
+    document.getElementById('sheetwrap').innerHTML = detail ? checkDetailHtml(data) : checkSummaryHtml(data);
+    await new Promise(r => setTimeout(r, 150));
+    window.print();
+  }
+
   async function printSheet(id) {
     const { data, error } = await sb.rpc('lm_sheet', { p_load_id: id });
     if (error) throw error;
@@ -349,6 +414,8 @@
       case 'refresh': refresh(); break;
       case 'today': L.date = jmDate(0); refresh(); break;
       case 'print': act(() => printSheet(id)); break;
+      case 'printsum': act(() => printCheck(id, false)); break;
+      case 'printdet': act(() => printCheck(id, true)); break;
       case 'reassign': act(async () => { await openReassign(id); render(); window.scrollTo(0, 0); }); break;
       case 'rclose': R.load = null; render(); break;
       case 'rgo': act(doReassign); break;
