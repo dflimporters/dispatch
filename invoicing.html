@@ -76,7 +76,7 @@
 <script src="invoice-print.js"></script>
 <script>
   const V = { ships: [], loadOf: new Map(), inv: new Map(), sel: new Set(), date: '', busy: false, poll: null, was: false,
-              pr: [], prints: new Map(), hdr: new Map(), psel: new Set(), pbusy: false,
+              pr: [], manual: [], prints: new Map(), hdr: new Map(), psel: new Set(), pbusy: false,
               pend: [], picks: new Map(), items: new Map(), checks: [], final: new Map(), notes: new Map(), openL: new Set(), wasConf: new Map(), odate: new Map() };
 
   // ------------------------------------------------------------------
@@ -270,11 +270,13 @@
     const r = await sb.from('shipment_invoicing').select('shipment_nbr,finished_at').eq('env', D.env).eq('state', 'done')
       .gte('finished_at', since).order('finished_at', { ascending: false }).limit(300);
     if (r.error) throw r.error;
-    const nbrs = (r.data || []).map(x => x.shipment_nbr);
+    // Invoices looked up by number (printLookup) stay in the list for the rest of the session.
+    const nbrs = [...new Set([...(r.data || []).map(x => x.shipment_nbr), ...V.manual.map(m => m.nbr)])];
     V.prints = new Map(); V.hdr = new Map(); V.pr = [];
     if (!nbrs.length) { V.psel.clear(); return; }
     const rows = await shipmentsByNbr(nbrs);
     const byNbr = new Map(rows.map(x => [x.shipment_nbr, x]));
+    V.manual.forEach(m => { if (!byNbr.has(m.nbr)) byNbr.set(m.nbr, { shipment_nbr: m.nbr, order_nbr: m.order, customer_id: m.cust, customer_name: m.name, shipment_value: null }); });
     const ls = [], pr = [];
     for (let i = 0; i < nbrs.length; i += 150) {
       const c = nbrs.slice(i, i + 150);
@@ -294,8 +296,34 @@
       if (h.error) throw h.error;
       (h.data || []).forEach(x => { if (!V.hdr.has(x.order_number)) V.hdr.set(x.order_number, x); });   // newest first
     }
-    V.pr = nbrs.filter(n => byNbr.has(n)).map(n => ({ nbr: n, ship: byNbr.get(n), load: loadOfP.get(n) || null, inv: V.hdr.get(byNbr.get(n).order_nbr) || null }));
+    const manualOf = new Map(V.manual.map(m => [m.nbr, m]));
+    V.pr = nbrs.filter(n => byNbr.has(n)).map(n => ({ nbr: n, ship: byNbr.get(n), load: loadOfP.get(n) || null,
+      inv: manualOf.has(n) ? { reference_number: manualOf.get(n).ref } : V.hdr.get(byNbr.get(n).order_nbr) || null }));
     [...V.psel].forEach(n => { if (!V.pr.some(x => x.nbr === n)) V.psel.delete(n); });
+  }
+
+  // Print by invoice number: refresh that invoice from Acumatica (live), add it to the print list, and let the
+  // usual flow print it. Also how an older invoice is reprinted once it has left the 3-day list.
+  async function printLookup() {
+    const box = document.getElementById('plookup');
+    const ref = (box.value || '').trim();
+    if (!ref) { toast('Type an invoice number', true); return; }
+    if (D.env !== 'live') { toast('Print by invoice number reads live Acumatica. Switch to Live.', true); return; }
+    if (V.pbusy) return;
+    V.pbusy = true;
+    try {
+      const s = await callSyncInvoicePrint([ref]);
+      if ((s.not_found || []).includes(ref)) { toast(`Invoice ${ref} wasn't found in Acumatica`, true); return; }
+      const f = await sb.rpc('invoice_print_fetch', { p_refs: [ref] });
+      if (f.error) throw f.error;
+      const inv = (f.data || [])[0];
+      if (!inv) { toast(`Invoice ${ref} isn't available yet`, true); return; }
+      if (!inv.shipment_nbr) { toast(`Invoice ${ref} has no shipment on it, so the print can't be logged against one`, true); return; }
+      if (!V.manual.some(m => m.nbr === inv.shipment_nbr)) V.manual.push({ nbr: inv.shipment_nbr, ref: inv.ref, order: inv.so_number, cust: inv.customer_id, name: (inv.bill && inv.bill.name) || '' });
+      V.psel.add(inv.shipment_nbr);
+      box.value = '';
+    } catch (e) { console.error('[invoicing lookup]', e); toast(errMsg(e), true); }
+    finally { V.pbusy = false; await refresh(); }
   }
 
   function printPill(n) {
@@ -438,7 +466,14 @@
   function ensureShell() {
     const main = document.getElementById('main');
     if (main.querySelector('#invTop')) return;
-    main.innerHTML = `<div id="invConfirm"></div><div id="invPrint" style="margin-bottom:14px"></div><div id="invTop"></div>
+    main.innerHTML = `<div id="invConfirm"></div>
+      <div class="filt" id="invLookup" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <label for="plookup" style="margin:0">Print by invoice number</label>
+        <input class="txt" id="plookup" type="search" autocomplete="off" placeholder="e.g. 1059165" style="width:180px">
+        <button class="btn small" data-act="plookup">Find and add</button>
+        <span class="muted">Live Acumatica. Also for reprinting older invoices.</span>
+      </div>
+      <div id="invPrint" style="margin-bottom:14px"></div><div id="invTop"></div>
       <div class="filt" id="invFilt">
         <div class="fsearch"><label for="fq">Search</label><input class="txt" id="fq" type="search" autocomplete="off" placeholder="Load, trucker, customer, shipment or order…"></div>
         <div class="frow">
@@ -572,6 +607,7 @@
     if (a === 'clear') { V.sel.clear(); render(); return; }
     if (a === 'pclear') { V.psel.clear(); renderPrintPanel(); return; }
     if (a === 'print') { printInvoices([...V.psel]); return; }
+    if (a === 'plookup') { printLookup(); return; }
     if (a === 'selall') {
       const rows = visible().filter(s => selectable(s.shipment_nbr));
       const every = rows.length && rows.every(s => V.sel.has(s.shipment_nbr));
@@ -627,6 +663,9 @@
 
   // Filters apply as you type; debounced so a few hundred rows stay snappy.
   let fTimer = null;
+  document.getElementById('app').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target.id === 'plookup') { e.preventDefault(); printLookup(); }
+  });
   document.getElementById('app').addEventListener('input', e => {
     const t = e.target;
     if (t.id !== 'fq' && !(t.dataset.f && t.tagName === 'INPUT')) return;
