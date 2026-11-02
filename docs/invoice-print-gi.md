@@ -31,6 +31,42 @@ Screen: Generic Inquiry (SM208000). Make it on TEST, then export the GI and impo
 
 Check against the report: open `so643000.rpx` in Report Designer, **Fields** tab. The report's `BillingContact`, `BillingAddress`, `ShippingContact`, `ShippingAddress` show which tables they come from. If your 2024R2 uses different table names than the ones above, use the ones the report uses.
 
+**As built on TEST (2024R2), differences from the table above**
+- Inquiry Title is `DFLInvoicePrint` (no spaces): Acumatica derives the OData name from the title. Aliases are the table defaults (ARInvoice, ARTran, InventoryItem, Terms, SOOrder, ARAddress, ARContact, SOInvoice, SOShippingAddress, SOShippingContact, Customer, Note), not Inv/Tran/etc.
+- Customer is `PX.Objects.AR.Customer` (not the `AR-Customers` BI view). `CustomerID` is `Customer.AcctCD`; `TermsDescr` is `ARInvoice.TermsID_Description`.
+- ARInvoice, SOInvoice and ARTran have no `ShipVia` field in 2024R2. `ShipVia` comes from `SOShipment.ShipVia` (extra Left join ARTran.SOShipmentType/SOShipmentNbr to SOShipment); `SOOrder.ShipVia` is unreliable.
+- Add a floor on `ARInvoice.DocDate` (rolling `@@today-60` or a fixed date) so the OData result stays small. Use the stored status codes H, B, N, C if the labels fail with "Conversion failed when converting the varchar value 'B' to data type bit".
+- TEST data is a copy from about 15 Oct 2026; invoice 1059165 is not there. Test invoice was 1034495 (4 lines, discounts per line, Sales 289,949.10, Tax 43,492.36, Total 333,441.46). Note the form's "Lines Total" (298,901.65) is the gross, and "Sales Total" is ARInvoice.CuryLineTotal, net of line discounts; line tax is 15% of the net line amount.
+
+**OData field names as exposed (no captions were set; Acumatica's defaults).** URL: `https://dflimporters.acumatica.com/odata/TEST/DFLInvoicePrint` (live: same without TEST, or the live tenant name). All money and qty values arrive as strings; dates as ISO datetimes; `DefaultSalesperson` is space-padded (trim). A `_2` suffix is a second field with the same name, assigned by column order in the grid; do not reorder or delete grid rows without rechecking.
+
+| Spec name | OData field | Spec name | OData field |
+|---|---|---|---|
+| RefNbr | ReferenceNbr | ShipName | AccountName_2 |
+| DocType | Type | ShipAddress1/2 | AddressLine1_2 / AddressLine2_2 |
+| DocDate | Date | ShipCity / ShipState | City_2 / State_2 |
+| DueDate | DueDate | ShipCountry / ShipPostal | Country_2 / PostalCode_2 |
+| Status | Status | SalesTotal | DetailTotal |
+| CustomerID | CustomerID | DiscountTotal | GroupandDocumentDiscountTotal |
+| CustomerName | CustomerName | TaxTotal | TaxTotal |
+| CurrencyID | Currency | DocTotal | Amount |
+| TermsID | Terms | LineNbr | LineNbr |
+| TermsDescr | Description | InventoryCD | InventoryID |
+| SalesPersonID | DefaultSalesperson | LineDescr | TransactionDescr |
+| SONumber | OrderNbr | Qty | Quantity |
+| ShipmentNbr | ShipmentNbr | UOM | UOM |
+| CustomerPO | CustomerOrderNbr | UnitPrice | UnitPrice |
+| CustomerRefNbr | ExternalReference | TaxCategory | TaxCategory |
+| ShipVia | ShipVia | ItemTaxCategory | TaxCategory_2 |
+| BillName | AccountName | ExtAmount | Amount_2 |
+| BillAddress1/2 | AddressLine1 / AddressLine2 | LineDiscount | DiscountAmount |
+| BillCity / BillState | City / State | LineNote | NoteText |
+| BillCountry / BillPostal | Country / PostalCode | LastModified | LastModifiedOn |
+
+Checked on invoice 1034003: DetailTotal 1,269,746.95 + TaxTotal 190,462.06 = Amount 1,460,209.01; Amount_2 221,081.00 = Quantity 50 x UnitPrice 4,421.62. PostalCode and PostalCode_2 were null on that row, so the bill/ship postal mapping is by column order and still to be confirmed on a row with a postal code. Other `ARTran`/join key fields (OrderType, OrderNbr_2, TranType, ContactID, AddressID, NoteID, TermsID...) also appear in the feed and can be ignored.
+
+**Live decision:** the line note is not needed on the printed invoice, so on live the `Note` table, its ARTran join and the `LineNote` (`NoteText`) column are removed (the Note join was slow on the live database). The sync must treat `NoteText` as absent/null. TEST still has it. On live the `PostalCode` / `PostalCode_2` mapping is by grid order: the first `PostalCode` is the ship one (`SOShippingAddress`), `PostalCode_2` is the bill one; neither is printed.
+
 ### Conditions (Conditions tab)
 
 - Inv.DocType = `INV`
@@ -102,6 +138,16 @@ Sort: Inv.RefNbr, Tran.LineNbr.
 If the report shows a field differently from the above (for example the form's "Sales" total or the shipping contact), copy what the report uses. Save, run it once on TEST for invoice 1059165, and compare against `SO Invoice 1059165.pdf`:
 Sales 114,710.60, Discount 0.00, Tax 17,206.60, Total 131,917.20; three lines at TX.
 
+### 1b. Fallback if the GI OData call will not run on live (REST instead)
+
+State on 2026-11-02: `DFLInvoicePrint` works in View Inquiry on live (a few seconds) and the OData feed worked on TEST, but on live `/odata/DFL Importers/DFLInvoicePrint?$top=1` (even with `$select=ReferenceNbr`) hangs and ends with `ERR_HTTP2_PROTOCOL_ERROR`, while the existing `InvoicedItems` GI answers instantly. Cause not found (a stripped-down copy of the GI would bisect it).
+
+Use Acumatica's contract-based REST API instead, one call per invoice, so no GI query is involved:
+- Log in with the API user: `POST https://dflimporters.acumatica.com/entity/auth/login` with name, password and company `DFL Importers` (cookie session), and `POST .../entity/auth/logout` after.
+- Fetch: `GET https://dflimporters.acumatica.com/entity/Default/24.200.001/Invoice?$filter=ReferenceNbr eq '1059165'&$expand=Details` (the AR Invoice entity). The SO `SalesInvoice` entity is the alternative if ship-to data, shipment number or ShipVia are only there.
+- Not yet verified against live: which fields these entities expose. Before coding the sync, read the entity definition (`.../entity/Default/24.200.001/$adHocSchema` on `Invoice`, or the swagger at `/entity/Default/24.200.001/swagger.json`) and map to the data contract in section 3. Fields most likely to need a second source: ShipVia (not on ARInvoice/SOInvoice/ARTran; GI used `SOShipment.ShipVia`), SO number and shipment number per line, bill/ship name, stock-item tax category, per-line TaxCategory.
+- Use `$select` and `$expand` to limit the payload, call per invoice (or small batches by RefNbr), and keep the date/LastModified filter for picking up changes.
+
 ## 2. Tax rule used by the print
 
 GCT is 15%. Each taxable line is rounded to 2 decimals (half up) and the rounded line taxes are summed; that must equal `TaxTotal` within 0.05. A line is taxable when `TaxCategory` is `TAXABLE` (or `TX`) and prints `TX`; `NONTAXABLE` prints `NT`. If the numbers don't reconcile, the portal refuses to print and says why. Only the one rate (15% GCT) exists.
@@ -131,3 +177,27 @@ Footer text: "Damaged goods returned after 45 days will not be accepted by DFL. 
 Sample for layout: `SO Invoice 1059165.pdf` in the dispatch folder (one level above the repo).
 
 Supabase side (built by the sync agent): tables `invoice_print_headers` (one row per invoice, header fields above plus `bill`/`ship` jsonb) and `invoice_print_lines` (one row per line), both with RLS limited to supervisor and manager, and a function `invoice_print_fetch(p_refs text[])` returning an array of the objects above.
+
+## 4. REST field mapping used by `sync-invoice-print` (replaces the GI/OData feed)
+
+Verified on live 2026-11-02 against invoice 1059165 (read-only, via a temporary probe; endpoint Default/24.200.001). Login once per run (`POST /entity/auth/login`, company `DFL Importers`, secrets `ACUMATICA_USERNAME` / `ACUMATICA_PASSWORD`), logout in `finally`. REST values are `{ "value": x }`. The function also has a `{"probe":"<ref>"}` mode (raw JSON, stores nothing).
+
+| Contract field | Source (entity.field) |
+|---|---|
+| ref, date, due_date, status | Invoice.ReferenceNbr, Date, DueDate, Status (filter `Type eq 'Invoice'`; status is `Open` for 1059165) |
+| customer_id | Invoice.Customer |
+| customer_name, bill name fallback | Customer.CustomerName (SalesInvoice.BillToContact is null when it inherits the customer's) |
+| currency | SalesInvoice.Currency (not on Invoice) |
+| terms | Invoice.Terms is the ID (`30DAYS`); REST has no Terms entity, so the description is derived: `N DAYS` becomes "Due in N Days", other IDs print as-is. Add a mapping if a term needs different text |
+| sales_total / discount_total | SalesInvoice.DetailTotal / DiscountTotal (not on Invoice) |
+| tax_total / total | Invoice.TaxTotal / Amount |
+| last_modified | Invoice.LastModifiedDateTime (change pickup: `LastModifiedDateTime gt datetimeoffset'...'`) |
+| bill / ship | SalesInvoice.BillToAddress / ShipToAddress (AddressLine1/2, City, State, PostalCode, Country) and ShipToContact.BusinessName, all expanded |
+| so_number, shipment_nbr | SalesInvoice.Details[].OrderNbr / ShipmentNbr (first line that has them) |
+| ship_via | Shipment.ShipVia for that shipment number (here KLOVELACETRK02) |
+| salesperson | SalesOrder.Details[].SalespersonID, first line with one (no header field), here KC |
+| customer_po, customer_ref | SalesOrder.CustomerOrder, ExternalRef (empty on this order) |
+| lines | Invoice.Details[]: LineNbr, InventoryID, TransactionDescription, Qty, UOM, UnitPrice, ExtendedPrice, DiscountAmount, TaxCategory (TAXABLE / NONTAXABLE) |
+| note | always null (not printed) |
+
+Result for 1059165: Sales 114,710.60, Discount 0, Tax 17,206.60, Total 131,917.20, three TAXABLE lines (44,560.00 + 45,237.30 + 24,913.30); 15% of each rounded line sums to 17,206.60 = TaxTotal. Bill-to and ship-to BRAVO SUPERMARKET (no Friday delivery), 5 BRAVO STREET, ST. ANNS BAY, Jamaica; SO 208825; shipment 282168. City and postal code are empty for this customer. `discount_total` is the document-level discount; line discounts are in `DiscountAmount`.
