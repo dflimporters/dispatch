@@ -14,6 +14,12 @@
 //                                                  Open or Back Order, then runs Create Shipment with that
 //                                                  shipment date and reads back the new shipment numbers.
 //                                                  One row per order goes to dispatch_shipment_requests.
+//   ship_invoice { env, orders[], shipment_date }
+//                                               -> coordinator only, pickup / donation / promotion / office
+//                                                  customers only. Create Shipment, then Confirm and Prepare
+//                                                  Invoice, with no pick or check. Up to 3 orders a call.
+//   probe_attachments { env, order }            -> read-only: lists the order's attachments and test-downloads them.
+//   get_po { env, order }                       -> read-only: the order's attached files (customer PO) as base64, for printing.
 //
 // Targets: env 'test' = the TEST tenant on production (refuses unless ACU_SHIPVIA_TENANT is exactly
 // TEST). env 'live' = production, refused until DISPATCH_LIVE_WRITEBACK = 'on' AND
@@ -240,6 +246,41 @@ async function probeAttachments(env: string, order: string) {
       out.push(info);
     }
     return { ok: true, env, order, customer_order: v(r.data?.CustomerOrder), response_keys: Object.keys(r.data ?? {}), file_count: files.length, files: out };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  } finally { await acu.logout(); }
+}
+
+// The order's attached files (the customer's PO), for printing from the Sales Orders page. Read-only; nothing is stored.
+// Returns up to 3 files as base64. An order with nothing attached comes back with an empty list.
+const PO_MAX_FILES = 3, PO_MAX_BYTES = 8_000_000;
+function b64(bytes: Uint8Array): string {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+async function getPo(env: string, order: string) {
+  const t = TARGETS[env]; const why = t.check(); if (why) return { ok: false, error: why };
+  if (!/^[A-Za-z0-9-]{1,15}$/.test(order)) return { ok: false, error: 'bad order number' };
+  const acu = new Acu(t, `orders po ${env}`);
+  try {
+    await acu.login();
+    await acu.lease();
+    const r = await acu.call('GET', `/SalesOrder/SO/${encodeURIComponent(order)}?$expand=files`);
+    if (!r.ok) return { ok: false, error: `couldn't read order ${order}: ${r.status} ${acuError(r.data)}` };
+    const listed: any[] = Array.isArray(r.data?.files) ? r.data.files : [];
+    const files: any[] = [], skipped: string[] = [];
+    for (const f of listed) {
+      const name = String(f.filename ?? f.name ?? 'file').split(/[\\/]/).pop() || 'file';
+      if (!f.href) continue;
+      if (files.length >= PO_MAX_FILES) { skipped.push(`${name} (only the first ${PO_MAX_FILES} files are returned)`); continue; }
+      await acu.lease();
+      const d = await acu.raw(f.href);
+      if (!d.ok) { skipped.push(`${name} (download failed: ${d.status})`); continue; }
+      if (d.bytes.length > PO_MAX_BYTES) { skipped.push(`${name} (too large to print here)`); continue; }
+      files.push({ name, type: d.type.split(';')[0] || 'application/octet-stream', bytes: d.bytes.length, data: b64(d.bytes) });
+    }
+    return { ok: true, order, customer_po: v(r.data?.CustomerOrder), attached: listed.length, files, skipped };
   } catch (e: any) {
     return { ok: false, error: String(e?.message ?? e) };
   } finally { await acu.logout(); }
@@ -481,6 +522,8 @@ Deno.serve(async (req) => {
         return json(await probeCreateShipment(p.env === 'live' ? 'live' : 'test', p.order ? String(p.order) : undefined));
       case 'probe_attachments':
         return json(await probeAttachments(p.env === 'live' ? 'live' : 'test', String(p.order ?? '')));
+      case 'get_po':
+        return json(await getPo(p.env === 'live' ? 'live' : 'test', String(p.order ?? '')));
       case 'create_shipments': {
         const env = p.env === 'live' ? 'live' : 'test';
         const date = String(p.shipment_date ?? '');

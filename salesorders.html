@@ -53,7 +53,7 @@
 <script>
   const STATUSES = ['Open', 'Back Order', 'Shipping', 'Credit Hold', 'On Hold'];
   const CANT_SHIP = ['Credit Hold', 'On Hold'];
-  const S = { rows: [], statuses: ['Open', 'Back Order'], q: '', zone: 'all', sel: new Set(), date: jmDate(0), synced: null, results: null, busy: false, sort: { key: 'order_date', dir: -1 }, tab: loadSoTab() };
+  const S = { rows: [], statuses: ['Open', 'Back Order'], q: '', zone: 'all', sel: new Set(), date: jmDate(0), synced: null, results: null, busy: false, poBusy: null, sort: { key: 'order_date', dir: -1 }, tab: loadSoTab() };
 
   async function callOrders(action, body) {
     const { data: { session } } = await sb.auth.getSession();
@@ -163,7 +163,7 @@
             <td>${esc(r.order_date ? niceDate(r.order_date) + ' ' + r.order_date.slice(0, 4) : '')}</td>
             <td>${esc(r.sched_shipment ? niceDate(r.sched_shipment) + ' ' + r.sched_shipment.slice(0, 4) : '')}</td>
             <td class="r">${fmt(r.open_qty)}</td><td class="r">${fmt(r.open_volume)}</td><td class="r">${money(r.order_total)}</td>
-            <td>${notDue(r) ? `<span class="tag old" title="Acumatica won't ship lines before their Ship On date. Set the shipment date to ${esc(niceDate(r.sched_shipment))} or later.">Ship on ${esc(niceDate(r.sched_shipment))}: set that date</span>` : ''}${r.open_shipments ? `<span class="tag" title="Already on an open shipment">On shipment${r.open_shipments > 1 ? ' ×' + r.open_shipments : ''}</span> ` : ''}${r.short_lines ? `<span class="tag old" title="Open qty is more than on hand at 71 on these lines">Short ${r.short_lines}</span>` : ''}${CANT_SHIP.includes(r.status) ? '<span class="tag old">Can\'t ship</span>' : ''}</td>
+            <td><button class="btn small" data-po="${esc(r.order_nbr)}" ${S.poBusy ? 'disabled' : ''} title="Print the customer's purchase order attached to this sales order">${S.poBusy === r.order_nbr ? 'Opening…' : 'PO'}</button> ${notDue(r) ?`<span class="tag old" title="Acumatica won't ship lines before their Ship On date. Set the shipment date to ${esc(niceDate(r.sched_shipment))} or later.">Ship on ${esc(niceDate(r.sched_shipment))}: set that date</span>` : ''}${r.open_shipments ? `<span class="tag" title="Already on an open shipment">On shipment${r.open_shipments > 1 ? ' ×' + r.open_shipments : ''}</span> ` : ''}${r.short_lines ? `<span class="tag old" title="Open qty is more than on hand at 71 on these lines">Short ${r.short_lines}</span>` : ''}${CANT_SHIP.includes(r.status) ? '<span class="tag old">Can\'t ship</span>' : ''}</td>
           </tr>`).join('')}</tbody></table>` : `<div class="empty">No ${S.tab === 'delivery' ? '' : esc(KINDS[S.tab]) + ' '}${esc(S.statuses.join(' / '))} orders${S.q || S.zone !== 'all' ? ' match that search' : ''}.</div>`}
       </div></div>
       <div class="so-bar">
@@ -238,7 +238,35 @@
     finally { S.busy = false; await refresh(); }
   }
 
+  // The customer's purchase order: the file attached to the sales order in Acumatica. Fetched when the button is clicked
+  // (nothing is stored), opened in a new tab so it can be printed from the browser's viewer.
+  const b64Blob = (b64, type) => { const bin = atob(b64), a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return new Blob([a], { type }); };
+  async function openPo(nbr) {
+    if (S.poBusy) return;
+    const w = window.open('', '_blank');          // opened now, inside the click, so the browser doesn't block it
+    S.poBusy = nbr; render();
+    try {
+      const r = await callOrders('get_po', { env: D.env, order: nbr });
+      if (!r.ok) throw new Error(r.error || "Couldn't read the order's attachments");
+      if (!(r.files || []).length) {
+        if (w) w.close();
+        toast(r.attached ? `Order ${nbr}: ${r.skipped.join('; ')}` : `Order ${nbr} has no PO attached in Acumatica`, !!r.attached);
+        return;
+      }
+      r.files.forEach((f, i) => {
+        const url = URL.createObjectURL(b64Blob(f.data, f.type));
+        const t = i === 0 ? w : window.open('', '_blank');
+        if (t) t.location.href = url; else toast(`Your browser blocked the ${i + 1}${i === 1 ? 'nd' : 'th'} file. Allow pop-ups for this site and try again.`, true);
+        setTimeout(() => URL.revokeObjectURL(url), 5 * 60e3);
+      });
+      if (r.skipped && r.skipped.length) toast(`Opened ${plural(r.files.length, 'file')}. Not opened: ${r.skipped.join('; ')}`, true);
+    } catch (e) { if (w) w.close(); console.error('[salesorders po]', e); toast(errMsg(e), true); }
+    finally { S.poBusy = null; render(); }
+  }
+
   document.getElementById('app').addEventListener('click', async e => {
+    const po = e.target.closest('[data-po]');
+    if (po) { openPo(po.dataset.po); return; }
     if (e.target.closest('[data-create]')) { createShipments(); return; }
     if (e.target.closest('[data-direct]')) { shipAndInvoice(); return; }
     if (e.target.closest('[data-dismiss]')) { S.results = null; render(); return; }
