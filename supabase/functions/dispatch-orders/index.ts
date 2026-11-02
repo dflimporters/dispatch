@@ -123,7 +123,9 @@ class Acu {
   // Binary GET (attachments). Returns the bytes, not parsed JSON.
   async raw(url: string) {
     await this.pace();
-    const res = await fetch(url.startsWith('http') ? url : `${this.entity}${url}`, { headers: { Cookie: this.cookie, Accept: '*/*' } });
+    // A file's href is rooted at the site ("/entity/Default/.../files/<id>"), unlike the entity paths used elsewhere.
+    const full = url.startsWith('http') ? url : url.startsWith('/entity/') ? `${this.t.base}${url}` : `${this.entity}${url}`;
+    const res = await fetch(full, { headers: { Cookie: this.cookie, Accept: '*/*' } });
     return { status: res.status, ok: res.ok, type: res.headers.get('Content-Type') ?? '', disposition: res.headers.get('Content-Disposition') ?? '', bytes: new Uint8Array(await res.arrayBuffer()) };
   }
   // Contract-based actions answer 202 + Location while running, 204 when done.
