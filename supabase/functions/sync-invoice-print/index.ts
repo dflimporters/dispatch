@@ -19,7 +19,7 @@
 // Acumatica vanish here too.
 //
 // Secrets: ACUMATICA_USERNAME / ACUMATICA_PASSWORD (the same ones sync-so-invoices uses). Optional
-// ACUMATICA_COMPANY (default 'DFL Importers'). Values are never logged.
+// ACU_LIVE_TENANT (the tenant to log in to; default 'DFL Importers'). Values are never logged.
 //
 // TODO: TEST tenant. Like sync-so-invoices this reads the live tenant only; keep TEST rows out of the live tables.
 
@@ -28,7 +28,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 const ACUMATICA_BASE_URL   = 'https://dflimporters.acumatica.com';
 const ACUMATICA_USERNAME   = Deno.env.get('ACUMATICA_USERNAME')!;
 const ACUMATICA_PASSWORD   = Deno.env.get('ACUMATICA_PASSWORD')!;
-const ACUMATICA_COMPANY    = Deno.env.get('ACUMATICA_COMPANY') ?? 'DFL Importers';
+const ACUMATICA_COMPANY    = Deno.env.get('ACU_LIVE_TENANT') ?? 'DFL Importers';
 const SUPABASE_URL         = Deno.env.get('SUPABASE_URL')!;
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 
