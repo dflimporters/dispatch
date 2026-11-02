@@ -132,7 +132,7 @@
           <a class="btn small" href="tower.html#load=${l.id}">Open in Control Tower</a>
           ${m && ['ready', 'collected', 'delivering'].includes(m.status) ? '<button class="btn small" data-act="copylink" title="The link the QR code opens, for a driver whose camera is not working">Copy driver link</button><button class="btn small" data-act="sharelink">Send by WhatsApp</button>' : ''}
           <button class="btn small" data-act="printsum" title="One row per stop, with tick boxes for the trucker">Check-off: summary</button>
-          <button class="btn small" data-act="printdet" title="Every item on every invoice, with tick boxes for the trucker">Check-off: detailed</button>
+          <button class="btn small" data-act="printdet" title="Item by item, with the customers taking each, and tick boxes for the trucker">Check-off: by item</button>
           <button class="btn small primary" data-act="print">${m ? 'Reprint load sheet' : 'Print load sheet'}</button>
         </div></div>
       <div class="lstats"><span><b>${esc(l.ship_via || '—')}</b>${l.contractor ? ' · ' + esc(l.contractor) : ''}</span>${l.truck_type ? `<span>${esc(l.truck_type)}</span>` : ''}</div>
@@ -351,17 +351,23 @@
         <tr class="tot"><td></td><td><b>Total</b></td><td></td><td>${plural(stops.reduce((t, x) => t + (x.shipments || []).length, 0), 'invoice')}</td><td class="r">${stops.reduce((t, x) => t + stopLines(x), 0)}</td><td class="r">${qn(stops.reduce((t, x) => t + stopUnits(x), 0))}</td><td></td><td></td><td></td></tr>
       </tbody></table>${checkFoot(s)}</div>`;
   }
+  // Detailed: item first, then each customer taking it. The trucker loads one item for everyone at a time.
   function checkDetailHtml(s) {
-    const stops = s.stops || [];
-    return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: detailed')}
-      ${stops.map(x => `<div class="stop"><div class="stophd"><span class="n">${x.seq}</span><b>${esc(x.customer_name || x.customer_id)}</b>
-          <span>${esc([x.address, x.city].filter(Boolean).join(', '))}</span>${x.zone ? `<span class="z">${esc(x.zone)}</span>` : ''}${x.phone ? `<span>${esc(x.phone)}</span>` : ''}
-          <span class="sp"></span><span>${plural(stopLines(x), 'line')} · ${qn(stopUnits(x))} units</span></div>
-        ${(x.shipments || []).map(i => `<table><thead><tr><th class="b"></th><th>Item</th><th>Description</th><th>UOM</th><th class="r">Qty</th><th class="b">Delivered</th></tr>
-          <tr class="inv"><td colspan="6">Invoice ${esc(i.invoice_nbr || i.shipment_nbr)}${i.invoice_nbr ? ` · shipment ${esc(i.shipment_nbr)}` : ''}</td></tr></thead><tbody>
-          ${(i.lines || []).map(l => `<tr><td class="b"><span class="box"></span></td><td class="mono">${esc(l.inventory_id || '')}</td><td>${esc(l.description || '')}</td><td>${esc(l.uom || '')}</td><td class="r"><b>${qn(l.qty)}</b></td><td class="b"><span class="box"></span></td></tr>`).join('')}
-          </tbody></table>`).join('')}
-        <div class="stopft"><span>Received by: ______________________</span><span>Notes: ______________________________</span></div></div>`).join('')}
+    const items = new Map();
+    (s.stops || []).forEach(st => (st.shipments || []).forEach(i => (i.lines || []).forEach(l => {
+      const k = (l.inventory_id || '') + '|' + (l.uom || '');
+      if (!items.has(k)) items.set(k, { id: l.inventory_id, descr: l.description, uom: l.uom, total: 0, rows: [] });
+      const it = items.get(k);
+      it.total += Number(l.qty || 0);
+      it.rows.push({ seq: st.seq, cust: st.customer_name || st.customer_id, zone: st.zone, inv: i.invoice_nbr || i.shipment_nbr, qty: l.qty });
+    })));
+    const list = [...items.values()].sort((x, y) => String(x.descr || x.id).localeCompare(String(y.descr || y.id), undefined, { numeric: true, sensitivity: 'base' }));
+    return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: by item')}
+      <div class="cmeta"><span><b>Items</b> ${list.length}</span><span><b>Stops</b> ${(s.stops || []).length}</span><span><b>Units</b> ${qn(list.reduce((t, x) => t + x.total, 0))}</span></div>
+      ${list.map(it => `<div class="stop"><div class="stophd"><span class="mono"><b>${esc(it.id || '')}</b></span><span>${esc(it.descr || '')}</span><span class="sp"></span><span>${esc(it.uom || '')}</span><span class="z">Total ${qn(it.total)}</span></div>
+        <table><thead><tr><th class="b">Loaded</th><th>#</th><th>Customer</th><th>Area</th><th>Invoice</th><th class="r">Qty</th><th class="b">Delivered</th></tr></thead><tbody>
+          ${it.rows.map(r => `<tr><td class="b"><span class="box"></span></td><td class="n">${r.seq}</td><td>${esc(r.cust)}</td><td>${esc(r.zone || '')}</td><td class="mono">${esc(r.inv)}</td><td class="r"><b>${qn(r.qty)}</b></td><td class="b"><span class="box"></span></td></tr>`).join('')}
+        </tbody></table></div>`).join('')}
       ${checkFoot(s)}</div>`;
   }
   async function printCheck(id, detail) {
