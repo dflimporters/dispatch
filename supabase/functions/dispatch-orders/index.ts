@@ -120,6 +120,12 @@ class Acu {
     try { data = text ? JSON.parse(text) : null; } catch { data = text.slice(0, 2000); }
     return { status: res.status, ok: res.ok, data, location: res.headers.get('Location') };
   }
+  // Binary GET (attachments). Returns the bytes, not parsed JSON.
+  async raw(url: string) {
+    await this.pace();
+    const res = await fetch(url.startsWith('http') ? url : `${this.entity}${url}`, { headers: { Cookie: this.cookie, Accept: '*/*' } });
+    return { status: res.status, ok: res.ok, type: res.headers.get('Content-Type') ?? '', disposition: res.headers.get('Content-Disposition') ?? '', bytes: new Uint8Array(await res.arrayBuffer()) };
+  }
   // Contract-based actions answer 202 + Location while running, 204 when done.
   async action(path: string, body: unknown) {
     const r = await this.call('POST', path, body);
@@ -203,6 +209,35 @@ async function probeCreateShipment(env: string, order?: string) {
       } else orderInfo = { error: `${r.status} ${acuError(r.data)}` };
     }
     return { ok: true, env, tenant: t.tenant, version: t.version, swagger: sw.status, createShipmentParams: params, order: orderInfo };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  } finally { await acu.logout(); }
+}
+
+// Read-only: do the order's attachments (the customer's PO file) come back through the API, and can they be downloaded?
+// Lists the files on the order and fetches each (up to 5) only to report its size, type and first bytes; nothing is stored or written.
+async function probeAttachments(env: string, order: string) {
+  const t = TARGETS[env]; const why = t.check(); if (why) return { ok: false, error: why };
+  if (!/^[A-Za-z0-9-]{1,15}$/.test(order)) return { ok: false, error: 'bad order number' };
+  const acu = new Acu(t, `orders attachments ${env}`);
+  try {
+    await acu.login();
+    await acu.lease();
+    const r = await acu.call('GET', `/SalesOrder/SO/${encodeURIComponent(order)}?$expand=files`);
+    if (!r.ok) return { ok: false, error: `read ${r.status} ${acuError(r.data)}` };
+    const files: any[] = Array.isArray(r.data?.files) ? r.data.files : [];
+    const out: any[] = [];
+    for (const f of files.slice(0, 5)) {
+      const info: any = { name: f.name ?? f.filename ?? null, id: f.id ?? null, href: f.href ?? null, keys: Object.keys(f) };
+      if (f.href) {
+        await acu.lease();
+        const d = await acu.raw(f.href);
+        info.download = { status: d.status, type: d.type, disposition: d.disposition, bytes: d.bytes.length,
+          magic: new TextDecoder().decode(d.bytes.slice(0, 5)).replace(/[^\x20-\x7e]/g, '?') };
+      }
+      out.push(info);
+    }
+    return { ok: true, env, order, customer_order: v(r.data?.CustomerOrder), response_keys: Object.keys(r.data ?? {}), file_count: files.length, files: out };
   } catch (e: any) {
     return { ok: false, error: String(e?.message ?? e) };
   } finally { await acu.logout(); }
@@ -442,6 +477,8 @@ Deno.serve(async (req) => {
         return json({ ok: true, orders: await listTestOrders() });
       case 'probe_create_shipment':
         return json(await probeCreateShipment(p.env === 'live' ? 'live' : 'test', p.order ? String(p.order) : undefined));
+      case 'probe_attachments':
+        return json(await probeAttachments(p.env === 'live' ? 'live' : 'test', String(p.order ?? '')));
       case 'create_shipments': {
         const env = p.env === 'live' ? 'live' : 'test';
         const date = String(p.shipment_date ?? '');
