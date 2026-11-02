@@ -53,7 +53,7 @@
 <script>
   const STATUSES = ['Open', 'Back Order', 'Shipping', 'Credit Hold', 'On Hold'];
   const CANT_SHIP = ['Credit Hold', 'On Hold'];
-  const S = { rows: [], statuses: ['Open', 'Back Order'], q: '', zone: 'all', sel: new Set(), date: jmDate(0), synced: null, results: null, busy: false, sort: { key: 'order_date', dir: -1 }, tab: loadKindTab() };
+  const S = { rows: [], statuses: ['Open', 'Back Order'], q: '', zone: 'all', sel: new Set(), date: jmDate(0), synced: null, results: null, busy: false, sort: { key: 'order_date', dir: -1 }, tab: loadSoTab() };
 
   async function callOrders(action, body) {
     const { data: { session } } = await sb.auth.getSession();
@@ -104,7 +104,7 @@
     const q = S.q.trim().toLowerCase();
     const k = S.sort.key, d = S.sort.dir;
     const num = ['open_qty', 'open_volume', 'order_total'].includes(k);
-    return S.rows.filter(r => (S.tab === 'special') === !!kindOf(r) && (S.zone === 'all' || r.shipping_zone === S.zone)
+    return S.rows.filter(r => (kindOf(r) || 'delivery') === S.tab && (S.zone === 'all' || r.shipping_zone === S.zone)
       && (!q || [r.order_nbr, r.customer_name, r.customer_id].some(v => String(v || '').toLowerCase().includes(q))))
       .sort((a, b) => d * (num ? (a[k] - b[k])
         : String(a[k] || '').localeCompare(String(b[k] || ''), undefined, { numeric: true, sensitivity: 'base' }))
@@ -122,8 +122,9 @@
   function render() {
     const rows = visible();
     const zones = [...new Set(S.rows.map(r => r.shipping_zone).filter(Boolean))].sort();
-    const counts = { special: S.rows.filter(r => kindOf(r)).length };
-    counts.delivery = S.rows.length - counts.special;
+    const counts = {};
+    S.rows.forEach(r => { const k = kindOf(r) || 'delivery'; counts[k] = (counts[k] || 0) + 1; });
+    const direct = S.tab !== 'delivery';   // pickup / donation / promotion / office: can go straight to invoice
     const picked = S.rows.filter(r => S.sel.has(r.order_nbr));
     const ready = rows.filter(canShip);
     document.getElementById('main').innerHTML = `
@@ -131,7 +132,7 @@
         ? '<b>TEST:</b> these are the Open and Back Order orders in the Acumatica TEST tenant. Creating shipments here changes TEST only.'
         : '<b>LIVE:</b> production orders. Creating shipments goes to live Acumatica once that has been switched on after the TEST run.'}</div>
       ${S.results ? resultsHtml() : ''}
-      ${kindTabsHtml(S.tab, counts)}
+      ${kindTabs5Html(S.tab, counts)}
       <div class="so-ctl">
         <div class="so-chips" id="stChips" role="group" aria-label="Order status">
           ${STATUSES.map(s => `<button data-st="${esc(s)}" class="${S.statuses.includes(s) ? 'on' : ''}">${esc(s)}</button>`).join('')}
@@ -163,22 +164,25 @@
             <td>${esc(r.sched_shipment ? niceDate(r.sched_shipment) + ' ' + r.sched_shipment.slice(0, 4) : '')}</td>
             <td class="r">${fmt(r.open_qty)}</td><td class="r">${fmt(r.open_volume)}</td><td class="r">${money(r.order_total)}</td>
             <td>${notDue(r) ? `<span class="tag old" title="Acumatica won't ship lines before their Ship On date. Set the shipment date to ${esc(niceDate(r.sched_shipment))} or later.">Ship on ${esc(niceDate(r.sched_shipment))}: set that date</span>` : ''}${r.open_shipments ? `<span class="tag" title="Already on an open shipment">On shipment${r.open_shipments > 1 ? ' ×' + r.open_shipments : ''}</span> ` : ''}${r.short_lines ? `<span class="tag old" title="Open qty is more than on hand at 71 on these lines">Short ${r.short_lines}</span>` : ''}${CANT_SHIP.includes(r.status) ? '<span class="tag old">Can\'t ship</span>' : ''}</td>
-          </tr>`).join('')}</tbody></table>` : `<div class="empty">No ${S.tab === 'special' ? 'pickup / donation / promotion ' : ''}${esc(S.statuses.join(' / '))} orders${S.q || S.zone !== 'all' ? ' match that search' : ''}.</div>`}
+          </tr>`).join('')}</tbody></table>` : `<div class="empty">No ${S.tab === 'delivery' ? '' : esc(KINDS[S.tab]) + ' '}${esc(S.statuses.join(' / '))} orders${S.q || S.zone !== 'all' ? ' match that search' : ''}.</div>`}
       </div></div>
       <div class="so-bar">
         <span><b>${plural(picked.length, 'order')}</b> selected · volume ${fmt(picked.reduce((t, r) => t + r.open_volume, 0))} · ${money(picked.reduce((t, r) => t + r.order_total, 0))}</span>
         <span class="spacer"></span>
         <label>Shipment date <input type="date" id="shipDate" min="${jmDate(0)}" value="${esc(S.date)}"></label>
-        <button class="btn primary" data-create ${picked.length && !S.busy ? '' : 'disabled'}>${S.busy ? 'Creating…' : 'Create shipments'}</button>
+        ${direct ? `<button class="btn" data-create ${picked.length && !S.busy ? '' : 'disabled'} title="Makes the shipment only; it then goes through picking and checking as usual">Create shipments only</button>
+        <button class="btn primary" data-direct ${picked.length && !S.busy ? '' : 'disabled'} title="Creates the shipment, confirms it and prepares the invoice in Acumatica, with no picking or checking">${S.busy ? 'Working…' : 'Ship and invoice'}</button>`
+        : `<button class="btn primary" data-create ${picked.length && !S.busy ? '' : 'disabled'}>${S.busy ? 'Creating…' : 'Create shipments'}</button>`}
       </div>`;
   }
 
   function resultsHtml() {
-    const cls = { created: 'ok', none: 'warn', refused: 'bad', failed: 'bad', skipped: 'warn' };
-    const word = { created: 'Created', none: 'No shipment', refused: 'Refused', failed: 'Failed', skipped: 'Skipped' };
-    const made = S.results.filter(r => r.state === 'created').length;
+    const cls = { created: 'ok', invoiced: 'ok', none: 'warn', refused: 'bad', failed: 'bad', skipped: 'warn' };
+    const word = { created: 'Created', invoiced: 'Invoiced', none: 'No shipment', refused: 'Refused', failed: 'Failed', skipped: 'Skipped' };
+    const made = S.results.filter(r => ['created', 'invoiced'].includes(r.state)).length;
+    const inv = S.results.filter(r => r.state === 'invoiced').length;
     return `<div class="card" style="margin-bottom:12px;padding:12px 14px">
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><b>${made} of ${S.results.length} order${S.results.length === 1 ? '' : 's'} got a shipment</b>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><b>${made} of ${S.results.length} order${S.results.length === 1 ? '' : 's'} got a shipment${inv ? `, ${inv} invoiced` : ''}</b>
         <span class="spacer" style="flex:1"></span><button class="btn small" data-dismiss>Dismiss</button></div>
       ${S.results.map(r => `<div style="padding:4px 0;border-top:1px solid #f1f5f9;font-size:13px"><b>${esc(r.order_nbr)}</b>
         <span class="pill ${cls[r.state] || 'done'}">${esc(word[r.state] || r.state)}</span>
@@ -206,8 +210,37 @@
     finally { S.busy = false; await refresh(); }
   }
 
+  // Pickup / donation / promotion / DFL Office orders: shipment, confirm and prepare invoice in Acumatica in one go, with no
+  // picking or checking. One order per request (each takes a while), so the results fill in as they finish.
+  async function shipAndInvoice() {
+    if (S.busy) return;
+    const orders = [...S.sel];
+    if (!orders.length) return;
+    const where = D.env === 'test' ? 'Acumatica TEST' : 'live Acumatica';
+    if (!confirm(`Ship and invoice ${plural(orders.length, 'order')} dated ${niceDate(S.date)} ${S.date.slice(0, 4)} in ${where}?\n\nEach order gets a shipment that is confirmed and invoiced straight away, with no picking or checking. Everything Acumatica has available is shipped. Releasing the invoice stays with Accounts.`)) return;
+    S.busy = true; S.results = [];
+    try {
+      for (let i = 0; i < orders.length; i++) {
+        toast(`Order ${i + 1} of ${orders.length}: ${orders[i]}…`);
+        let r;
+        try {
+          const j = await callOrders('ship_invoice', { env: D.env, orders: [orders[i]], shipment_date: S.date });
+          r = (j.results && j.results[0]) || { order_nbr: orders[i], state: 'failed', detail: j.error || 'No answer' };
+          if (!j.ok && !(j.results && j.results.length)) r = { order_nbr: orders[i], state: 'failed', detail: j.error || 'Failed' };
+        } catch (e) { r = { order_nbr: orders[i], state: 'failed', detail: errMsg(e) }; }
+        S.results.push(r);
+        if (['created', 'invoiced'].includes(r.state)) S.sel.delete(orders[i]);
+        render();
+      }
+      const n = S.results.filter(x => x.state === 'invoiced').length;
+      toast(`${plural(n, 'order')} invoiced`, n < orders.length);
+    } catch (e) { console.error('[salesorders]', e); toast(errMsg(e), true); }
+    finally { S.busy = false; await refresh(); }
+  }
+
   document.getElementById('app').addEventListener('click', async e => {
     if (e.target.closest('[data-create]')) { createShipments(); return; }
+    if (e.target.closest('[data-direct]')) { shipAndInvoice(); return; }
     if (e.target.closest('[data-dismiss]')) { S.results = null; render(); return; }
     const th = e.target.closest('th[data-sort]');
     if (th) {
@@ -216,7 +249,7 @@
       render(); return;
     }
     const kt = e.target.closest('[data-ktab]');
-    if (kt) { S.tab = kt.dataset.ktab; saveKindTab(S.tab); render(); return; }
+    if (kt) { S.tab = kt.dataset.ktab; saveSoTab(S.tab); render(); return; }
     const st = e.target.closest('[data-st]');
     if (!st) return;
     const s = st.dataset.st;

@@ -410,7 +410,7 @@ async function fetchLoads(date, opts) {
 // hand-kept list). Shipments on a PICKUP* ship via count as pickup whatever the customer.
 // If the lookup fails the pages still work; only the ship-via rule applies.
 // ------------------------------------------------------------------
-const KINDS = { pickup: 'Pickup', donation: 'Donation', promotion: 'Promotion' };
+const KINDS = { pickup: 'Pickup', donation: 'Donation', promotion: 'Promotion', office: 'DFL Office' };
 const _kinds = { map: new Map(), at: 0 };
 async function loadKinds() {
   if (Date.now() - _kinds.at < 5 * 60e3) return;
@@ -443,6 +443,14 @@ function kindTabsHtml(cur, counts) {
     <button role="tab" data-ktab="delivery" class="${cur === 'delivery' ? 'on' : ''}">Delivery · ${counts.delivery}</button>
     <button role="tab" data-ktab="special" class="${cur === 'special' ? 'on' : ''}">Pickup / Donation / Promotion · ${counts.special}</button></div>`;
 }
+// Sales Orders tab switch: Delivery plus one tab per kind. counts = {delivery, pickup, donation, promotion, office}.
+const SO_TABS = ['delivery', ...Object.keys(KINDS)];
+function kindTabs5Html(cur, counts) {
+  return `<div class="seg kindtabs" role="tablist" aria-label="Order type">${SO_TABS.map(k =>
+    `<button role="tab" data-ktab="${k}" class="${cur === k ? 'on' : ''}">${k === 'delivery' ? 'Delivery' : KINDS[k]} · ${counts[k] || 0}</button>`).join('')}</div>`;
+}
+function loadSoTab() { try { const t = localStorage.getItem('dispatch-sotab'); return SO_TABS.includes(t) ? t : 'delivery'; } catch (e) { return 'delivery'; } }
+function saveSoTab(t) { try { localStorage.setItem('dispatch-sotab', t); } catch (e) {} }
 function loadKindTab() { try { return localStorage.getItem('dispatch-kindtab') === 'special' ? 'special' : 'delivery'; } catch (e) { return 'delivery'; } }
 function saveKindTab(t) { try { localStorage.setItem('dispatch-kindtab', t); } catch (e) {} }
 

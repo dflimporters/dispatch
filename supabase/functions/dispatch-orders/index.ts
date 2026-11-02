@@ -335,6 +335,88 @@ async function createShipments(env: string, orders: string[], date: string, acto
 }
 
 // ------------------------------------------------------------------
+// ship_invoice: pickup / donation / promotion / DFL Office orders go straight to an invoice, with no picking or
+// checking. Per order: Create Shipment (as above), then per new shipment take it off hold, set Control Qty to the
+// shipped total, Confirm, and Prepare Invoice. The invoice is left unreleased (Accounts releases it).
+// A step that fails after the shipment exists is reported as state 'created' with what is left to do by hand.
+const EDITABLE = ['Open', 'On Hold'];
+async function specialCustomers(orders: string[]): Promise<Map<string, string>> {
+  const { data: so } = await admin.from('sales_orders').select('order_nbr, customer').eq('order_type', 'SO').in('order_nbr', orders);
+  const custOf = new Map<string, string>((so ?? []).map((r: any) => [r.order_nbr, r.customer]));
+  const ids = [...new Set([...custOf.values()].filter(Boolean))];
+  const kind = new Map<string, string>();
+  if (ids.length) {
+    const { data: ov } = await admin.from('customer_kind_overrides').select('customer_id, kind').in('customer_id', ids);
+    (ov ?? []).forEach((o: any) => kind.set(o.customer_id, o.kind));
+    const { data: cs } = await admin.from('customers').select('customer_id, customer_class').in('customer_id', ids);
+    (cs ?? []).forEach((c: any) => { if (!kind.has(c.customer_id) && String(c.customer_class ?? '').toUpperCase() === 'PROMOTION') kind.set(c.customer_id, 'promotion'); });
+  }
+  return new Map(orders.map(o => [o, kind.get(custOf.get(o) ?? '') ?? '']));
+}
+
+async function confirmAndInvoice(acu: Acu, env: string, nbr: string, actor: string): Promise<string> {
+  const mirror = env === 'test' ? 'shipments_test' : 'shipments';
+  const sel = 'ShipmentNbr,Status,ShipVia,Hold,ShippedQty,ControlQty';
+  const read = async () => {
+    await acu.lease();
+    const r = await acu.call('GET', `/Shipment/${encodeURIComponent(nbr)}?$select=${sel}`);
+    if (!r.ok) throw new Error(`couldn't read ${nbr}: ${r.status} ${acuError(r.data)}`);
+    return { id: r.data?.id as string, status: v(r.data?.Status) as string, via: v(r.data?.ShipVia), qty: Number(v(r.data?.ShippedQty)) || 0 };
+  };
+  let sh = await read();
+  if (!['Confirmed', 'Completed', 'Invoiced'].includes(sh.status)) {
+    if (!EDITABLE.includes(sh.status)) throw new Error(`shipment ${nbr} is ${sh.status}, not Open`);
+    if (!sh.via) throw new Error(`shipment ${nbr} has no Ship Via (set one in Acumatica, then confirm it there)`);
+    if (sh.qty <= 0) throw new Error(`shipment ${nbr} has nothing to ship (shipped qty 0)`);
+    const ctl = await acu.call('PUT', `/Shipment?$select=${sel}`, { id: sh.id, Hold: { value: false }, ControlQty: { value: sh.qty } });
+    if (!ctl.ok) throw new Error(`Control Qty refused on ${nbr}: ${ctl.status} ${acuError(ctl.data)}`);
+    await acu.lease();
+    await acu.action('/Shipment/ConfirmShipment', { entity: { id: sh.id } });
+    sh = await read();
+    if (sh.status !== 'Confirmed') throw new Error(`shipment ${nbr} is ${sh.status} after Confirm, not Confirmed`);
+  }
+  await admin.from(mirror).update({ status: sh.status }).eq('shipment_nbr', nbr);
+  if (sh.status === 'Confirmed') {
+    await acu.lease();
+    await acu.action('/Shipment/PrepareInvoice', { entity: { id: sh.id } });
+    sh = await read();
+    if (sh.status === 'Confirmed') throw new Error(`Prepare Invoice ran on ${nbr}, but it is still Confirmed`);
+    await admin.from(mirror).update({ status: sh.status }).eq('shipment_nbr', nbr);
+  }
+  const now = new Date().toISOString();
+  await admin.from('shipment_invoicing').upsert({ env, shipment_nbr: nbr, state: 'done', detail: 'Shipped and invoiced from Sales Orders', requested_by: actor, requested_at: now, finished_at: now, updated_at: now }, { onConflict: 'env,shipment_nbr' });
+  return sh.status;
+}
+
+async function shipInvoice(env: string, orders: string[], date: string, actor: string) {
+  const t = TARGETS[env]; const why = t.check(); if (why) return { ok: false, error: why };
+  if (env === 'live' && (Deno.env.get('DISPATCH_LIVE_INVOICE') !== 'on' || Deno.env.get('DISPATCH_LIVE_CHECKER') !== 'on'))
+    return { ok: false, error: 'Confirming and invoicing live shipments isn\'t switched on yet (DISPATCH_LIVE_INVOICE and DISPATCH_LIVE_CHECKER).' };
+  const kinds = await specialCustomers(orders);
+  const results: any[] = [];
+  for (const nbr of orders) {
+    if (!kinds.get(nbr)) { results.push({ order_nbr: nbr, state: 'refused', detail: 'Only pickup, donation, promotion and DFL Office orders can skip picking and checking' }); continue; }
+    const made = await createShipments(env, [nbr], date, actor);
+    const r = ((made as any).results ?? [])[0] ?? { order_nbr: nbr, state: 'failed', detail: (made as any).error ?? 'No result' };
+    if (r.state !== 'created' || !(r.shipments ?? []).length) { results.push(r); continue; }
+    const acu = new Acu(t, `orders invoice ${env}`);
+    const done: string[] = [], notes: string[] = [];
+    try {
+      await acu.login();
+      for (const sn of r.shipments) {
+        try { await confirmAndInvoice(acu, env, sn, actor); done.push(sn); }
+        catch (e: any) { notes.push(String(e?.message ?? e).slice(0, 300)); }
+      }
+    } catch (e: any) { notes.push(String(e?.message ?? e).slice(0, 300)); }
+    finally { await acu.logout(); }
+    const all = done.length === r.shipments.length;
+    results.push({ ...r, state: all ? 'invoiced' : 'created',
+      detail: all ? `Confirmed and invoice prepared (${kinds.get(nbr)})${r.detail ? `. ${r.detail}` : ''}` : `Shipment made but not fully invoiced: ${notes.join('; ')}. Finish it in Acumatica or on the Invoicing page.` });
+  }
+  return { ok: true, results };
+}
+
+// ------------------------------------------------------------------
 Deno.serve(async (req) => {
   const headers = { ...cors(), 'Content-Type': 'application/json' };
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers });
@@ -367,6 +449,14 @@ Deno.serve(async (req) => {
         const orders = [...new Set((Array.isArray(p.orders) ? p.orders : []).map((o: any) => String(o).trim()).filter((o: string) => /^[A-Za-z0-9-]{1,15}$/.test(o)))] as string[];
         if (!orders.length || orders.length > 20) return json({ ok: false, error: 'Select 1 to 20 orders' }, 400);
         return json(await createShipments(env, orders, date, actor));
+      }
+      case 'ship_invoice': {
+        const env = p.env === 'live' ? 'live' : 'test';
+        const date = String(p.shipment_date ?? '');
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < jmToday()) return json({ ok: false, error: 'Shipment date must be today or later' }, 400);
+        const orders = [...new Set((Array.isArray(p.orders) ? p.orders : []).map((o: any) => String(o).trim()).filter((o: string) => /^[A-Za-z0-9-]{1,15}$/.test(o)))] as string[];
+        if (!orders.length || orders.length > 3) return json({ ok: false, error: 'Select 1 to 3 orders per request' }, 400);
+        return json(await shipInvoice(env, orders, date, actor));
       }
       default:
         return json({ ok: false, error: `unknown action ${p.action}` }, 400);

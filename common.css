@@ -105,6 +105,7 @@ select, .field input, .field textarea, input.txt {
 .tag.kind { background:#ede9fe; color:#5b21b6; font-size:11px; }
 .tag.kind-donation { background:#fce7f3; color:#9d174d; }
 .tag.kind-promotion { background:#ccfbf1; color:#115e59; }
+.tag.kind-office { background:#e0f2fe; color:#075985; }
 .kindtabs { margin-bottom:12px; flex-wrap:wrap; }
 
 .num { font-variant-numeric:tabular-nums; }
