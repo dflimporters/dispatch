@@ -1,7 +1,7 @@
 // Service worker for the OMS driver app: keeps the app shell and the two pinned
 // libraries available with no signal. Data calls (Supabase) always go to the network;
 // the app keeps its own copy of the load in localStorage.
-const CACHE = 'lm-driver-v5';
+const CACHE = 'lm-driver-v7';
 const SHELL = [
   './', 'index.html', 'driver.css', 'tokens.css', 'app.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png',
   '../assets/dfl-logo-white.png',

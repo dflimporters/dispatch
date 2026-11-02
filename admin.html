@@ -189,6 +189,7 @@
     'load.ship_via': 'Load trucker (ShipVia) changed', 'load.reassign': 'Trucker reassigned', 'load.closed': 'Load closed', 'load.reopened': 'Load reopened',
     'load.sheet_reprint': 'Load sheet reprinted', 'load.unconfirm': 'Trucker confirmation undone', 'load.pick_reopen': 'Pick reopened',
     'load.check_reopen': 'Check reopened', 'load.unstick': 'Marked stuck', 'load.delete': 'Load deleted', 'load.pull_back': 'Pulled back', 'load.return': 'Sent back to coordinator',
+    'load.release': 'Released without check',
     'shipment.ship_via': 'Shipment ShipVia changed', 'return.status': 'Return status', 'sync.run_now': 'Sync run now',
   };
   const actionLabel = a => ACTION_LABELS[a] || a;
@@ -276,7 +277,11 @@
           ${waveTag(l.wave)} <span class="pill ${l.env === 'live' ? 'ok' : 'info'}">${l.env === 'live' ? 'Live' : 'Test'}</span>
           ${statusPill(l.status)} ${l.check_status ? `<span class="pill ${l.check_status === 'confirmed' ? 'ok' : 'warn'}">Check: ${esc(l.check_status)}</span>` : ''}
           ${loadOriginTags(l)}
+          ${l.released_at ? '<span class="pill info" title="' + esc(l.released_reason || '') + '">Released without check</span>' : ''}
+          ${['done', 'partial'].includes(l.status) && l.check_status !== 'confirmed' && l.check_status !== 'confirming' && !l.confirm_requested_at && d.shipments.length && (isAdmin() || D.me.roles.includes('supervisor'))
+            ? '<button class="btn small danger" id="release-load" style="margin-left:auto" title="For a load that already left without being picked and checked here">Release without check</button>' : ''}
         </div>
+        ${l.released_at ? `<div class="warnbox info">Released without check by ${esc(l.released_name || '')} at ${esc(fullStamp(l.released_at))}: ${esc(l.released_reason || '')}</div>` : ''}
         <div class="kv">
           <div><small>Date</small>${esc(niceDate(l.load_date))}</div>
           <div><small>Trucker (ShipVia)</small>${esc(l.ship_via || '—')}${l.contractor ? ' · ' + esc(l.contractor) : ''}</div>
@@ -350,6 +355,16 @@
     m.querySelector('#lq-go').onclick = go;
     m.querySelector('#lq').onkeydown = e => { if (e.key === 'Enter') go(); };
     m.querySelectorAll('[data-open]').forEach(b => b.onclick = () => { location.hash = 'load=' + b.dataset.open; });
+    const rel = m.querySelector('#release-load');
+    if (rel) rel.onclick = async () => {
+      const l = A.load.load;
+      const why = prompt(`Release ${l.load_nbr} without pick / check?\n\nUse this only when the goods already left and the invoices are already done. It leaves Picking, Checker and Invoicing and shows on Control Tower ready for a load sheet. Nothing is written to Acumatica.\n\nWhy is it being released?`);
+      if (why == null) return;
+      if (!why.trim()) { toast('Say why the load is being released', true); return; }
+      try { await rpc('dispatch_release_unchecked', { p_load_id: l.id, p_reason: why.trim() }); toast(`${l.load_nbr} released`); await openLoad(l.id); }
+      catch (e) { toast(errMsg(e), true); }
+      draw();
+    };
   }
 
   // ------------------------------------------------------------------

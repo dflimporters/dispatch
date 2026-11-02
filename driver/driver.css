@@ -135,3 +135,6 @@ select.txt { appearance:auto; }
 .crow .cwho small { display:block; font-size:12px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:.4px; }
 .crow .btn.small { padding:9px 14px; font-weight:700; }
 .crow .btn.wa { background:#25d366; border-color:#25d366; color:#06371b; }
+
+/* Checklist progress stays in view while scrolling */
+.stickyprog { position:sticky; top:0; z-index:5; background:var(--bg); padding:8px 2px 10px; margin-bottom:6px; border-bottom:1px solid var(--border); }

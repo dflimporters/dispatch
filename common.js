@@ -295,9 +295,9 @@ async function startPage({ page, role, title, onReady, onEnvChange }) {
   // index.html is just a landing page that links to these, so it isn't in the nav.
   const links = [['batcher.html', 'Coordinator', 'batcher'], ['salesorders.html', 'Sales Orders', 'batcher', 'salesorders'], ['transfers.html', 'Transfers', 'batcher', 'transfers'],
                  ['clerk.html', 'Trucker Liaison', 'clerk'], ['picking.html', 'Picking', 'picker'], ['checker.html', 'Checker', 'checker'],
-                 ['tower.html', 'Control Tower', ['batcher', 'clerk', 'supervisor', 'manager'], 'tower'],
-                 ['loadsheet.html', 'Load sheets', ['batcher', 'clerk', 'supervisor', 'manager'], 'loadsheet'],
-                 ['returns.html', 'Returns', ['batcher', 'clerk', 'supervisor', 'manager'], 'returns'],
+                 ['tower.html', 'Control Tower', ['supervisor', 'manager'], 'tower'],
+                 ['loadsheet.html', 'Load sheets', ['supervisor', 'manager'], 'loadsheet'],
+                 ['returns.html', 'Returns', ['supervisor', 'manager'], 'returns'],
                  ['security.html', 'Security check', ['security', 'supervisor', 'manager'], 'security'],
                  ['contacts.html', 'Contacts', ['supervisor', 'manager'], 'contacts'],
                  ['invoicing.html', 'Invoicing', 'supervisor'], ['dashboard.html', 'Dashboard', ['manager', 'supervisor'], 'dashboard'],
@@ -448,9 +448,13 @@ function saveKindTab(t) { try { localStorage.setItem('dispatch-kindtab', t); } c
 
 // Search box on the picker / checker lists: every word has to appear in the load's number,
 // ship via, trucker, truck, zones, or any of its shipments' customer, zone or number.
+// Load numbers are found with or without dashes and spaces: "L-1030-PM-05", "l 1030 pm 05", "1030pm05".
+function compactNbr(s) { return String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]/g, ''); }
+function nbrMatches(nbr, q) { const c = compactNbr(q); return c.length >= 3 && compactNbr(nbr).includes(c); }
 function loadMatches(l, q) {
   const words = String(q || '').toLowerCase().split(/\s+/).filter(Boolean);
   if (!words.length) return true;
+  if (nbrMatches(l.load_nbr, q)) return true;
   if (!l._hay) {
     l._hay = [l.load_nbr, l.ship_via, l.contractor, l.truck_type, (l.zones || []).join(' '),
       ...l.ships.map(s => [s.shipment_nbr, s.row && s.row.customer_name, s.row && s.row.customer_id, s.row && s.row.shipping_zone].join(' '))
