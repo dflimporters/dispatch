@@ -132,7 +132,7 @@
           <a class="btn small" href="tower.html#load=${l.id}">Open in Control Tower</a>
           ${m && ['ready', 'collected', 'delivering'].includes(m.status) ? '<button class="btn small" data-act="copylink" title="The link the QR code opens, for a driver whose camera is not working">Copy driver link</button><button class="btn small" data-act="sharelink">Send by WhatsApp</button>' : ''}
           <button class="btn small" data-act="printsum" title="One row per stop, with tick boxes for the trucker">Check-off: summary</button>
-          <button class="btn small" data-act="printdet" title="Item by item, with the customers taking each, and tick boxes for the trucker">Check-off: by item</button>
+          <button class="btn small" data-act="printdet" title="Item by item, with the customers taking each, and tick boxes for the trucker">Check-off: Detailed</button>
           <button class="btn small primary" data-act="print">${m ? 'Reprint load sheet' : 'Print load sheet'}</button>
         </div></div>
       <div class="lstats"><span><b>${esc(l.ship_via || '—')}</b>${l.contractor ? ' · ' + esc(l.contractor) : ''}</span>${l.truck_type ? `<span>${esc(l.truck_type)}</span>` : ''}</div>
