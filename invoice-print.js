@@ -5,7 +5,8 @@
  *   InvoicePrint.show(pages)       -> adds body.printing, fills #printWrap, calls window.print()
  *
  * opts.reprint = { n: 2 }   marks every sheet REPRINT 2 (header tag + diagonal watermark). First prints pass no reprint.
- * opts.logo                 logo URL, default 'assets/dfl-logo-color.png' (relative to the host page)
+ * opts.slip = true          DELIVERY SLIP instead of a tax invoice: same layout, no prices, tax or totals (donation / promotion orders)
+ * opts.logo              logo URL, default 'assets/dfl-logo-color.png' (relative to the host page)
  *
  * Host page contract (same pattern as invoicing.html):
  *   <div id="printWrap" aria-hidden="true"></div>   direct child of <body>, hidden on screen by the host (display:none)
@@ -156,6 +157,7 @@
 .ip-ref div:first-child { border-left:0; }
 .ip-ref i { display:block; font-style:normal; font-weight:700; font-size:8pt; }
 .ip-th, .ip-row { display:grid; grid-template-columns:4ch 38ch 11ch 7ch 15ch 6ch 1fr; }
+.ip-sl .ip-th, .ip-sl .ip-row { grid-template-columns:4ch 52ch 11ch 1fr; }
 .ip-th { margin-top:8pt; height:16pt; line-height:16pt; font-weight:700; border-top:1pt solid #000; border-bottom:1pt solid #000; }
 .ip-th .r, .ip-row .r { text-align:right; }
 .ip-th .c, .ip-row .c { text-align:center; }
@@ -204,21 +206,24 @@
     const last = pg === npages - 1;
     const rp = opts.reprint && opts.reprint.n ? opts.reprint.n : 0;
     const cur = inv.currency || 'JMD';
+    const slip = !!opts.slip;
     const body = rows.map(r => {
       const l = r.l;
+      if (slip) return `<div class="ip-row"><div>${esc(l.n)}</div><div>${r.item.map(esc).join('\n')}</div><div class="r">${money(l.qty)}</div><div class="u">${esc(l.uom)}</div></div>`
+        + (r.note.length ? `<div class="ip-row ip-note" style="display:block;margin-bottom:${ROW_GAP}pt">${r.note.map(esc).join('\n')}</div>` : '');
       return `<div class="ip-row"><div>${esc(l.n)}</div><div>${r.item.map(esc).join('\n')}</div><div class="r">${money(l.qty)}</div><div class="u">${esc(l.uom)}</div><div class="r">${money(l.unit_price)}</div><div class="c">${esc(taxLabel(l.tax_cat))}</div><div class="r">${money(l.amount)}</div></div>`
         + (r.note.length ? `<div class="ip-row ip-note" style="display:block;margin-bottom:${ROW_GAP}pt">${r.note.map(esc).join('\n')}</div>` : '');
     }).join('');
     const foot = last ? `<div class="ip-foot"><div class="ip-fl"><p>${esc(DISCLAIMER)}</p><p>RECEIVED IN GOOD CONDITION BY:</p><div class="ip-sig">CUSTOMER NAME:_____________ SIGNATURE:_________________</div><div class="ip-sig" style="margin-top:4pt">TRUCKER NAME: ________________ SIGNATURE:____________________</div></div>`
-      + `<div class="ip-tot"><div><span>Sales</span><span>${money(inv.sales_total)}</span></div><div><span>Discount:</span><span>${money(inv.discount_total)}</span></div><div><span>Tax Total:</span><span>${money(inv.tax_total)}</span></div><div><span>Total (${esc(cur)}):</span><span>${money(inv.total)}</span></div></div></div>` : '';
-    return `<div class="ip-sheet">${watermark(opts.logo)}${rp ? `<div class="ip-rwm">REPRINT ${rp}</div>` : ''}<div class="ip-in">`
+      + (slip ? '</div>' : `<div class="ip-tot"><div><span>Sales</span><span>${money(inv.sales_total)}</span></div><div><span>Discount:</span><span>${money(inv.discount_total)}</span></div><div><span>Tax Total:</span><span>${money(inv.tax_total)}</span></div><div><span>Total (${esc(cur)}):</span><span>${money(inv.total)}</span></div></div></div>`) : '';
+    return `<div class="ip-sheet${slip ? ' ip-sl' : ''}">${watermark(opts.logo)}${rp ? `<div class="ip-rwm">REPRINT ${rp}</div>` : ''}<div class="ip-in">`
       + `<div class="ip-head"><div class="ip-co"><img src="${esc(opts.logo)}" alt="DFL">${COMPANY.map(t => `<div>${esc(t)}</div>`).join('')}</div>`
-      + `<div class="ip-hr"><div class="ip-title"><b>TAX INVOICE</b>${esc(GCT_REF)}${rp ? `<br><span class="ip-rp">REPRINT ${rp}</span>` : ''}</div>`
-      + `<div class="ip-meta"><div><span>Invoice No.:</span><span>${esc(inv.ref)}</span></div><div><span>Date:</span><span>${esc(niceDate(inv.date))}</span></div><div><span>Due Date:</span><span>${esc(niceDate(inv.due_date))}</span></div><div><span>Customer ID:</span><span>${esc(inv.customer_id)}</span></div><div><span>Currency:</span><span>${esc(cur)}</span></div></div></div></div>`
+      + `<div class="ip-hr"><div class="ip-title"><b>${slip ? 'DELIVERY SLIP' : 'TAX INVOICE'}</b>${slip ? '' : esc(GCT_REF)}${rp ? `<br><span class="ip-rp">REPRINT ${rp}</span>` : ''}</div>`
+      + `<div class="ip-meta"><div><span>${slip ? 'Invoice Ref.:' : 'Invoice No.:'}</span><span>${esc(inv.ref)}</span></div><div><span>Date:</span><span>${esc(niceDate(inv.date))}</span></div>${slip ? '' : `<div><span>Due Date:</span><span>${esc(niceDate(inv.due_date))}</span></div>`}<div><span>Customer ID:</span><span>${esc(inv.customer_id)}</span></div><div><span>Currency:</span><span>${esc(cur)}</span></div></div></div></div>`
       + `<div class="ip-addr">${addrBox('BILL TO:', inv.bill)}${addrBox('SHIP TO:', inv.ship)}</div>`
       + `<div class="ip-ref a">${refCell('CUSTOMER REF. NUMBER', inv.customer_ref)}${refCell('TERMS', inv.terms)}${refCell('CONTACT', inv.salesperson)}</div>`
       + `<div class="ip-ref b">${refCell('SHIP VIA', inv.ship_via)}${refCell('SO NUMBER', inv.so_number)}${refCell('SHIPMENT NUMBER', inv.shipment_nbr)}${refCell('CUSTOMER P.O. NO.', inv.customer_po)}</div>`
-      + `<div class="ip-th"><div>NO.</div><div>ITEM</div><div class="r">QTY.</div><div class="u">UOM</div><div class="r">UNIT PRICE</div><div class="c">TAX</div><div class="r">EXTENDED</div></div>`
+      + `<div class="ip-th"><div>NO.</div><div>ITEM</div><div class="r">QTY.</div><div class="u">UOM</div>${slip ? '' : '<div class="r">UNIT PRICE</div><div class="c">TAX</div><div class="r">EXTENDED</div>'}</div>`
       + `<div class="ip-body" style="height:${last ? BODY_LAST : BODY_MORE}pt">${body}</div>`
       + foot
       + `<div class="ip-pg"><span>${last ? '' : 'Continued...'}</span><span>Page: ${pg + 1} of ${npages}</span></div></div></div>`;

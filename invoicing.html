@@ -266,6 +266,7 @@
   // is free, a reprint needs a reason and is marked REPRINT on the paper. Every print is logged.
   // ------------------------------------------------------------------
   async function loadPrintable() {
+    await loadKinds();
     const since = new Date(Date.now() - 3 * 24 * 3600e3).toISOString();
     const r = await sb.from('shipment_invoicing').select('shipment_nbr,finished_at').eq('env', D.env).eq('state', 'done')
       .gte('finished_at', since).order('finished_at', { ascending: false }).limit(300);
@@ -352,10 +353,10 @@
           ${g.rows.map(x => `<tr class="${V.psel.has(x.nbr) ? 'sel' : ''}"><td class="cb"><input type="checkbox" data-pship="${esc(x.nbr)}" ${V.psel.has(x.nbr) ? 'checked' : ''} aria-label="Select ${esc(x.nbr)} to print"></td>
             <td class="num">${x.inv ? esc(x.inv.reference_number) : '<span class="muted" title="Not synced from Acumatica yet">pending</span>'}</td><td class="num">${esc(x.nbr)}</td>
             <td>${esc(x.ship.customer_name || x.ship.customer_id || '')}</td><td class="r num">${x.ship.shipment_value == null ? '<span class="muted">—</span>' : money(x.ship.shipment_value)}</td>
-            <td>${printPill(x.nbr)}</td></tr>`).join('')}</tbody></table></div>`;
+            <td>${printPill(x.nbr)}${isSlipKind(x) ? ` <button class="btn small" data-slip="${esc(x.nbr)}" ${V.pbusy ? 'disabled' : ''} title="Delivery slip with no prices (donation and promotion orders)">Delivery slip</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
       }).join('')}
       ${V.psel.size ? `<div class="sumbar"><span><b>${V.psel.size}</b> selected to print</span><span class="spacer"></span>
-        <button class="btn small" data-act="pclear">Clear</button><button class="btn primary small" data-act="print" ${V.pbusy ? 'disabled' : ''}>Print ${plural(V.psel.size, 'invoice')}</button></div>` : ''}`;
+        <button class="btn small" data-act="pclear">Clear</button>${V.pr.some(x => V.psel.has(x.nbr) && isSlipKind(x)) ? `<button class="btn small" data-act="pslip" ${V.pbusy ? 'disabled' : ''}>Print delivery slips (${V.pr.filter(x => V.psel.has(x.nbr) && isSlipKind(x)).length})</button>` : ''}<button class="btn primary small" data-act="print" ${V.pbusy ? 'disabled' : ''}>Print ${plural(V.psel.size, 'invoice')}</button></div>` : ''}`;
   }
 
   // The invoice itself comes from Acumatica (Generic Inquiry DFLInvoicePrint, synced by sync-invoice-print),
@@ -373,6 +374,28 @@
     try { j = await res.json(); } catch (e) {}
     if (!res.ok || !(j && j.success)) throw new Error((j && j.error) || `Invoice refresh failed (${res.status})`);
     return j;
+  }
+
+  // Delivery slip: the same document as the invoice with no prices, tax or totals, for donation and promotion orders.
+  // It is not logged as an invoice print, so it never makes the real invoice a "reprint".
+  const isSlipKind = x => ['donation', 'promotion'].includes(kindOf(x.ship));
+  async function printSlips(nbrs) {
+    const items = V.pr.filter(x => nbrs.includes(x.nbr));
+    if (!items.length || V.pbusy) return;
+    const noInv = items.filter(x => !x.inv);
+    if (noInv.length) { toast(`No invoice number yet for ${noInv.slice(0, 4).map(x => x.nbr).join(', ')}. Try again in a few minutes.`, true); return; }
+    V.pbusy = true; renderPrintPanel();
+    try {
+      const refs = items.map(x => x.inv.reference_number);
+      await callSyncInvoicePrint(refs);
+      const f = await sb.rpc('invoice_print_fetch', { p_refs: refs });
+      if (f.error) throw f.error;
+      const byRef = new Map((f.data || []).map(i => [i.ref, i]));
+      const missing = refs.filter(r => !byRef.get(r) || !(byRef.get(r).lines || []).length);
+      if (missing.length) { toast(`Nothing printed. ${missing.slice(0, 4).join(', ')}: no lines in Acumatica data yet`, true); return; }
+      InvoicePrint.show(items.flatMap(x => InvoicePrint.pages(byRef.get(x.inv.reference_number), { slip: true })));
+    } catch (e) { console.error('[invoicing slip]', e); toast(errMsg(e), true); }
+    finally { V.pbusy = false; await refresh(); }
   }
 
   async function printInvoices(nbrs) {
@@ -599,6 +622,8 @@
       });
       return;
     }
+    const sl = e.target.closest('[data-slip]');
+    if (sl) { printSlips([sl.dataset.slip]); return; }
     const pl = e.target.closest('[data-pload]');
     if (pl) { printInvoices(V.pr.filter(x => (x.load ? x.load.load_nbr : '—') === pl.dataset.pload).map(x => x.nbr)); return; }
     const b = e.target.closest('[data-act]');
@@ -607,6 +632,7 @@
     if (a === 'clear') { V.sel.clear(); render(); return; }
     if (a === 'pclear') { V.psel.clear(); renderPrintPanel(); return; }
     if (a === 'print') { printInvoices([...V.psel]); return; }
+    if (a === 'pslip') { printSlips(V.pr.filter(x => V.psel.has(x.nbr) && isSlipKind(x)).map(x => x.nbr)); return; }
     if (a === 'plookup') { printLookup(); return; }
     if (a === 'selall') {
       const rows = visible().filter(s => selectable(s.shipment_nbr));
