@@ -496,6 +496,45 @@ function keepSearchFocus(draw) {
   if (el) { el.focus(); const n = el.value.length; try { el.setSelectionRange(n, n); } catch (e) {} }
 }
 
+// Draws `html` into `root` by updating the DOM that's already there instead of replacing it.
+// A full innerHTML swap throws away the focused box (the tablet keyboard closes), the scroll
+// position and any tap in flight; this changes only what differs and never touches the value of
+// the box being typed in. Rows / cards with a data-item / data-open key are matched by key.
+function morphHTML(root, html) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  morphKids(root, tpl.content);
+}
+function morphKey(n) {
+  return n.nodeType === 1 ? (n.dataset.item != null ? 'i:' + n.dataset.item : n.dataset.open != null ? 'o:' + n.dataset.open : null) : null;
+}
+function morphKids(from, to) {
+  const want = [...to.childNodes];
+  const keyed = new Map();
+  [...from.childNodes].forEach(n => { const k = morphKey(n); if (k && !keyed.has(k)) keyed.set(k, n); });
+  want.forEach((nw, i) => {
+    const k = morphKey(nw);
+    let m = k ? keyed.get(k) : null;
+    const at = from.childNodes[i] || null;
+    if (!m && at && !morphKey(at) && at.nodeType === nw.nodeType && (at.nodeType !== 1 || at.tagName === nw.tagName)) m = at;
+    if (!m) { from.insertBefore(nw, at); return; }
+    if (m !== at) from.insertBefore(m, at);
+    morphNode(m, nw);
+  });
+  while (from.childNodes.length > want.length) from.removeChild(from.lastChild);
+}
+function morphNode(a, b) {
+  if (a.nodeType !== 1) { if (a.nodeValue !== b.nodeValue) a.nodeValue = b.nodeValue; return; }
+  [...a.attributes].forEach(at => { if (!b.hasAttribute(at.name) && !(a.tagName === 'INPUT' && at.name === 'value')) a.removeAttribute(at.name); });
+  [...b.attributes].forEach(at => { if (a.getAttribute(at.name) !== at.value && !(a.tagName === 'INPUT' && at.name === 'value')) a.setAttribute(at.name, at.value); });
+  if (a.tagName === 'INPUT') {
+    if (a.type === 'checkbox' || a.type === 'radio') a.checked = b.hasAttribute('checked');
+    else if (a !== document.activeElement && a.value !== (b.getAttribute('value') || '')) a.value = b.getAttribute('value') || '';
+    return;
+  }
+  morphKids(a, b);
+}
+
 // Keeps a page current: re-reads when another screen saves (realtime on the pick / check
 // tables), when the tab comes back to the front, and on a slow timer as the safety net.
 // skip() says the user is typing; the refresh is held until they leave the box.

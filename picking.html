@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#0f2044">
+<link rel="manifest" href="manifest.webmanifest">
 <meta name="robots" content="noindex, nofollow">
 <title>Picking — Logistics Management System</title>
 <!--
@@ -95,10 +96,10 @@
 
   function render() {
     const main = document.getElementById('main');
-    if (P.open) { main.innerHTML = loadView(P.loads.find(l => l.id === P.open)); return; }
+    if (P.open) { morphHTML(main, loadView(P.loads.find(l => l.id === P.open))); return; }
     const mine = P.loads.filter(l => (P.lists.get(l.id) || []).some(inArea) && loadMatches(l, P.q));
     const allLines = P.loads.flatMap(l => (P.lists.get(l.id) || []).filter(inArea));
-    main.innerHTML = `
+    morphHTML(main, `
       <div class="controls">
         <div class="seg" id="daySeg">
           <button data-day="both" class="${P.date === VIEW_BOTH ? 'on' : ''}">Today + Tomorrow</button>
@@ -119,7 +120,7 @@
         <div class="kpi"><div class="l">Cases</div><div class="v">${fmt(allLines.reduce((s, x) => s + Number(x.required), 0))}</div><div class="s">to pick</div></div>
       </div>
       ${mine.length ? mine.map(loadCard).join('') : `<div class="card">${P.q ? emptyState(`Nothing matches “${esc(P.q)}”`, 'Check the spelling, or clear the search.', { label: 'Clear search', id: 'clear-q' })
-        : emptyState(`No loads to pick${P.area === 'all' ? '' : ' in ' + areaName(P.area)} for ${P.date === VIEW_BOTH ? 'today or tomorrow' : esc(niceDate(P.date))}`, 'A load shows here once its trucker is locked in.', P.area !== 'all' ? { label: 'Show all areas', id: 'all-areas' } : P.date === VIEW_BOTH ? undefined : P.date === jmDate(0) ? { label: 'Check tomorrow', id: 'tomorrow' } : { label: 'Check today', id: 'today' })}</div>`}`;
+        : emptyState(`No loads to pick${P.area === 'all' ? '' : ' in ' + areaName(P.area)} for ${P.date === VIEW_BOTH ? 'today or tomorrow' : esc(niceDate(P.date))}`, 'A load shows here once its trucker is locked in.', P.area !== 'all' ? { label: 'Show all areas', id: 'all-areas' } : P.date === VIEW_BOTH ? undefined : P.date === jmDate(0) ? { label: 'Check tomorrow', id: 'tomorrow' } : { label: 'Check today', id: 'today' })}</div>`}`);
   }
 
   function loadCard(l) {
@@ -175,7 +176,8 @@
       <div class="need">${fmt(x.required)}<small>to pick</small></div>
       <div class="acts">
         <button class="btn ${got && !short ? 'primary' : ''}" data-all ${dis}>All ${fmt(x.required)}</button>
-        <input type="number" inputmode="numeric" min="0" max="${Number(x.required)}" step="1" data-qty value="${got ? Number(x.picked_qty) : ''}" placeholder="Qty" aria-label="Picked quantity for ${esc(x.inventory_id)}" ${dis}>
+        <button class="btn ${got && Number(x.picked_qty) === 0 ? 'primary' : ''}" data-zero ${dis} aria-label="None picked, 0">0</button>
+        <input type="number" inputmode="numeric" enterkeyhint="done" autocomplete="off" min="0" max="${Number(x.required)}" step="1" data-qty value="${got ? Number(x.picked_qty) : ''}" placeholder="Qty" aria-label="Picked quantity for ${esc(x.inventory_id)}" ${dis}>
         <button class="btn small" data-save ${dis}>Save</button>
         ${got ? `<button class="btn small link" data-clear ${dis}>Clear</button>` : ''}
         <span class="st" data-st>${AS.html(l.id, x.inventory_id)}</span>
@@ -319,11 +321,12 @@
     const item = row.dataset.item;
     if (t.closest('[data-retry]')) { AS.retryFailed(); return; }
     const line = (P.lists.get(P.open) || []).find(x => x.inventory_id === item);
-    if (t.closest('[data-all]')) { act(async () => { await AS.flushAll(); await rpc('dispatch_pick_set', { p_load_id: P.open, p_inventory_id: item, p_picked: Number(line.required) }); }); return; }
+    if (t.closest('[data-all]')) { setPick(P.open, item, Number(line.required)); return; }
+    if (t.closest('[data-zero]')) { setPick(P.open, item, 0); return; }
     if (t.closest('[data-clear]')) {
       const was = line.picked_qty, loadId = P.open;
-      act(async () => { await AS.flushAll(); await rpc('dispatch_pick_set', { p_load_id: loadId, p_inventory_id: item, p_picked: null });
-        if (was != null) toast('Pick cleared', false, { action: { label: 'Undo', fn: () => act(() => rpc('dispatch_pick_set', { p_load_id: loadId, p_inventory_id: item, p_picked: Number(was) })) } }); });
+      setPick(loadId, item, null);
+      if (was != null) toast('Pick cleared', false, { action: { label: 'Undo', fn: () => setPick(loadId, item, Number(was)) } });
       return;
     }
     if (t.closest('[data-save]')) { saveQty(row, line); }
@@ -362,7 +365,17 @@
     if (!(n >= 0)) { toast('That isn\'t a quantity', true); return; }
     if (n > Number(line.required)) { toast(`Only ${fmt(line.required)} needed. You can't pick more than that.`, true); return; }
     // Same absolute-value write the autosave makes, so pressing Save after autosave doesn't double-count.
-    act(async () => { await AS.flushAll(); await rpc('dispatch_pick_set', { p_load_id: P.open, p_inventory_id: line.inventory_id, p_picked: n }); });
+    setPick(P.open, line.inventory_id, n);
+  }
+  // All / 0 / Clear / Save: show the new quantity at once and save it through the same queue as typing.
+  // Nothing blocks the next tap, and only the row that changed is redrawn (so the keyboard and scroll
+  // position stay put if the picker has already moved on to another box).
+  function setPick(loadId, item, n) {
+    const line = (P.lists.get(loadId) || []).find(x => x.inventory_id === item);
+    if (line) line.picked_qty = n;
+    AS.set(loadId, item, n);
+    AS.flush(AS.key(loadId, item));
+    render();
   }
 
   async function refresh() {

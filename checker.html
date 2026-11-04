@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#0f2044">
+<link rel="manifest" href="manifest.webmanifest">
 <meta name="robots" content="noindex, nofollow">
 <title>Checker — Logistics Management System</title>
 <!--
@@ -51,11 +52,14 @@
   const areaName = a => (AREAS.find(x => x[0] === Number(a)) || [0, 'Unassigned'])[1];
 
   async function loadAll() {
+    const e0 = K.epoch || 0;
     const loads = (await fetchLoadsView(K.date)).filter(l => ['done', 'partial'].includes(l.status) && !l.closed_at);
     const ids = loads.map(l => l.id);
     const r = ids.length ? await sb.rpc('dispatch_pick_bundle', { p_load_ids: ids, p_with_checks: true }) : { data: { picks: [], done: [], staged: [], items: [] } };
     if (r.error) throw r.error;
     await loadKinds();
+    // A tick was made while this was being read: the answer may predate it, so drop it (the queue refreshes when it's empty).
+    if (K.saving > 0 || (K.epoch || 0) !== e0) return false;
     K.loads = loads.sort((a, b) => isSpecialLoad(b) - isSpecialLoad(a) || (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)); // pickup / donation / promotion first, then in load-number (creation) order
     K.staged = r.data.staged || [];
     K.areaDone = r.data.done || [];
@@ -86,10 +90,10 @@
 
   function render() {
     const main = document.getElementById('main');
-    if (K.open) { keepSearchFocus(() => { main.innerHTML = loadView(K.loads.find(l => l.id === K.open)); }); return; }
+    if (K.open) { morphHTML(main, loadView(K.loads.find(l => l.id === K.open))); return; }
     const vis = K.loads.filter(l => loadMatches(l, K.q));
     const todo = vis.filter(l => !l.checker_done_at), done = vis.filter(l => l.checker_done_at);
-    main.innerHTML = `
+    morphHTML(main, `
       <div class="controls">
         <div class="seg" id="daySeg">
           <button data-day="both" class="${K.date === VIEW_BOTH ? 'on' : ''}">Today + Tomorrow</button>
@@ -104,7 +108,7 @@
         <div class="kpi"><div class="l">Checked</div><div class="v">${done.length}</div><div class="s">handed to Invoicing</div></div>
         <div class="kpi"><div class="l">Short counts</div><div class="v">${K.loads.reduce((s, l) => s + checkState(l).short, 0)}</div><div class="s">items checked short</div></div>
       </div>
-      ${vis.length ? [...todo, ...done].map(loadCard).join('') : `<div class="card">${K.loads.length ? emptyState(`Nothing matches “${esc(K.q)}”`, 'Check the spelling, or clear the search.', { label: 'Clear search', id: 'clear-q' }) : emptyState(`No loads to check for ${K.date === VIEW_BOTH ? 'today or tomorrow' : esc(niceDate(K.date))}`, 'A load shows here once its trucker is locked in and picking has started.', K.date === VIEW_BOTH ? undefined : { label: K.date === jmDate(0) ? 'Check tomorrow' : 'Check today', id: 'other-day' })}</div>`}`;
+      ${vis.length ? [...todo, ...done].map(loadCard).join('') : `<div class="card">${K.loads.length ? emptyState(`Nothing matches “${esc(K.q)}”`, 'Check the spelling, or clear the search.', { label: 'Clear search', id: 'clear-q' }) : emptyState(`No loads to check for ${K.date === VIEW_BOTH ? 'today or tomorrow' : esc(niceDate(K.date))}`, 'A load shows here once its trucker is locked in and picking has started.', K.date === VIEW_BOTH ? undefined : { label: K.date === jmDate(0) ? 'Check tomorrow' : 'Check today', id: 'other-day' })}</div>`}`);
   }
 
   function loadCard(l) {
@@ -151,8 +155,8 @@
         <div class="meta">${esc(x.inventory_id)} · ${esc(x.uom || '')} · ${x.picked_qty != null ? `picked ${fmt(x.picked_qty)}` : '<b style="color:var(--warn-text)">not picked</b>'}</div></div>
       <div class="need">${fmt(x.required)}<small>on load</small></div>
       <div class="acts">
-        <input type="number" inputmode="numeric" min="0" max="${Number(x.required)}" step="1" data-qty value="${qty != null ? qty : ''}" placeholder="Checked" aria-label="Checked quantity for ${esc(x.inventory_id)}" ${dis || (ok ? 'disabled' : '')}>
-        ${ok || locked ? '' : `<button class="btn small" data-fill="${fill}">= ${fmt(fill)}</button>`}
+        <input type="number" inputmode="numeric" enterkeyhint="done" autocomplete="off" min="0" max="${Number(x.required)}" step="1" data-qty value="${qty != null ? qty : ''}" placeholder="Checked" aria-label="Checked quantity for ${esc(x.inventory_id)}" ${dis || (ok ? 'disabled' : '')}>
+        ${ok || locked ? '' : `<button class="btn small" data-fill="${fill}">= ${fmt(fill)}</button><button class="btn small" data-fill="0" aria-label="None here, 0">0</button>`}
         <label class="tick"><input type="checkbox" data-tick ${ok ? 'checked' : ''} ${dis} aria-label="Line checked for ${esc(x.inventory_id)}"> Checked</label>
         <span class="got">${ok ? `${short ? `<b style="color:var(--warn-text)">Short ${fmt(Number(x.required) - qty)}</b> · ` : ''}${esc(c.checker_name || '')} ${esc(stamp(c.checked_at))}` : ''}</span>
       </div>
@@ -168,17 +172,35 @@
     finally { K.busy = false; await refresh(); }
   }
 
-  // Saves one SKU, then patches the screen from the answer instead of re-reading everything.
-  async function saveItem(row, qty, confirmed) {
-    const l = K.loads.find(x => x.id === K.open);
-    const inv = row.dataset.item;
-    const { error } = await sb.rpc('dispatch_check_item', { p_load_id: l.id, p_inventory_id: inv, p_qty: qty, p_confirmed: confirmed });
-    if (error) { feedback('bad'); toast(errMsg(error), true, { action: { label: 'Retry', fn: () => saveItem(row, qty, confirmed) } }); await refresh(); return; }
-    feedback('ok'); flashSaved();
+  // A line change shows at once, then is saved in order behind any earlier ones. Nothing is dropped
+  // while a save is in flight (so quick taps down a list all count), and the background refresh
+  // waits until the queue is empty, so it can't paint an older answer over a tick just made.
+  // If a save fails the line goes back to what it was, with a Retry.
+  let saveChain = Promise.resolve();
+  function saveItem(row, qty, confirmed) { return saveLine(K.loads.find(x => x.id === K.open), row.dataset.item, qty, confirmed); }
+  function saveLine(l, inv, qty, confirmed) {
     const m = itemsOf(l); K.items.set(l.id, m);
+    const prev = m.get(inv);
     if (qty == null) m.delete(inv);
     else m.set(inv, { load_id: l.id, inventory_id: inv, checked_qty: qty, confirmed, checker_name: D.me && D.me.name, checked_at: new Date().toISOString() });
     render();
+    K.saving = (K.saving || 0) + 1; K.epoch = (K.epoch || 0) + 1;
+    saveChain = saveChain.then(async () => {
+      try {
+        const { error } = await sb.rpc('dispatch_check_item', { p_load_id: l.id, p_inventory_id: inv, p_qty: qty, p_confirmed: confirmed });
+        if (error) throw error;
+        feedback('ok'); flashSaved();
+      } catch (error) {
+        feedback('bad');
+        const cur = itemsOf(l);
+        if (prev) cur.set(inv, prev); else cur.delete(inv);
+        render();
+        toast(errMsg(error), true, { action: { label: 'Retry', fn: () => saveLine(l, inv, qty, confirmed) } });
+      } finally {
+        if (--K.saving === 0 && !editing()) refresh();
+      }
+    });
+    return saveChain;
   }
   function qtyOf(row, line) {
     const v = row.querySelector('[data-qty]').value.trim();
@@ -210,7 +232,7 @@
     if (b.dataset.act === 'finish') {
       const s = checkState(l);
       if (!confirm(`Finish checking ${l.load_nbr}?\n\n${s.short ? `${plural(s.short, 'item')} checked short. ` : ''}It goes to Invoicing, and you can't change lines after this unless you reopen it.`)) return;
-      act(async () => { const { error } = await sb.rpc('dispatch_check_finish', { p_load_id: l.id }); if (error) throw error; toast('Check finished. With Invoicing now.', false, { action: { label: 'Undo', fn: () => act(async () => { const r = await sb.rpc('dispatch_check_reopen', { p_load_id: l.id }); if (r.error) throw r.error; toast('Check reopened'); }) } }); });
+      act(async () => { await saveChain; const { error } = await sb.rpc('dispatch_check_finish', { p_load_id: l.id }); if (error) throw error; toast('Check finished. With Invoicing now.', false, { action: { label: 'Undo', fn: () => act(async () => { const r = await sb.rpc('dispatch_check_reopen', { p_load_id: l.id }); if (r.error) throw r.error; toast('Check reopened'); }) } }); });
     }
     if (b.dataset.act === 'reopen') act(async () => { const { error } = await sb.rpc('dispatch_check_reopen', { p_load_id: l.id }); if (error) throw error; });
   });
@@ -236,7 +258,7 @@
   });
 
   async function refresh() {
-    try { await loadAll(); render(); }
+    try { if (await loadAll() !== false) render(); }
     catch (e) { console.error('[checker]', e); document.getElementById('main').innerHTML = errBox(e); }
   }
   function editing() {
@@ -249,7 +271,7 @@
     onEnvChange: () => { K.open = null; refresh(); },
     onReady: () => {
       refresh();
-      keepFresh(refresh, () => K.busy || editing(), ['pick_lines', 'pick_area_status', 'stage_area_status', 'check_items', 'loads']);
+      keepFresh(refresh, () => K.busy || K.saving > 0 || editing(), ['pick_lines', 'pick_area_status', 'stage_area_status', 'check_items', 'loads']);
     },
   });
 </script>

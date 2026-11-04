@@ -1,0 +1,13 @@
+{
+  "name": "DFL Dispatch",
+  "short_name": "Dispatch",
+  "description": "DFL Importers & Distributors: loads, picking, checking and invoicing.",
+  "start_url": "index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0f2044",
+  "theme_color": "#0f2044",
+  "icons": [
+    { "src": "assets/app-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

@@ -329,3 +329,5 @@ button { touch-action:manipulation; }
 :root[data-theme=dark] .gate { background:var(--surface); }
 :root[data-theme=dark] .item, :root[data-theme=dark] .pload { background:var(--surface); }
 :root[data-theme=dark] .item.ok { background:var(--ok-bg); } :root[data-theme=dark] .item.short { background:var(--warn-bg); }
+
+input[data-qty] { scroll-margin: 35vh 0; }
