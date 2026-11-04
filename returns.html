@@ -79,7 +79,7 @@
   async function loadAll() {
     const { data: loads, error } = await sb.from('loads')
       .select('id,load_nbr,load_date,wave,seq,ship_via,contractor,truck_type')
-      .eq('env', D.env).eq('load_date', R.date).order('wave').order('seq');
+      .eq('env', D.env).eq('load_date', R.date).order('seq').order('wave');
     if (error) throw error;
     R.returns = []; R.lines = []; R.stops = new Map(); R.files = new Map(); R.lm = new Map();
     const all = loads || [];

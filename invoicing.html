@@ -87,7 +87,7 @@
   // ------------------------------------------------------------------
   async function loadPending() {
     const r = await sb.from('loads').select('*').eq('env', D.env).not('checker_done_at', 'is', null)
-      .or('check_status.is.null,check_status.neq.confirmed').order('load_date').order('wave').order('seq');
+      .or('check_status.is.null,check_status.neq.confirmed').order('load_date').order('seq').order('wave');
     if (r.error) throw r.error;
     const loads = r.data || [], ids = loads.map(l => l.id);
     let ls = [], bundle = { picks: [], items: [], checks: [] };

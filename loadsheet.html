@@ -94,7 +94,7 @@
     }
     const { data: loads, error } = await sb.from('loads')
       .select('id,load_nbr,load_date,wave,seq,truck_type,ship_via,contractor,status,check_status,sheet_stale_at')
-      .eq('env', D.env).eq('load_date', L.date).in('status', ['done', 'partial']).order('wave').order('seq');
+      .eq('env', D.env).eq('load_date', L.date).in('status', ['done', 'partial']).order('seq').order('wave');
     if (error) throw error;
     const all = loads || [];
     L.loads = all.filter(l => l.check_status === 'confirmed');

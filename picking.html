@@ -12,8 +12,9 @@
   tablet per area today, maybe a phone per picker later.
 
   A load appears once its trucker is locked in (status done/partial) and stays
-  until the checker has confirmed it. Only the selected day's loads show (no
-  carry-over from earlier days; pick the date to see those). Required quantities come live from the
+  until the checker has confirmed it. By default it lists today's and tomorrow's
+  loads in load-number order (they pick tomorrow's shipment date the evening before). No carry-over
+  from earlier days; pick the date to see those. Required quantities come live from the
   shipment lines (dispatch_pick_list), so a corrected shipment shows at once.
   The picker records what they picked (dispatch_pick_set): "All" for a full
   pick, or a number for a short. An area is marked done once every item in it
@@ -63,15 +64,15 @@
 <script src="common.js"></script>
 <script>
   const AREAS = [[1, 'Area 1'], [2, 'Area 2'], [3, 'Area 3'], [4, 'Area 4'], [5, 'Area 5'], [6, 'Area 6'], [7, 'Area 7'], [0, 'Unassigned']];
-  const P = { date: jmDate(0), loads: [], lists: new Map(), done: [], open: null, busy: false, area: 'all', q: '' };
+  const P = { date: VIEW_BOTH, loads: [], lists: new Map(), done: [], open: null, busy: false, area: 'all', q: '' };
   try { const a = localStorage.getItem('dispatch-pick-area'); if (a) P.area = a; } catch (e) {}
   function areaName(a) { return (AREAS.find(x => x[0] === Number(a)) || [0, 'Unassigned'])[1]; }
   function inArea(line) { return P.area === 'all' || line.area === Number(P.area); }
 
   async function loadAll() {
-    const loads = (await fetchLoads(P.date, { events: false })).filter(l => ['done', 'partial'].includes(l.status) && l.check_status !== 'confirmed' && !l.checker_done_at && !l.closed_at);
+    const loads = (await fetchLoadsView(P.date, { events: false })).filter(l => ['done', 'partial'].includes(l.status) && l.check_status !== 'confirmed' && !l.checker_done_at && !l.closed_at);
     await loadKinds();
-    P.loads = loads.sort((a, b) => isSpecialLoad(b) - isSpecialLoad(a)); // pickup / donation / promotion first
+    P.loads = loads.sort((a, b) => isSpecialLoad(b) - isSpecialLoad(a) || (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)); // pickup / donation / promotion first, then in load-number (creation) order
     await loadPicks();
   }
   // Pick lines and area status for the loads already on screen: one request, so a save shows quickly.
@@ -100,10 +101,11 @@
     main.innerHTML = `
       <div class="controls">
         <div class="seg" id="daySeg">
+          <button data-day="both" class="${P.date === VIEW_BOTH ? 'on' : ''}">Today + Tomorrow</button>
           <button data-day="0" class="${P.date === jmDate(0) ? 'on' : ''}">Today</button>
           <button data-day="1" class="${P.date === jmDate(1) ? 'on' : ''}">Tomorrow</button>
         </div>
-        <input type="date" id="datePick" value="${P.date}" aria-label="Load date">
+        <input type="date" id="datePick" value="${P.date === VIEW_BOTH ? '' : P.date}" aria-label="Load date">
         ${searchBox(P.q)}
       </div>
       <div class="areas" role="group" aria-label="My area">
@@ -117,7 +119,7 @@
         <div class="kpi"><div class="l">Cases</div><div class="v">${fmt(allLines.reduce((s, x) => s + Number(x.required), 0))}</div><div class="s">to pick</div></div>
       </div>
       ${mine.length ? mine.map(loadCard).join('') : `<div class="card">${P.q ? emptyState(`Nothing matches “${esc(P.q)}”`, 'Check the spelling, or clear the search.', { label: 'Clear search', id: 'clear-q' })
-        : emptyState(`No loads to pick${P.area === 'all' ? '' : ' in ' + areaName(P.area)} for ${esc(niceDate(P.date))}`, 'A load shows here once its trucker is locked in.', P.area !== 'all' ? { label: 'Show all areas', id: 'all-areas' } : P.date === jmDate(0) ? { label: 'Check tomorrow', id: 'tomorrow' } : { label: 'Check today', id: 'today' })}</div>`}`;
+        : emptyState(`No loads to pick${P.area === 'all' ? '' : ' in ' + areaName(P.area)} for ${P.date === VIEW_BOTH ? 'today or tomorrow' : esc(niceDate(P.date))}`, 'A load shows here once its trucker is locked in.', P.area !== 'all' ? { label: 'Show all areas', id: 'all-areas' } : P.date === VIEW_BOTH ? undefined : P.date === jmDate(0) ? { label: 'Check tomorrow', id: 'tomorrow' } : { label: 'Check today', id: 'today' })}</div>`}`;
   }
 
   function loadCard(l) {
@@ -128,7 +130,7 @@
       return `<span class="achip ${cls}">${areaName(a)} · ${areaStaged(l.id, a) ? 'staged' : areaDone(l.id, a) ? 'picked, not staged' : `${got}/${al.length}`}</span>`;
     }).join('');
     return `<button class="pload" data-open="${l.id}">
-      <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${loadKindTags(l)}${waveTag(l.wave)}${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b>
+      <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${shipsTag(l)}${loadKindTags(l)}${waveTag(l.wave)}${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b>
         <span class="target">${esc(l.ship_via || '')}</span>${l.check_status ? '<span class="pill info">Being checked</span>' : ''}</div>
       <div class="sub">${esc(l.contractor || '')}${l.contractor ? ' · ' : ''}${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} · ${plural(lines.filter(inArea).length, 'item')}</div>
       <div class="achips">${chips}</div>
@@ -300,7 +302,7 @@
       return;
     }
     const day = t.closest('#daySeg button');
-    if (day) { P.date = jmDate(Number(day.dataset.day)); P.open = null; refresh(); return; }
+    if (day) { P.date = day.dataset.day === 'both' ? VIEW_BOTH : jmDate(Number(day.dataset.day)); P.open = null; refresh(); return; }
     const ar = t.closest('[data-area]');
     if (ar) { P.area = ar.dataset.area; try { localStorage.setItem('dispatch-pick-area', P.area); } catch (x) {} render(); return; }
     const op = t.closest('[data-open]');

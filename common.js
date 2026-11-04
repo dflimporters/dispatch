@@ -174,7 +174,7 @@ const ICON = {
   chev:   '<svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
 };
 function waveTag(w, title) {
-  if (w === 'ACU') return '<span class="tag acu" title="Ship Via was set in Acumatica; these loads have no AM/PM run">ACU</span>';
+  if (w === 'ACU') return '<span class="tag acu" title="Ship Via was set in Acumatica">ACU</span>';
   return `<span class="tag ${w === 'PM' ? 'pm' : 'am'}" title="${esc(title || (w === 'PM' ? 'Evening run' : 'Morning run'))}">${w === 'PM' ? ICON.moon : ICON.sun}${w}</span>`;
 }
 // Extra tags for loads that didn't come from the clerk, or are left over from an earlier day.
@@ -376,10 +376,10 @@ async function fetchLoads(date, opts) {
   const carry = opts && opts.carry && date <= jmDate(0);
   const from = new Date(Date.parse(date + 'T00:00:00Z') - 7 * 86400e3).toISOString().split('T')[0];
   const [cur, old] = await Promise.all([
-    sb.from('loads').select('*').eq('env', D.env).eq('load_date', date).order('wave').order('seq'),
+    sb.from('loads').select('*').eq('env', D.env).eq('load_date', date).order('seq').order('wave'),
     carry ? sb.from('loads').select('*').eq('env', D.env).gte('load_date', from).lt('load_date', date)
       .in('status', ['done', 'partial']).or('check_status.is.null,check_status.neq.confirmed')
-      .order('load_date').order('wave').order('seq') : Promise.resolve({ data: [] }),
+      .order('load_date').order('seq').order('wave') : Promise.resolve({ data: [] }),
   ]);
   if (cur.error) throw cur.error;
   if (old.error) throw old.error;
@@ -403,6 +403,20 @@ async function fetchLoads(date, opts) {
     const mine = ls.filter(x => x.load_id === l.id).map(x => ({ ...x, row: byNbr.get(x.shipment_nbr) || null }));
     return { ...l, ships: mine, events: evs.filter(e => e.load_id === l.id), ...loadStats(mine.map(x => x.row).filter(Boolean)) };
   });
+}
+
+// Picker / Checker view: 'both' = today's loads then tomorrow's (the pickers work tomorrow's
+// shipment date the evening before), or a single ISO date. No carry-over from earlier days;
+// pick the date to see those.
+const VIEW_BOTH = 'both';
+async function fetchLoadsView(view, opts) {
+  if (view !== VIEW_BOTH) return fetchLoads(view, opts);
+  const [a, b] = await Promise.all([fetchLoads(jmDate(0), opts), fetchLoads(jmDate(1), opts)]);
+  return a.concat(b);
+}
+// Small tag on a card whose shipment date isn't today (tomorrow's loads in the combined view).
+function shipsTag(l) {
+  return l.load_date && l.load_date !== jmDate(0) ? `<span class="tag" title="Shipment date">Ships ${esc(niceDate(l.load_date))}</span>` : '';
 }
 
 // ------------------------------------------------------------------

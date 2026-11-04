@@ -47,16 +47,16 @@
 <script src="common.js"></script>
 <script>
   const AREAS = [[1, 'Area 1'], [2, 'Area 2'], [3, 'Area 3'], [4, 'Area 4'], [5, 'Area 5'], [6, 'Area 6'], [7, 'Area 7'], [0, 'Unassigned']];
-  const K = { q: '', date: jmDate(0), loads: [], picks: new Map(), items: new Map(), areaDone: [], staged: [], open: null, busy: false };
+  const K = { q: '', date: VIEW_BOTH, loads: [], picks: new Map(), items: new Map(), areaDone: [], staged: [], open: null, busy: false };
   const areaName = a => (AREAS.find(x => x[0] === Number(a)) || [0, 'Unassigned'])[1];
 
   async function loadAll() {
-    const loads = (await fetchLoads(K.date)).filter(l => ['done', 'partial'].includes(l.status) && !l.closed_at);
+    const loads = (await fetchLoadsView(K.date)).filter(l => ['done', 'partial'].includes(l.status) && !l.closed_at);
     const ids = loads.map(l => l.id);
     const r = ids.length ? await sb.rpc('dispatch_pick_bundle', { p_load_ids: ids, p_with_checks: true }) : { data: { picks: [], done: [], staged: [], items: [] } };
     if (r.error) throw r.error;
     await loadKinds();
-    K.loads = loads.sort((a, b) => isSpecialLoad(b) - isSpecialLoad(a)); // pickup / donation / promotion first
+    K.loads = loads.sort((a, b) => isSpecialLoad(b) - isSpecialLoad(a) || (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)); // pickup / donation / promotion first, then in load-number (creation) order
     K.staged = r.data.staged || [];
     K.areaDone = r.data.done || [];
     K.picks = new Map(ids.map(id => [id, (r.data.picks || []).filter(x => x.load_id === id)]));
@@ -92,10 +92,11 @@
     main.innerHTML = `
       <div class="controls">
         <div class="seg" id="daySeg">
+          <button data-day="both" class="${K.date === VIEW_BOTH ? 'on' : ''}">Today + Tomorrow</button>
           <button data-day="0" class="${K.date === jmDate(0) ? 'on' : ''}">Today</button>
           <button data-day="1" class="${K.date === jmDate(1) ? 'on' : ''}">Tomorrow</button>
         </div>
-        <input type="date" id="datePick" value="${K.date}" aria-label="Load date">
+        <input type="date" id="datePick" value="${K.date === VIEW_BOTH ? '' : K.date}" aria-label="Load date">
         ${searchBox(K.q)}
       </div>
       <div class="kpis">
@@ -103,13 +104,13 @@
         <div class="kpi"><div class="l">Checked</div><div class="v">${done.length}</div><div class="s">handed to Invoicing</div></div>
         <div class="kpi"><div class="l">Short counts</div><div class="v">${K.loads.reduce((s, l) => s + checkState(l).short, 0)}</div><div class="s">items checked short</div></div>
       </div>
-      ${vis.length ? [...todo, ...done].map(loadCard).join('') : `<div class="card">${K.loads.length ? emptyState(`Nothing matches “${esc(K.q)}”`, 'Check the spelling, or clear the search.', { label: 'Clear search', id: 'clear-q' }) : emptyState(`No loads to check for ${esc(niceDate(K.date))}`, 'A load shows here once its trucker is locked in and picking has started.', { label: K.date === jmDate(0) ? 'Check tomorrow' : 'Check today', id: 'other-day' })}</div>`}`;
+      ${vis.length ? [...todo, ...done].map(loadCard).join('') : `<div class="card">${K.loads.length ? emptyState(`Nothing matches “${esc(K.q)}”`, 'Check the spelling, or clear the search.', { label: 'Clear search', id: 'clear-q' }) : emptyState(`No loads to check for ${K.date === VIEW_BOTH ? 'today or tomorrow' : esc(niceDate(K.date))}`, 'A load shows here once its trucker is locked in and picking has started.', K.date === VIEW_BOTH ? undefined : { label: K.date === jmDate(0) ? 'Check tomorrow' : 'Check today', id: 'other-day' })}</div>`}`;
   }
 
   function loadCard(l) {
     const s = checkState(l);
     return `<button class="cload" data-open="${l.id}">
-      <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${loadKindTags(l)}${waveTag(l.wave)}${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b><span class="target">${esc(l.ship_via || '')}</span>
+      <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${shipsTag(l)}${loadKindTags(l)}${waveTag(l.wave)}${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b><span class="target">${esc(l.ship_via || '')}</span>
         <span class="spacer"></span>${checkPill(l)}</div>
       <div class="sub">${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} · ${plural(s.total, 'item')} ·
         ${s.areas ? `${s.staged}/${s.areas} areas staged` : 'picking not started'}${s.short ? ` · <b style="color:var(--warn-text)">${s.short} short</b>` : ''}</div>
@@ -194,7 +195,7 @@
     const nx = t.closest('[data-next]');
     if (nx) { if (nx.dataset.next === 'clear-q') { K.q = ''; render(); } else { K.date = jmDate(K.date === jmDate(0) ? 1 : 0); K.open = null; refresh(); } return; }
     const day = t.closest('#daySeg button');
-    if (day) { K.date = jmDate(Number(day.dataset.day)); K.open = null; refresh(); return; }
+    if (day) { K.date = day.dataset.day === 'both' ? VIEW_BOTH : jmDate(Number(day.dataset.day)); K.open = null; refresh(); return; }
     const op = t.closest('[data-open]');
     if (op) { K.open = Number(op.dataset.open); render(); window.scrollTo(0, 0); return; }
     if (t.closest('[data-back]')) { K.open = null; render(); return; }
