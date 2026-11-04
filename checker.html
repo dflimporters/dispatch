@@ -51,7 +51,7 @@
   const areaName = a => (AREAS.find(x => x[0] === Number(a)) || [0, 'Unassigned'])[1];
 
   async function loadAll() {
-    const loads = (await fetchLoads(K.date, { carry: true })).filter(l => ['done', 'partial'].includes(l.status) && !l.closed_at);
+    const loads = (await fetchLoads(K.date)).filter(l => ['done', 'partial'].includes(l.status) && !l.closed_at);
     const ids = loads.map(l => l.id);
     const r = ids.length ? await sb.rpc('dispatch_pick_bundle', { p_load_ids: ids, p_with_checks: true }) : { data: { picks: [], done: [], staged: [], items: [] } };
     if (r.error) throw r.error;

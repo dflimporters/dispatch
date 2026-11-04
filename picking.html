@@ -12,7 +12,8 @@
   tablet per area today, maybe a phone per picker later.
 
   A load appears once its trucker is locked in (status done/partial) and stays
-  until the checker has confirmed it. Required quantities come live from the
+  until the checker has confirmed it. Only the selected day's loads show (no
+  carry-over from earlier days; pick the date to see those). Required quantities come live from the
   shipment lines (dispatch_pick_list), so a corrected shipment shows at once.
   The picker records what they picked (dispatch_pick_set): "All" for a full
   pick, or a number for a short. An area is marked done once every item in it
@@ -68,7 +69,7 @@
   function inArea(line) { return P.area === 'all' || line.area === Number(P.area); }
 
   async function loadAll() {
-    const loads = (await fetchLoads(P.date, { carry: true, events: false })).filter(l => ['done', 'partial'].includes(l.status) && l.check_status !== 'confirmed' && !l.checker_done_at && !l.closed_at);
+    const loads = (await fetchLoads(P.date, { events: false })).filter(l => ['done', 'partial'].includes(l.status) && l.check_status !== 'confirmed' && !l.checker_done_at && !l.closed_at);
     await loadKinds();
     P.loads = loads.sort((a, b) => isSpecialLoad(b) - isSpecialLoad(a)); // pickup / donation / promotion first
     await loadPicks();
