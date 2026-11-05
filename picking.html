@@ -55,6 +55,17 @@
   .donebar { position:sticky; bottom:10px; display:flex; gap:10px; align-items:center; background:var(--navy); color:#fff; border-radius:12px; padding:12px 14px; margin-top:12px; box-shadow:0 6px 20px rgba(15,32,68,.25); }
   .donebar { flex-wrap:wrap; }
   .donebar .btn { border-color:#fff; font-size:16px; padding:12px 18px; min-height:50px; }
+  .grp { margin-bottom:14px; }
+  .ghead { position:sticky; top:0; z-index:5; display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; background:var(--navy); color:#fff; border-radius:10px; padding:8px 12px; margin-bottom:6px; }
+  .ghead .gl { display:flex; align-items:center; gap:8px; flex-wrap:wrap; } .ghead .gl b { font-size:16px; }
+  .ghead .gr { display:flex; gap:6px; }
+  .ghead .btn { min-height:40px; }
+  .item { grid-template-columns:minmax(0,1fr) 70px auto; padding:8px 12px; margin-bottom:6px; }
+  .item .acts { grid-column:auto; }
+  .item .acts .btn { min-height:46px; font-size:15px; padding:8px 14px; }
+  .item .acts .btn[data-all] { flex:0 0 auto; font-size:16px; }
+  .item .acts input { min-height:46px; width:84px; }
+  @media (max-width:1100px) { .item { grid-template-columns:minmax(0,1fr) 70px; } .item .acts { grid-column:1 / -1; } }
   @media (max-width:640px) { .kpis { display:none; } }
 </style>
 </head>
@@ -65,7 +76,7 @@
 <script src="common.js"></script>
 <script>
   const AREAS = [[1, 'Area 1'], [2, 'Area 2'], [3, 'Area 3'], [4, 'Area 4'], [5, 'Area 5'], [6, 'Area 6'], [7, 'Area 7'], [0, 'Unassigned']];
-  const P = { date: VIEW_BOTH, loads: [], lists: new Map(), done: [], open: null, busy: false, area: 'all', q: '' };
+  const P = { date: VIEW_BOTH, loads: [], lists: new Map(), done: [], sel: null, busy: false, area: 'all', q: '' };
   try { const a = localStorage.getItem('dispatch-pick-area'); if (a) P.area = a; } catch (e) {}
   function areaName(a) { return (AREAS.find(x => x[0] === Number(a)) || [0, 'Unassigned'])[1]; }
   function inArea(line) { return P.area === 'all' || line.area === Number(P.area); }
@@ -96,9 +107,18 @@
 
   function render() {
     const main = document.getElementById('main');
-    if (P.open) { morphHTML(main, loadView(P.loads.find(l => l.id === P.open))); return; }
     const mine = P.loads.filter(l => (P.lists.get(l.id) || []).some(inArea) && loadMatches(l, P.q));
-    const allLines = P.loads.flatMap(l => (P.lists.get(l.id) || []).filter(inArea));
+    const cur = mine.find(l => l.id === P.sel) || mine[0] || null;
+    P.sel = cur ? cur.id : null;
+    const allLines = mine.flatMap(l => (P.lists.get(l.id) || []).filter(inArea));
+    const shown = cur ? [cur] : [];
+    // One load at a time, grouped by area; lines inside an area follow the Sort button.
+    const groups = [];
+    shown.forEach(l => areasOf(l.id).filter(a => P.area === 'all' || a === Number(P.area)).forEach(a =>
+      groups.push({ a, l, lines: (P.lists.get(l.id) || []).filter(x => x.area === a) })));
+    groups.sort((x, y) => (x.a || 9) - (y.a || 9));
+    const empty = `<div class="card">${P.q ? emptyState(`Nothing matches “${esc(P.q)}”`, 'Check the spelling, or clear the search.', { label: 'Clear search', id: 'clear-q' })
+        : emptyState(`No loads to pick${P.area === 'all' ? '' : ' in ' + areaName(P.area)} for ${P.date === VIEW_BOTH ? 'today or tomorrow' : esc(niceDate(P.date))}`, 'A load shows here once its trucker is locked in.', P.area !== 'all' ? { label: 'Show all areas', id: 'all-areas' } : P.date === VIEW_BOTH ? undefined : P.date === jmDate(0) ? { label: 'Check tomorrow', id: 'tomorrow' } : { label: 'Check today', id: 'today' })}</div>`;
     morphHTML(main, `
       <div class="controls">
         <div class="seg" id="daySeg">
@@ -108,6 +128,7 @@
         </div>
         <input type="date" id="datePick" value="${P.date === VIEW_BOTH ? '' : P.date}" aria-label="Load date">
         ${searchBox(P.q)}
+        ${sortButton()}
       </div>
       <div class="areas" role="group" aria-label="My area">
         <button data-area="all" class="${P.area === 'all' ? 'on' : ''}">All areas</button>
@@ -119,59 +140,42 @@
         <div class="kpi ${allLines.some(x => x.picked_qty != null && Number(x.picked_qty) < Number(x.required)) ? 'warn' : ''}"><div class="l">Short</div><div class="v">${allLines.filter(x => x.picked_qty != null && Number(x.picked_qty) < Number(x.required)).length}</div><div class="s">lines picked short</div></div>
         <div class="kpi"><div class="l">Cases</div><div class="v">${fmt(allLines.reduce((s, x) => s + Number(x.required), 0))}</div><div class="s">to pick</div></div>
       </div>
-      ${mine.length ? mine.map(loadCard).join('') : `<div class="card">${P.q ? emptyState(`Nothing matches “${esc(P.q)}”`, 'Check the spelling, or clear the search.', { label: 'Clear search', id: 'clear-q' })
-        : emptyState(`No loads to pick${P.area === 'all' ? '' : ' in ' + areaName(P.area)} for ${P.date === VIEW_BOTH ? 'today or tomorrow' : esc(niceDate(P.date))}`, 'A load shows here once its trucker is locked in.', P.area !== 'all' ? { label: 'Show all areas', id: 'all-areas' } : P.date === VIEW_BOTH ? undefined : P.date === jmDate(0) ? { label: 'Check tomorrow', id: 'tomorrow' } : { label: 'Check today', id: 'today' })}</div>`}`);
+      ${mine.length ? `<div class="pk">${rail(mine, cur)}<div class="pkmain">${groups.length ? groups.map(groupHTML).join('') : '<div class="card"><div class="empty">Nothing to pick in this area on this load.</div></div>'}</div></div>` : empty}`);
   }
 
-  function loadCard(l) {
-    const lines = P.lists.get(l.id) || [];
-    const chips = areasOf(l.id).filter(a => P.area === 'all' || a === Number(P.area)).map(a => {
-      const al = lines.filter(x => x.area === a), got = al.filter(x => x.picked_qty != null).length;
-      const cls = areaStaged(l.id, a) ? 'done' : areaDone(l.id, a) || got ? 'part' : '';
-      return `<span class="achip ${cls}">${areaName(a)} · ${areaStaged(l.id, a) ? 'staged' : areaDone(l.id, a) ? 'picked, not staged' : `${got}/${al.length}`}</span>`;
-    }).join('');
-    return `<button class="pload" data-open="${l.id}">
-      <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${shipsTag(l)}${loadKindTags(l)}${waveTag(l.wave)}${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b>
-        <span class="target">${esc(l.ship_via || '')}</span>${l.check_status ? '<span class="pill info">Being checked</span>' : ''}</div>
-      <div class="sub">${esc(l.contractor || '')}${l.contractor ? ' · ' : ''}${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} · ${plural(lines.filter(inArea).length, 'item')}</div>
-      <div class="achips">${chips}</div>
-    </button>`;
+  // Left rail: one button per load, with a dot for how far along its picking is (in the area chosen above).
+  function rail(mine, cur) {
+    const btn = (key, on, inner) => `<button class="rl ${on ? 'on' : ''}" data-open="${key}">${inner}</button>`;
+    return `<nav class="rail" aria-label="Loads">${mine.map(l => {
+      const lines = (P.lists.get(l.id) || []).filter(inArea), got = lines.filter(x => x.picked_qty != null).length;
+      const st = lines.length && got === lines.length ? 'ok' : got ? 'part' : '';
+      return btn(l.id, cur && cur.id === l.id, `<span class="dot ${st}"></span><span class="rb"><span class="lnbr">${esc(l.load_nbr)}</span>${loadKindTags(l)}<span class="sub">${esc(l.ship_via || '')} · ${got}/${lines.length}</span></span>`);
+    }).join('')}</nav>`;
   }
 
-  function loadView(l) {
-    if (!l) { P.open = null; return '<div class="empty">That load is no longer waiting to be picked.</div>'; }
-    const lines = (P.lists.get(l.id) || []).filter(inArea);
-    const areas = [...new Set(lines.map(x => x.area))];
-    const missing = lines.filter(x => x.picked_qty == null).length;
+  // One load's lines in one area, under a header that carries that area's Done / Staged buttons.
+  function groupHTML(g) {
+    const { a, l, lines } = g;
     const locked = l.check_status === 'confirming';
-    return `
-      <button class="back" data-back>← All loads</button>
-      <div class="lhead" style="margin-bottom:6px"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${loadKindTags(l)}${waveTag(l.wave)} ${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b></div>
-        <span class="target">${esc(l.ship_via || '')}</span></div>
-      <div class="muted" style="margin-bottom:10px">${esc(l.zones.join(', '))} · ${P.area === 'all' ? 'all areas' : areaName(P.area)} · ${plural(lines.length, 'item')}</div>
-      ${l.check_status ? '<div class="warnbox info">The checker has started on this load. Changes here still count until it\'s confirmed.</div>' : ''}
-      ${areas.map(a => {
-        const al = lines.filter(x => x.area === a);
-        return `<div class="section-h" style="font-size:13px;font-weight:700;color:var(--navy);margin:14px 2px 6px">${areaName(a)}${areaDone(l.id, a) ? ' · <span class="pill ok">picked</span>' : ''}${areaStaged(l.id, a) ? ' <span class="pill ok">staged</span>' : ''}</div>
-          ${al.map(x => itemRow(l, x, locked)).join('')}`;
-      }).join('')}
-      ${lines.length ? `<div class="donebar">
-        <span>${missing ? `${plural(missing, 'item')} still to pick` : 'Everything has a quantity'}</span><span class="spacer"></span>
-        ${areas.map(a => areaDone(l.id, a)
-          ? (areaStaged(l.id, a)
-              ? `<button class="btn small" data-unstage="${a}" ${locked ? 'disabled' : ''}>Unstage ${areaName(a)}</button>`
-              : `<button class="btn primary" data-stage="${a}" ${locked ? 'disabled' : ''}>${areaName(a)} staged</button>`)
-            + `<button class="btn small" data-reopen="${a}" ${locked ? 'disabled' : ''}>Reopen ${areaName(a)}</button>`
-          : `<button class="btn primary" data-areadone="${a}" ${locked || lines.some(x => x.area === a && x.picked_qty == null) ? 'disabled' : ''}>${areaName(a)} done</button>`).join('')}
-      </div>` : '<div class="empty">Nothing to pick in this area on this load.</div>'}`;
+    const dn = areaDone(l.id, a), stg = areaStaged(l.id, a);
+    const ids = `data-load="${l.id}" data-area-no="${a}"`;
+    const btns = dn
+      ? (stg ? `<button class="btn small" data-unstage ${ids} ${locked ? 'disabled' : ''}>Unstage</button>`
+             : `<button class="btn primary small" data-stage ${ids} ${locked ? 'disabled' : ''}>Mark staged</button>`)
+        + `<button class="btn small" data-reopen ${ids} ${locked ? 'disabled' : ''}>Reopen</button>`
+      : `<button class="btn primary small" data-areadone ${ids} ${locked || lines.some(x => x.picked_qty == null) ? 'disabled' : ''}>${areaName(a)} done</button>`;
+    return `<section class="grp" data-item="g:${l.id}:${a}">
+      <div class="ghead"><div class="gl"><b>${areaName(a)}</b><span class="lnbr">${esc(l.load_nbr)}</span>${shipsTag(l)}${loadKindTags(l)}${waveTag(l.wave)}${loadOriginTags(l)}<span class="target">${esc(l.ship_via || '')}</span>${l.check_status ? '<span class="pill info">Being checked</span>' : ''}${dn ? '<span class="pill ok">picked</span>' : ''}${stg ? '<span class="pill ok">staged</span>' : ''}</div><div class="gr">${btns}</div></div>
+      ${lines.slice().sort(itemSorter()).map(x => itemRow(l, x, locked)).join('')}
+    </section>`;
   }
 
   function itemRow(l, x, locked) {
     const got = x.picked_qty != null, short = got && Number(x.picked_qty) < Number(x.required);
     const doneArea = !!areaDone(l.id, x.area);
     const dis = locked || doneArea ? 'disabled' : '';
-    return `<div class="item ${got ? (short ? 'short' : 'ok') : ''}" data-item="${esc(x.inventory_id)}">
-      <div><div class="desc">${esc(x.description || x.inventory_id)}</div>
+    return `<div class="item ${got ? (short ? 'short' : 'ok') : ''}" data-item="${l.id}|${esc(x.inventory_id)}" data-load="${l.id}" data-inv="${esc(x.inventory_id)}">
+      <div class="ic"><div class="desc">${esc(x.description || x.inventory_id)}</div>
         <div class="meta">${esc(x.inventory_id)} · ${esc(x.uom || '')}${x.shipments > 1 ? ` · ${x.shipments} shipments` : ''}</div></div>
       <div class="need">${fmt(x.required)}<small>to pick</small></div>
       <div class="acts">
@@ -210,8 +214,7 @@
       return '<span class="muted">' + (e.state === 'saving' ? 'Saving…' : 'Unsaved…') + '</span>';
     }
     function paint(e) {
-      if (P.open !== e.load) return;
-      const el = document.querySelector('.item[data-item="' + q(e.item) + '"] [data-st]');
+      const el = document.querySelector('.item[data-item="' + q(e.load + '|' + e.item) + '"] [data-st]');
       if (el) el.innerHTML = html(e.load, e.item);
     }
     function pending() { return [...m.values()].some(e => e.state !== 'saved'); }
@@ -300,31 +303,33 @@
       const id = nx.dataset.next;
       if (id === 'clear-q') { P.q = ''; render(); }
       else if (id === 'all-areas') { P.area = 'all'; try { localStorage.setItem('dispatch-pick-area', 'all'); } catch (x) {} render(); }
-      else { P.date = jmDate(id === 'tomorrow' ? 1 : 0); P.open = null; refresh(); }
+      else { P.date = jmDate(id === 'tomorrow' ? 1 : 0); P.sel = null; refresh(); }
       return;
     }
     const day = t.closest('#daySeg button');
-    if (day) { P.date = day.dataset.day === 'both' ? VIEW_BOTH : jmDate(Number(day.dataset.day)); P.open = null; refresh(); return; }
+    if (day) { P.date = day.dataset.day === 'both' ? VIEW_BOTH : jmDate(Number(day.dataset.day)); P.sel = null; refresh(); return; }
     const ar = t.closest('[data-area]');
     if (ar) { P.area = ar.dataset.area; try { localStorage.setItem('dispatch-pick-area', P.area); } catch (x) {} render(); return; }
     const op = t.closest('[data-open]');
-    if (op) { P.open = Number(op.dataset.open); render(); window.scrollTo(0, 0); return; }
-    if (t.closest('[data-back]')) { P.open = null; render(); return; }
-    const done = t.closest('[data-areadone]');
-    if (done) { act(() => rpc('dispatch_pick_area_done', { p_load_id: P.open, p_area: Number(done.dataset.areadone), p_done: true })); return; }
-    const st = t.closest('[data-stage]'), un = t.closest('[data-unstage]');
-    if (st || un) { act(() => rpc('dispatch_stage_area', { p_load_id: P.open, p_area: Number((st || un).dataset[st ? 'stage' : 'unstage']), p_staged: !!st })); return; }
-    const re = t.closest('[data-reopen]');
-    if (re) { act(() => rpc('dispatch_pick_area_done', { p_load_id: P.open, p_area: Number(re.dataset.reopen), p_done: false })); return; }
+    if (t.closest('#sortBtn')) { toggleSort(); render(); return; }
+    if (op) { P.sel = Number(op.dataset.open); render(); const pm = document.querySelector('.pkmain'); if (pm) pm.scrollIntoView({ block: 'start' }); return; }
+    const ab = t.closest('[data-areadone],[data-stage],[data-unstage],[data-reopen]');
+    if (ab) {
+      const lid = Number(ab.dataset.load), ar2 = Number(ab.dataset.areaNo);
+      if ('areadone' in ab.dataset) act(() => rpc('dispatch_pick_area_done', { p_load_id: lid, p_area: ar2, p_done: true }));
+      else if ('reopen' in ab.dataset) act(() => rpc('dispatch_pick_area_done', { p_load_id: lid, p_area: ar2, p_done: false }));
+      else act(() => rpc('dispatch_stage_area', { p_load_id: lid, p_area: ar2, p_staged: 'stage' in ab.dataset }));
+      return;
+    }
     const row = t.closest('.item[data-item]');
     if (!row) return;
-    const item = row.dataset.item;
+    const item = row.dataset.inv, loadId0 = Number(row.dataset.load);
     if (t.closest('[data-retry]')) { AS.retryFailed(); return; }
-    const line = (P.lists.get(P.open) || []).find(x => x.inventory_id === item);
-    if (t.closest('[data-all]')) { setPick(P.open, item, Number(line.required)); return; }
-    if (t.closest('[data-zero]')) { setPick(P.open, item, 0); return; }
+    const line = (P.lists.get(loadId0) || []).find(x => x.inventory_id === item);
+    if (t.closest('[data-all]')) { setPick(loadId0, item, Number(line.required)); return; }
+    if (t.closest('[data-zero]')) { setPick(loadId0, item, 0); return; }
     if (t.closest('[data-clear]')) {
-      const was = line.picked_qty, loadId = P.open;
+      const was = line.picked_qty, loadId = loadId0;
       setPick(loadId, item, null);
       if (was != null) toast('Pick cleared', false, { action: { label: 'Undo', fn: () => setPick(loadId, item, Number(was)) } });
       return;
@@ -334,7 +339,7 @@
   document.getElementById('app').addEventListener('keydown', e => {
     if (e.key !== 'Enter' || !e.target.dataset || e.target.dataset.qty === undefined) return;
     const row = e.target.closest('.item[data-item]');
-    saveQty(row, (P.lists.get(P.open) || []).find(x => x.inventory_id === row.dataset.item));
+    saveQty(row, (P.lists.get(Number(row.dataset.load)) || []).find(x => x.inventory_id === row.dataset.inv));
   });
   // The box can't go above what the load needs: anything higher snaps back.
   document.getElementById('app').addEventListener('input', e => {
@@ -348,15 +353,15 @@
     }
     const row = t.closest('.item[data-item]');
     // An emptied box clears the pick (null), same as the Clear button.
-    if (row && P.open && t.value.trim() === '') AS.set(P.open, row.dataset.item, null);
-    else if (row && P.open && Number(t.value) >= 0) AS.set(P.open, row.dataset.item, Math.round(Number(t.value)));
+    if (row && t.value.trim() === '') AS.set(Number(row.dataset.load), row.dataset.inv, null);
+    else if (row && Number(t.value) >= 0) AS.set(Number(row.dataset.load), row.dataset.inv, Math.round(Number(t.value)));
   });
   document.getElementById('app').addEventListener('focusout', e => {
     const row = e.target.closest && e.target.closest('.item[data-item]');
-    if (row && e.target.dataset && e.target.dataset.qty !== undefined && P.open) AS.flush(AS.key(P.open, row.dataset.item));
+    if (row && e.target.dataset && e.target.dataset.qty !== undefined) AS.flush(AS.key(Number(row.dataset.load), row.dataset.inv));
   });
   document.getElementById('app').addEventListener('change', e => {
-    if (e.target.id === 'datePick' && e.target.value) { P.date = e.target.value; P.open = null; refresh(); }
+    if (e.target.id === 'datePick' && e.target.value) { P.date = e.target.value; P.sel = null; refresh(); }
   });
   function saveQty(row, line) {
     const v = row.querySelector('[data-qty]').value.trim();
@@ -365,7 +370,7 @@
     if (!(n >= 0)) { toast('That isn\'t a quantity', true); return; }
     if (n > Number(line.required)) { toast(`Only ${fmt(line.required)} needed. You can't pick more than that.`, true); return; }
     // Same absolute-value write the autosave makes, so pressing Save after autosave doesn't double-count.
-    setPick(P.open, line.inventory_id, n);
+    setPick(Number(row.dataset.load), line.inventory_id, n);
   }
   // All / 0 / Clear / Save: show the new quantity at once and save it through the same queue as typing.
   // Nothing blocks the next tap, and only the row that changed is redrawn (so the keyboard and scroll
@@ -389,7 +394,7 @@
 
   startPage({
     page: 'picker', role: 'picker', title: 'Picking',
-    onEnvChange: () => { P.open = null; refresh(); },
+    onEnvChange: () => { P.sel = null; refresh(); },
     onReady: () => {
       refresh();
       keepFresh(refresh, () => P.busy || editing() || AS.pending(), ['pick_lines', 'pick_area_status', 'stage_area_status', 'loads']);

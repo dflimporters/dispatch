@@ -805,3 +805,14 @@ function eventList(evs, key) {
   return `<details ${key ? keep(key) : ''}><summary>History (${evs.length})</summary><ul class="evs">${evs.map(e => `<li><b>${esc(label(e))}</b>${e.ship_via ? ' · ' + esc(e.ship_via) : ''}${e.contractor ? ' · ' + esc(e.contractor) : ''}${e.note ? ' — ' + esc(e.note) : ''}
     <span style="float:right">${esc(e.actor_name || '')}, ${esc(stamp(e.created_at))}</span></li>`).join('')}</ul></details>`;
 }
+
+// Item sort shared by Picking and Checker: by item ID or A-Z by description. One button flips it, and the choice is kept per tablet.
+function sortMode() { try { return localStorage.getItem('dispatch-sort') === 'name' ? 'name' : 'id'; } catch (e) { return 'id'; } }
+function toggleSort() { const m = sortMode() === 'id' ? 'name' : 'id'; try { localStorage.setItem('dispatch-sort', m); } catch (e) {} return m; }
+function itemSorter() {
+  const c = (a, b) => String(a || '').localeCompare(String(b || ''), undefined, { numeric: true, sensitivity: 'base' });
+  return sortMode() === 'name'
+    ? (a, b) => c(a.description || a.inventory_id, b.description || b.inventory_id) || c(a.inventory_id, b.inventory_id)
+    : (a, b) => c(a.inventory_id, b.inventory_id);
+}
+function sortButton() { return `<button class="btn small" id="sortBtn" title="Change the order of the lines">Sort: ${sortMode() === 'name' ? 'A–Z' : 'Item ID'}</button>`; }

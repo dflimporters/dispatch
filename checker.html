@@ -24,16 +24,18 @@
   .cload .top { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   .cload .sub { font-size:13px; color:var(--text-muted); margin-top:4px; }
   .back { font:inherit; font-size:14px; font-weight:600; background:none; border:0; color:var(--accent); cursor:pointer; padding:4px 0; margin-bottom:8px; }
-  .item { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px 12px; align-items:center; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px; margin-bottom:8px; }
+  .item { display:grid; grid-template-columns:minmax(0,1fr) 70px auto; gap:8px 12px; align-items:center; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:8px 12px; margin-bottom:6px; }
+  .fbar { display:flex; gap:8px; align-items:center; margin:0 0 8px; }
+  @media (max-width:1100px) { .item { grid-template-columns:minmax(0,1fr) 70px; } .item .acts { grid-column:1 / -1; } }
   .item.ok { border-color:#34d399; border-left-width:6px; background:var(--ok-bg); }
   .item .desc { font-size:15px; font-weight:600; color:var(--navy); line-height:1.3; }
   .item .meta { font-size:12.5px; color:var(--text-muted); margin-top:2px; }
   .item .need { font-size:22px; font-weight:700; color:var(--navy); text-align:right; font-variant-numeric:tabular-nums; }
   .item .need small { display:block; font-size:11px; font-weight:500; color:var(--text-muted); }
-  .item .acts { grid-column:1 / -1; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-  .item .acts input[type=number] { width:104px; min-height:52px; font:inherit; font-size:20px; padding:9px 10px; border:1px solid var(--border2); border-radius:8px; text-align:right; }
-  .item .acts .btn { font-size:16px; padding:12px 16px; min-height:52px; }
-  .item .tick { display:inline-flex; align-items:center; gap:10px; font-size:16px; font-weight:600; color:var(--navy); cursor:pointer; padding:10px 6px; min-height:52px; }
+  .item .acts { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .item .acts input[type=number] { width:96px; min-height:48px; font:inherit; font-size:20px; padding:9px 10px; border:1px solid var(--border2); border-radius:8px; text-align:right; }
+  .item .acts .btn { font-size:15px; padding:8px 14px; min-height:48px; }
+  .item .tick { display:inline-flex; align-items:center; gap:10px; font-size:15px; font-weight:600; color:var(--navy); cursor:pointer; padding:6px 6px; min-height:48px; }
   .item .tick input { width:34px; height:34px; cursor:pointer; accent-color:#059669; }
   .item .got { font-size:13px; color:var(--text-muted); margin-left:auto; }
   .areah { font-size:13px; font-weight:700; color:var(--navy); margin:14px 2px 6px; display:flex; align-items:center; gap:8px; }
@@ -48,7 +50,7 @@
 <script src="common.js"></script>
 <script>
   const AREAS = [[1, 'Area 1'], [2, 'Area 2'], [3, 'Area 3'], [4, 'Area 4'], [5, 'Area 5'], [6, 'Area 6'], [7, 'Area 7'], [0, 'Unassigned']];
-  const K = { q: '', date: VIEW_BOTH, loads: [], picks: new Map(), items: new Map(), areaDone: [], staged: [], open: null, busy: false };
+  const K = { q: '', date: VIEW_BOTH, loads: [], picks: new Map(), items: new Map(), areaDone: [], staged: [], sel: null, filter: 'all', busy: false };
   const areaName = a => (AREAS.find(x => x[0] === Number(a)) || [0, 'Unassigned'])[1];
 
   async function loadAll() {
@@ -88,11 +90,31 @@
     return '<span class="pill done">Not checked</span>';
   }
 
+  // Who's checking: the tablets share one login, so each load asks for a name once (kept on this tablet).
+  const WHO_KEY = 'dispatch-checker-who', NAMES_KEY = 'dispatch-checker-names';
+  const lsGet = (k, d) => { try { return JSON.parse(localStorage.getItem(k) || '') || d; } catch (e) { return d; } };
+  const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+  const whoOf = id => (lsGet(WHO_KEY, {})[id] || '');
+  function setWho(id, name) {
+    name = String(name || '').trim().slice(0, 60);
+    const m = lsGet(WHO_KEY, {});
+    if (name) m[id] = name; else delete m[id];
+    const keys = Object.keys(m); if (keys.length > 80) keys.slice(0, keys.length - 80).forEach(k => delete m[k]);
+    lsSet(WHO_KEY, m);
+    if (name) lsSet(NAMES_KEY, [name, ...lsGet(NAMES_KEY, []).filter(n => n !== name)].slice(0, 6));
+  }
+
+  function curLoad(vis) {
+    const l = vis.find(x => x.id === K.sel) || vis.find(x => !x.checker_done_at) || vis[0] || null;
+    K.sel = l ? l.id : null;
+    return l;
+  }
+
   function render() {
     const main = document.getElementById('main');
-    if (K.open) { morphHTML(main, loadView(K.loads.find(l => l.id === K.open))); return; }
     const vis = K.loads.filter(l => loadMatches(l, K.q));
     const todo = vis.filter(l => !l.checker_done_at), done = vis.filter(l => l.checker_done_at);
+    const cur = vis.length ? curLoad(vis) : null;
     morphHTML(main, `
       <div class="controls">
         <div class="seg" id="daySeg">
@@ -102,46 +124,65 @@
         </div>
         <input type="date" id="datePick" value="${K.date === VIEW_BOTH ? '' : K.date}" aria-label="Load date">
         ${searchBox(K.q)}
+        ${sortButton()}
       </div>
       <div class="kpis">
         <div class="kpi"><div class="l">To check</div><div class="v">${todo.length}</div><div class="s">${todo.filter(l => { const s = checkState(l); return s.areas && s.staged === s.areas; }).length} fully staged</div></div>
         <div class="kpi"><div class="l">Checked</div><div class="v">${done.length}</div><div class="s">handed to Invoicing</div></div>
         <div class="kpi"><div class="l">Short counts</div><div class="v">${K.loads.reduce((s, l) => s + checkState(l).short, 0)}</div><div class="s">items checked short</div></div>
       </div>
-      ${vis.length ? [...todo, ...done].map(loadCard).join('') : `<div class="card">${K.loads.length ? emptyState(`Nothing matches “${esc(K.q)}”`, 'Check the spelling, or clear the search.', { label: 'Clear search', id: 'clear-q' }) : emptyState(`No loads to check for ${K.date === VIEW_BOTH ? 'today or tomorrow' : esc(niceDate(K.date))}`, 'A load shows here once its trucker is locked in and picking has started.', K.date === VIEW_BOTH ? undefined : { label: K.date === jmDate(0) ? 'Check tomorrow' : 'Check today', id: 'other-day' })}</div>`}`);
+      ${vis.length ? `<div class="pk">${rail(todo, done, cur)}<div class="pkmain">${loadView(cur)}</div></div>` : `<div class="card">${K.loads.length ? emptyState(`Nothing matches “${esc(K.q)}”`, 'Check the spelling, or clear the search.', { label: 'Clear search', id: 'clear-q' }) : emptyState(`No loads to check for ${K.date === VIEW_BOTH ? 'today or tomorrow' : esc(niceDate(K.date))}`, 'A load shows here once its trucker is locked in and picking has started.', K.date === VIEW_BOTH ? undefined : { label: K.date === jmDate(0) ? 'Check tomorrow' : 'Check today', id: 'other-day' })}</div>`}`);
   }
 
-  function loadCard(l) {
-    const s = checkState(l);
-    return `<button class="cload" data-open="${l.id}">
-      <div class="top"><span class="lnbr">${esc(l.load_nbr)}</span>${shipsTag(l)}${loadKindTags(l)}${waveTag(l.wave)}${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b><span class="target">${esc(l.ship_via || '')}</span>
-        <span class="spacer"></span>${checkPill(l)}</div>
-      <div class="sub">${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} · ${plural(s.total, 'item')} ·
-        ${s.areas ? `${s.staged}/${s.areas} areas staged` : 'picking not started'}${s.short ? ` · <b style="color:var(--warn-text)">${s.short} short</b>` : ''}</div>
-    </button>`;
+  // Left rail: loads still to check, then the ones already handed to Invoicing.
+  function rail(todo, done, cur) {
+    const btn = l => {
+      const s = checkState(l);
+      const st = l.checker_done_at || (s.total && s.ticked === s.total) ? 'ok' : s.ticked ? 'part' : '';
+      return `<button class="rl ${cur && cur.id === l.id ? 'on' : ''}" data-open="${l.id}"><span class="dot ${st}"></span><span class="rb"><span class="lnbr">${esc(l.load_nbr)}</span>${loadKindTags(l)}<span class="sub">${esc(l.ship_via || '')} · ${l.checker_done_at ? 'checked' : `${s.ticked}/${s.total}`}${s.short ? ` · <b style="color:var(--warn-text)">${s.short} short</b>` : ''}</span></span></button>`;
+    };
+    return `<nav class="rail" aria-label="Loads">${todo.map(btn).join('')}${done.length ? `<div class="rh">Checked</div>${done.map(btn).join('')}` : ''}</nav>`;
+  }
+
+  function whoPrompt(l) {
+    const names = lsGet(NAMES_KEY, []);
+    return `<div class="card" style="padding:18px" data-item="who">
+      <div style="font-size:18px;font-weight:700;color:var(--navy);margin-bottom:4px">Who's checking ${esc(l.load_nbr)}?</div>
+      <div class="muted" style="margin-bottom:12px">Your name goes on every line you check.</div>
+      ${names.length ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">${names.map(n => `<button class="btn" data-who="${esc(n)}" style="min-height:52px;font-size:16px">${esc(n)}</button>`).join('')}</div>` : ''}
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><input id="whoName" type="text" maxlength="60" autocomplete="off" enterkeyhint="go" placeholder="Type your name" style="flex:1 1 220px;min-height:52px;font:inherit;font-size:18px;padding:9px 12px;border:1px solid var(--border2);border-radius:8px">
+        <button class="btn primary" data-whogo style="min-height:52px;font-size:16px">Start checking</button></div>
+    </div>`;
   }
 
   function loadView(l) {
-    if (!l) { K.open = null; return '<div class="empty">That load is gone.</div>'; }
-    const lines = (K.picks.get(l.id) || []).slice().sort((a, b) => (a.area || 9) - (b.area || 9) || (a.description || '').localeCompare(b.description || ''));
+    if (!l) return '<div class="empty">That load is gone.</div>';
+    const all = (K.picks.get(l.id) || []).slice().sort(itemSorter());
     const got = itemsOf(l), s = checkState(l);
     const finished = !!l.checker_done_at, locked = finished;
     const canReopen = finished && !withAcumatica(l);
-    const areas = [...new Set(lines.map(x => x.area))];
+    const who = whoOf(l.id);
+    const unchecked = all.length - s.ticked;
+    const f = K.filter || 'all';
+    const isShort = x => { const c = got.get(x.inventory_id); return !!(c && c.checked_qty != null && Number(c.checked_qty) < Number(x.required)); };
+    const lines = all.filter(x => f === 'todo' ? !(got.get(x.inventory_id) || {}).confirmed : f === 'short' ? isShort(x) : true);
+    const shortN = all.filter(isShort).length;
     return `
-      <button class="back" data-back>← All loads</button>
-      <div class="lhead" style="margin-bottom:6px"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${loadKindTags(l)}${waveTag(l.wave)} ${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b>
+      <div class="lhead" style="margin-bottom:6px"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${shipsTag(l)}${loadKindTags(l)}${waveTag(l.wave)} ${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b>
         <span class="target">${esc(l.ship_via || '')}</span> <span class="muted">${esc(l.contractor || '')}</span></div>${checkPill(l)}</div>
-      <div class="muted" style="margin-bottom:10px">${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} · ${plural(lines.length, 'item')}${s.areas ? ` · ${s.staged}/${s.areas} areas staged` : ''}</div>
+      <div class="muted" style="margin-bottom:10px">${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} · ${plural(all.length, 'item')}${s.areas ? ` · ${s.staged}/${s.areas} areas staged` : ''}${!finished && who ? ` · Checking: <b>${esc(who)}</b> <button class="back" data-whochange style="margin:0 0 0 6px">Change</button>` : ''}</div>
       ${s.areas && s.staged < s.areas && !finished ? `<div class="warnbox info">${s.areas - s.staged} of ${s.areas} area(s) not staged yet.</div>` : ''}
       ${finished ? `<div class="warnbox info">${withAcumatica(l) ? 'Invoicing has this load in Acumatica now.' : 'Check finished. Invoicing confirms this load in Acumatica.'}</div>` : ''}
-      ${!lines.length ? '<div class="warnbox bad">No item lines for this load\'s shipments' + (D.env === 'live' ? ' (the live line sync may not be running yet).' : '; pull fresh TEST data.') + '</div>' : ''}
-      ${areas.map(a => `<div class="areah">${areaName(a)}</div>${lines.filter(x => x.area === a).map(x => itemRow(l, x, got.get(x.inventory_id), locked)).join('')}`).join('')}
-      ${lines.length ? `<div class="sumbar">
-        <span><b>${s.ticked}</b> of ${s.total} lines checked${s.short ? ` · ${s.short} short` : ''}</span><span class="spacer"></span>
+      ${!all.length ? '<div class="warnbox bad">No item lines for this load\'s shipments' + (D.env === 'live' ? ' (the live line sync may not be running yet).' : '; pull fresh TEST data.') + '</div>' : ''}
+      ${!finished && !who && all.length ? whoPrompt(l) : `
+      ${all.length ? `<div class="fbar"><div class="seg" id="fSeg"><button data-filter="all" class="${f === 'all' ? 'on' : ''}">All ${all.length}</button><button data-filter="todo" class="${f === 'todo' ? 'on' : ''}">Unchecked ${unchecked}</button><button data-filter="short" class="${f === 'short' ? 'on' : ''}">Short ${shortN}</button></div></div>` : ''}
+      ${lines.map(x => itemRow(l, x, got.get(x.inventory_id), locked)).join('')}
+      ${all.length && !lines.length ? `<div class="card"><div class="empty">${f === 'short' ? 'No short lines.' : 'Every line is checked.'}</div></div>` : ''}
+      ${all.length ? `<div class="sumbar">
+        <span><b>${s.ticked}</b> of ${s.total} lines checked${s.short ? ` · ${s.short} short` : ''}${unchecked && !finished ? ` · ${unchecked} to go` : ''}</span><span class="spacer"></span>
         ${finished ? (canReopen ? '<button class="btn small" data-act="reopen">Reopen check</button>' : '')
           : `<button class="btn primary" data-act="finish" ${s.ticked === s.total ? '' : 'disabled'}>Finish check</button>`}
-      </div>` : ''}
+      </div>` : ''}`}
       ${eventList(l.events, 'hist-' + l.id)}`;
   }
 
@@ -151,8 +192,8 @@
     const fill = x.picked_qty != null ? Number(x.picked_qty) : Number(x.required);
     const dis = locked ? 'disabled' : '';
     return `<div class="item ${ok ? 'ok' : ''}" data-item="${esc(x.inventory_id)}">
-      <div><div class="desc">${esc(x.description || x.inventory_id)}</div>
-        <div class="meta">${esc(x.inventory_id)} · ${esc(x.uom || '')} · ${x.picked_qty != null ? `picked ${fmt(x.picked_qty)}` : '<b style="color:var(--warn-text)">not picked</b>'}</div></div>
+      <div class="ic"><div class="desc">${esc(x.description || x.inventory_id)}</div>
+        <div class="meta">${esc(x.inventory_id)} · ${esc(x.uom || '')} · ${areaName(x.area)} · ${x.picked_qty != null ? `picked ${fmt(x.picked_qty)}` : '<b style="color:var(--warn-text)">not picked</b>'}</div></div>
       <div class="need">${fmt(x.required)}<small>on load</small></div>
       <div class="acts">
         <input type="number" inputmode="numeric" enterkeyhint="done" autocomplete="off" min="0" max="${Number(x.required)}" step="1" data-qty value="${qty != null ? qty : ''}" placeholder="Checked" aria-label="Checked quantity for ${esc(x.inventory_id)}" ${dis || (ok ? 'disabled' : '')}>
@@ -177,18 +218,22 @@
   // waits until the queue is empty, so it can't paint an older answer over a tick just made.
   // If a save fails the line goes back to what it was, with a Retry.
   let saveChain = Promise.resolve();
-  function saveItem(row, qty, confirmed) { return saveLine(K.loads.find(x => x.id === K.open), row.dataset.item, qty, confirmed); }
+  function saveItem(row, qty, confirmed) { return saveLine(K.loads.find(x => x.id === K.sel), row.dataset.item, qty, confirmed); }
   function saveLine(l, inv, qty, confirmed) {
     const m = itemsOf(l); K.items.set(l.id, m);
     const prev = m.get(inv);
     if (qty == null) m.delete(inv);
-    else m.set(inv, { load_id: l.id, inventory_id: inv, checked_qty: qty, confirmed, checker_name: D.me && D.me.name, checked_at: new Date().toISOString() });
+    else m.set(inv, { load_id: l.id, inventory_id: inv, checked_qty: qty, confirmed, checker_name: whoOf(l.id) || (D.me && D.me.name), checked_at: new Date().toISOString() });
     render();
     K.saving = (K.saving || 0) + 1; K.epoch = (K.epoch || 0) + 1;
     saveChain = saveChain.then(async () => {
       try {
-        const { error } = await sb.rpc('dispatch_check_item', { p_load_id: l.id, p_inventory_id: inv, p_qty: qty, p_confirmed: confirmed });
-        if (error) throw error;
+        const args = { p_load_id: l.id, p_inventory_id: inv, p_qty: qty, p_confirmed: confirmed };
+        const nm = whoOf(l.id);
+        // Database without the p_checker argument yet: save without the name rather than fail.
+        let r = nm && !K.noWho ? await sb.rpc('dispatch_check_item', { ...args, p_checker: nm }) : await sb.rpc('dispatch_check_item', args);
+        if (r.error && nm && !K.noWho && (r.error.code === 'PGRST202' || /could not find the function/i.test(r.error.message || ''))) { K.noWho = true; r = await sb.rpc('dispatch_check_item', args); }
+        if (r.error) throw r.error;
         feedback('ok'); flashSaved();
       } catch (error) {
         feedback('bad');
@@ -210,17 +255,26 @@
     if (n > Number(line.required)) { toast(`Only ${fmt(line.required)} on the load. Checked can't be more.`, true); return undefined; }
     return n;
   }
-  const lineOf = row => (K.picks.get(K.open) || []).find(x => x.inventory_id === row.dataset.item);
+  const lineOf = row => (K.picks.get(K.sel) || []).find(x => x.inventory_id === row.dataset.item);
 
   document.getElementById('app').addEventListener('click', e => {
     const t = e.target;
     const nx = t.closest('[data-next]');
-    if (nx) { if (nx.dataset.next === 'clear-q') { K.q = ''; render(); } else { K.date = jmDate(K.date === jmDate(0) ? 1 : 0); K.open = null; refresh(); } return; }
+    if (nx) { if (nx.dataset.next === 'clear-q') { K.q = ''; render(); } else { K.date = jmDate(K.date === jmDate(0) ? 1 : 0); K.sel = null; refresh(); } return; }
     const day = t.closest('#daySeg button');
-    if (day) { K.date = day.dataset.day === 'both' ? VIEW_BOTH : jmDate(Number(day.dataset.day)); K.open = null; refresh(); return; }
+    if (day) { K.date = day.dataset.day === 'both' ? VIEW_BOTH : jmDate(Number(day.dataset.day)); K.sel = null; refresh(); return; }
     const op = t.closest('[data-open]');
-    if (op) { K.open = Number(op.dataset.open); render(); window.scrollTo(0, 0); return; }
-    if (t.closest('[data-back]')) { K.open = null; render(); return; }
+    if (t.closest('#sortBtn')) { toggleSort(); render(); return; }
+    const fl = t.closest('[data-filter]');
+    if (fl) { K.filter = fl.dataset.filter; render(); return; }
+    if (op) { K.sel = Number(op.dataset.open); K.filter = 'all'; render(); const pm = document.querySelector('.pkmain'); if (pm) pm.scrollIntoView({ block: 'start' }); return; }
+    const wh = t.closest('[data-who]'), wg = t.closest('[data-whogo]');
+    if (wh || wg) {
+      const nm = wh ? wh.dataset.who : (document.getElementById('whoName') || {}).value;
+      if (!String(nm || '').trim()) { toast('Type your name first', true); return; }
+      setWho(K.sel, nm); render(); return;
+    }
+    if (t.closest('[data-whochange]')) { setWho(K.sel, ''); render(); return; }
     const fill = t.closest('[data-fill]');
     if (fill) {
       const row = fill.closest('.item'); row.querySelector('[data-qty]').value = fill.dataset.fill;
@@ -228,20 +282,23 @@
     }
     const b = t.closest('[data-act]');
     if (!b) return;
-    const l = K.loads.find(x => x.id === K.open);
+    const l = K.loads.find(x => x.id === K.sel);
     if (b.dataset.act === 'finish') {
       const s = checkState(l);
       if (!confirm(`Finish checking ${l.load_nbr}?\n\n${s.short ? `${plural(s.short, 'item')} checked short. ` : ''}It goes to Invoicing, and you can't change lines after this unless you reopen it.`)) return;
-      act(async () => { await saveChain; const { error } = await sb.rpc('dispatch_check_finish', { p_load_id: l.id }); if (error) throw error; toast('Check finished. With Invoicing now.', false, { action: { label: 'Undo', fn: () => act(async () => { const r = await sb.rpc('dispatch_check_reopen', { p_load_id: l.id }); if (r.error) throw r.error; toast('Check reopened'); }) } }); });
+      act(async () => { await saveChain; const { error } = await sb.rpc('dispatch_check_finish', { p_load_id: l.id }); if (error) throw error; const nx = K.loads.find(x => x.id !== l.id && !x.checker_done_at); if (nx) { K.sel = nx.id; K.filter = 'all'; } toast('Check finished. With Invoicing now.', false, { action: { label: 'Undo', fn: () => act(async () => { const r = await sb.rpc('dispatch_check_reopen', { p_load_id: l.id }); if (r.error) throw r.error; toast('Check reopened'); }) } }); });
     }
     if (b.dataset.act === 'reopen') act(async () => { const { error } = await sb.rpc('dispatch_check_reopen', { p_load_id: l.id }); if (error) throw error; });
   });
   document.getElementById('app').addEventListener('input', e => {
     if (e.target.id === 'q') { K.q = e.target.value; keepSearchFocus(render); }
   });
+  document.getElementById('app').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target.id === 'whoName') { e.preventDefault(); document.querySelector('[data-whogo]').click(); }
+  });
   document.getElementById('app').addEventListener('change', e => {
     const t = e.target;
-    if (t.id === 'datePick' && t.value) { K.date = t.value; K.open = null; refresh(); return; }
+    if (t.id === 'datePick' && t.value) { K.date = t.value; K.sel = null; refresh(); return; }
     const row = t.closest && t.closest('.item[data-item]');
     if (!row) return;
     const line = lineOf(row);
@@ -268,7 +325,7 @@
 
   startPage({
     page: 'checker', role: 'checker', title: 'Checker',
-    onEnvChange: () => { K.open = null; refresh(); },
+    onEnvChange: () => { K.sel = null; refresh(); },
     onReady: () => {
       refresh();
       keepFresh(refresh, () => K.busy || K.saving > 0 || editing(), ['pick_lines', 'pick_area_status', 'stage_area_status', 'check_items', 'loads']);
