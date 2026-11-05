@@ -263,14 +263,21 @@ async function syncLinks(daysBack: number) {
   const to = new Date(); to.setDate(to.getDate() + DAYS_AHEAD);
   const filter = `Date ge datetimeoffset'${isoDay(from)}T00:00:00Z' and Date le datetimeoffset'${isoDay(to)}T23:59:59Z'`;
   const rows = await listAll('SalesInvoice', { $filter: `${TYPE} and (${filter})`, $expand: 'Details', $select: 'ReferenceNbr,Details/ShipmentNbr,Details/OrderNbr' });
-  let invoices = 0, links = 0;
+  // Batched (a window is a few hundred invoices): one delete and one insert per chunk, not one pair per invoice.
+  const refs: string[] = [], all: Link[] = [];
   for (const r of rows) {
     const ref = t(v(r, 'ReferenceNbr')); if (!ref) continue;
-    const l = linksOf(ref, r.Details ?? []);
-    await replaceLinks(ref, l);
-    invoices++; links += l.length;
+    refs.push(ref); all.push(...linksOf(ref, r.Details ?? []));
   }
-  return { link_invoices: invoices, links, date_from: isoDay(from) };
+  for (let i = 0; i < refs.length; i += 200) {
+    const { error } = await supabase.from('invoice_shipments').delete().in('reference_number', refs.slice(i, i + 200));
+    if (error) throw new Error(`Link delete error: ${error.message}`);
+  }
+  for (let i = 0; i < all.length; i += 500) {
+    const { error } = await supabase.from('invoice_shipments').insert(all.slice(i, i + 500));
+    if (error) throw new Error(`Link insert error: ${error.message}`);
+  }
+  return { link_invoices: refs.length, links: all.length, date_from: isoDay(from) };
 }
 
 async function mapInvoices(inv: any[], sales: Map<string, any>): Promise<Mapped> {
