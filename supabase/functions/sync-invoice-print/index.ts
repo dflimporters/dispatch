@@ -8,6 +8,7 @@
 //   {}                      sync invoices with Date in [today - 7, today + 7], plus any invoice whose
 //                           LastModifiedDateTime is newer than the newest one stored
 //   { days_back: 30 }       widen the date window backwards (the 7 days ahead stays)
+//   { links: true, days_back: 3 }  only the invoice -> shipment/order links (table invoice_shipments), no lines
 //   { refs: ['1059165'] }   refresh just these invoices (used just before printing); the date window is skipped
 //   { probe: '1059165' }    diagnostics: returns the raw REST JSON for that invoice from Invoice and SalesInvoice,
 //                           plus the entities' field lists ($adHocSchema). Stores nothing.
@@ -231,7 +232,46 @@ function taxCat(raw: any): string | null {
   return u === 'TX' ? 'TAXABLE' : u === 'NT' ? 'NONTAXABLE' : u;
 }
 
-type Mapped = Map<string, { header: any; lines: Map<number, any> }>;
+type Link = { reference_number: string; shipment_nbr: string; order_nbr: string };
+type Mapped = Map<string, { header: any; lines: Map<number, any>; links: Link[] }>;
+
+// One (shipment, order) pair per distinct combination on the invoice's lines. This is what ties an invoice to its
+// shipment(s) even when the header OrderNbr is blank (an invoice that spans several orders).
+function linksOf(ref: string, details: any[]): Link[] {
+  const seen = new Map<string, Link>();
+  for (const d of details) {
+    const sh = t(v(d, 'ShipmentNbr')); if (!sh) continue;
+    const so = t(v(d, 'OrderNbr')) ?? '';
+    seen.set(`${sh}|${so}`, { reference_number: ref, shipment_nbr: sh, order_nbr: so });
+  }
+  return [...seen.values()];
+}
+
+async function replaceLinks(ref: string, links: Link[]) {
+  const { error: delErr } = await supabase.from('invoice_shipments').delete().eq('reference_number', ref);
+  if (delErr) throw new Error(`Link delete error (${ref}): ${delErr.message}`);
+  if (links.length) {
+    const { error: insErr } = await supabase.from('invoice_shipments').insert(links);
+    if (insErr) throw new Error(`Link insert error (${ref}): ${insErr.message}`);
+  }
+}
+
+// Links only (no lines, addresses or lookups): the cheap refresh the invoicing page asks for when a row is pending.
+// Cancelled invoices are stored too; the lookup function skips them.
+async function syncLinks(daysBack: number) {
+  const from = new Date(); from.setDate(from.getDate() - daysBack);
+  const to = new Date(); to.setDate(to.getDate() + DAYS_AHEAD);
+  const filter = `Date ge datetimeoffset'${isoDay(from)}T00:00:00Z' and Date le datetimeoffset'${isoDay(to)}T23:59:59Z'`;
+  const rows = await listAll('SalesInvoice', { $filter: `${TYPE} and (${filter})`, $expand: 'Details', $select: 'ReferenceNbr,Details/ShipmentNbr,Details/OrderNbr' });
+  let invoices = 0, links = 0;
+  for (const r of rows) {
+    const ref = t(v(r, 'ReferenceNbr')); if (!ref) continue;
+    const l = linksOf(ref, r.Details ?? []);
+    await replaceLinks(ref, l);
+    invoices++; links += l.length;
+  }
+  return { link_invoices: invoices, links, date_from: isoDay(from) };
+}
 
 async function mapInvoices(inv: any[], sales: Map<string, any>): Promise<Mapped> {
   const byRef: Mapped = new Map();
@@ -309,7 +349,7 @@ async function mapInvoices(inv: any[], sales: Map<string, any>): Promise<Mapped>
         note:         null,   // line notes are not printed
       });
     }
-    byRef.set(ref, { header, lines });
+    byRef.set(ref, { header, lines, links: linksOf(ref, sDetails) });
   }
   return byRef;
 }
@@ -332,6 +372,8 @@ async function storeInvoices(byRef: Mapped): Promise<{ invoices: number; lines: 
       .from('invoice_print_headers')
       .upsert(inv.header, { onConflict: 'ref', ignoreDuplicates: false });
     if (hdrErr) throw new Error(`Header upsert error (${ref}): ${hdrErr.message}`);
+
+    await replaceLinks(ref, inv.links);
 
     invoices++;
     lines += lineRows.length;
@@ -380,6 +422,11 @@ async function runSync(body: any) {
   const result: Record<string, any> = {};
 
   if (body?.probe !== undefined) return await runProbe(cleanRefs([body.probe])[0]);
+
+  if (body?.links) {
+    const d = Number(body.days_back);
+    return await syncLinks(Number.isFinite(d) && d >= 0 ? Math.min(Math.floor(d), 400) : 3);
+  }
 
   if (body?.refs !== undefined) {
     const refs = cleanRefs(body.refs);
@@ -430,17 +477,16 @@ Deno.serve(async (req) => {
 
   // Supervisor or manager only (the people who print invoices). verify_jwt may be on or off; the token is checked here.
   const token = (req.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '');
+  let body: any = {};
+  if (req.method === 'POST') {
+    try { body = await req.json(); } catch { body = {}; }
+  }
   const { data: u } = token ? await supabase.auth.getUser(token) : { data: null } as any;
   const { data: roleRows } = u?.user ? await supabase.from('dispatch_roles').select('role').eq('user_id', u.user.id) : { data: [] } as any;
   if (!(roleRows ?? []).some((r: any) => ['supervisor', 'manager'].includes(r.role))) {
     return new Response(JSON.stringify({ success: false, error: 'Only a supervisor or manager can refresh invoices for printing' }), {
       status: 403, headers: { 'Content-Type': 'application/json', ...CORS },
     });
-  }
-
-  let body: any = {};
-  if (req.method === 'POST') {
-    try { body = await req.json(); } catch { body = {}; }
   }
 
   try {

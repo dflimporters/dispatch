@@ -292,15 +292,25 @@
     }
     const loadOfP = new Map(ls.map(x => [x.shipment_nbr, x.loads]));
     pr.forEach(x => V.prints.set(x.shipment_nbr, x));            // ordered, so the last wins
-    const orders = [...new Set(rows.map(x => x.order_nbr).filter(Boolean))];
-    if (orders.length) {
-      const h = await sb.rpc('invoice_print_so_headers', { p_orders: orders });
-      if (h.error) throw h.error;
-      (h.data || []).forEach(x => { if (!V.hdr.has(x.order_number)) V.hdr.set(x.order_number, x); });   // newest first
-    }
+    // Invoice per shipment: matched on the shipment number Acumatica puts on each invoice line (invoice_shipments),
+    // so a shipment that carries a second sales order (a substitution) still finds its invoice. V.hdr is keyed by shipment.
     const manualOf = new Map(V.manual.map(m => [m.nbr, m]));
+    const askInv = async () => {
+      const items = rows.filter(x => !manualOf.has(x.shipment_nbr)).map(x => ({ shipment_nbr: x.shipment_nbr, order_nbr: x.order_nbr || '' }));
+      V.hdr = new Map();
+      if (!items.length) return;
+      const h = await sb.rpc('invoice_print_for_shipments', { p_items: items });
+      if (h.error) throw h.error;
+      (h.data || []).forEach(x => V.hdr.set(x.shipment_nbr, x));
+    };
+    await askInv();
+    // Anything still without an invoice number: pull the shipment-to-invoice links from Acumatica (at most once a minute), then look again.
+    if (rows.some(x => !manualOf.has(x.shipment_nbr) && !V.hdr.has(x.shipment_nbr)) && Date.now() - (V.linkTry || 0) > 60000) {
+      V.linkTry = Date.now();
+      try { await callSyncInvoiceLinks(); await askInv(); } catch (e) { console.warn('[invoicing links]', e); }
+    }
     V.pr = nbrs.filter(n => byNbr.has(n)).map(n => ({ nbr: n, ship: byNbr.get(n), load: loadOfP.get(n) || null,
-      inv: manualOf.has(n) ? { reference_number: manualOf.get(n).ref } : V.hdr.get(byNbr.get(n).order_nbr) || null }));
+      inv: manualOf.has(n) ? { reference_number: manualOf.get(n).ref } : V.hdr.get(n) || null }));
     [...V.psel].forEach(n => { if (!V.pr.some(x => x.nbr === n)) V.psel.delete(n); });
   }
 
@@ -375,6 +385,19 @@
     try { j = await res.json(); } catch (e) {}
     if (!res.ok || !(j && j.success)) throw new Error((j && j.error) || `Invoice refresh failed (${res.status})`);
     return j;
+  }
+
+  // Links only (which invoice belongs to which shipment): cheap, so the page can ask whenever a row is still pending.
+  async function callSyncInvoiceLinks() {
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) return;
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/sync-invoice-print`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: SUPABASE_PUBLISHABLE_KEY, Authorization: `Bearer ${session.access_token}` },
+      body: JSON.stringify({ links: true, days_back: 3 }),
+    });
+    const j = await res.json().catch(() => null);
+    if (!res.ok || !(j && j.success)) throw new Error((j && j.error) || `Link refresh failed (${res.status})`);
   }
 
   // Delivery slip: the same document as the invoice with no prices, tax or totals, for donation and promotion orders.
