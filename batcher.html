@@ -369,7 +369,7 @@
     }
     if (a === 'renumber') {
       const l = B.loads.find(x => x.id === id);
-      const v = prompt(`Load number for ${l.load_nbr}. Type just the number (e.g. 5) and the load's L-DDMM- is added:`, '');
+      const v = prompt(`Load number for ${l.load_nbr}. Type just the number (e.g. 5, or 05ADD for an addition) and the load's L-DDMM- is added:`, '');
       if (v === null || !v.trim() || v.trim().toUpperCase() === l.load_nbr) return;
       act(() => rpc('dispatch_set_load_nbr', { p_id: id, p_nbr: v }));
       return;
