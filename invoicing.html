@@ -90,7 +90,7 @@
   async function loadSubs() {
     try {
       const r = await sb.from('check_items')
-        .select('load_id, inventory_id, checked_qty, sub_note, sub_by_name, sub_at, loads!inner(id, load_nbr, env, ship_via, truck_type, wave, checker_done_at)')
+        .select('load_id, inventory_id, checked_qty, sub_note, sub_by_name, sub_at, sub_context, loads!inner(id, load_nbr, env, ship_via, truck_type, wave, checker_done_at)')
         .eq('sub_needed', true).is('sub_resolved_at', null).eq('loads.env', D.env).not('loads.checker_done_at', 'is', null).order('sub_at');
       if (r.error) throw r.error;
       const rows = r.data || [], ids = [...new Set(rows.map(x => x.load_id))];
@@ -100,8 +100,11 @@
         if (b.error) throw b.error;
         (b.data.picks || []).forEach(p => picks.set(p.load_id + '|' + p.inventory_id, p));
       }
-      V.subs = rows.map(x => { const p = picks.get(x.load_id + '|' + x.inventory_id) || {};
-        return { ...x, load: x.loads, desc: p.description || x.inventory_id, uom: p.uom || '', required: p.required != null ? Number(p.required) : null }; });
+      // The pick list drops a line once confirm has lowered it to 0 (and Acumatica removes it), so the description, quantity and
+      // customers come from the snapshot taken when the checker raised the flag (check_items.sub_context) when the pick list has nothing.
+      V.subs = rows.map(x => { const p = picks.get(x.load_id + '|' + x.inventory_id) || {}, c = x.sub_context || {};
+        return { ...x, load: x.loads, desc: p.description || c.description || x.inventory_id, uom: p.uom || c.uom || '',
+          required: p.required != null ? Number(p.required) : (c.required != null ? Number(c.required) : null), ctxLines: Array.isArray(c.lines) ? c.lines : [] }; });
     } catch (e) { console.warn('[invoicing subs]', e); V.subs = []; }
   }
 
@@ -117,7 +120,8 @@
           <span class="muted">${plural(g.rows.length, 'item')}</span></div>
         <table class="inv"><thead><tr><th>Item</th><th class="r">Short</th><th>Checker's note</th><th>What was done</th><th></th></tr></thead><tbody>
         ${g.rows.map(s => { const key = s.load_id + '|' + s.inventory_id, short = s.required != null ? s.required - Number(s.checked_qty) : null;
-          return `<tr><td><b>${esc(s.desc)}</b> <span class="muted num">${esc(s.inventory_id)}</span><div class="muted" style="font-size:12px">${esc(s.sub_by_name || '')} ${esc(stamp(s.sub_at))}</div></td>
+          const who = s.ctxLines.map(z => `${esc(z.customer || z.customer_id || '')} · ${esc(z.order_type || 'SO')} ${esc(z.order_nbr || '')}${z.order_line != null ? ' line ' + esc(z.order_line) : ''} · shipment ${esc(z.shipment || '')} · ${fmt(z.qty)}${s.uom ? ' ' + esc(s.uom) : ''}`).join('<br>');
+          return `<tr><td><b>${esc(s.desc)}</b> <span class="muted num">${esc(s.inventory_id)}</span>${who ? `<div style="font-size:12px">${who}</div>` : ''}<div class="muted" style="font-size:12px">${esc(s.sub_by_name || '')} ${esc(stamp(s.sub_at))}</div></td>
             <td class="r num">${short != null ? `<b style="color:var(--warn-text)">${fmt(short)}</b>` : '—'}<div class="muted" style="font-size:11px">found ${fmt(s.checked_qty)}</div></td>
             <td>${s.sub_note ? esc(s.sub_note) : '<span class="muted">—</span>'}</td>
             <td><input type="text" maxlength="200" data-subres="${esc(key)}" value="${esc(V.subRes.get(key) || '')}" placeholder="e.g. SO 209696, or customer declined" style="width:100%;min-width:180px"></td>

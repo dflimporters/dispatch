@@ -1021,7 +1021,9 @@ async function fetchShipmentLines(nbrs: string[]) {
   const want = [...new Set(nbrs.map(String).filter(n => /^[A-Za-z0-9-]+$/.test(n)))].slice(0, 50);
   const { data: known, error: ke } = await admin.from('shipments').select('shipment_nbr,status').in('shipment_nbr', want);
   if (ke) throw new Error(`shipments read: ${ke.message}`);
-  const ok = (known ?? []).filter(s => s.status === 'Completed').map(s => s.shipment_nbr as string);
+  // Completed (picked outside the portal) or Confirmed (e.g. a substitution shipment confirmed by hand in
+  // Acumatica after the load was checked: the line sync only reads Open/On Hold, so it never saw it).
+  const ok = (known ?? []).filter(s => ['Completed', 'Confirmed'].includes(s.status)).map(s => s.shipment_nbr as string);
   if (!ok.length) return { shipments: 0, lines: 0 };
 
   const t = readTargetFor('live');
@@ -1129,9 +1131,14 @@ Deno.serve(async (req) => {
 
   // Scheduled jobs with the Vault cron token: the read-only live line sync,
   // and the queue's safety-net drain.
-  if (['sync_live_lines', 'drain'].includes(p.action) && token && !token.includes('.')) {
+  if (['sync_live_lines', 'drain', 'fetch_lines'].includes(p.action) && token && !token.includes('.')) {
     const { data: ok } = await admin.rpc('dispatch_cron_ok', { p_token: token });
     if (!ok) return json({ ok: false, error: 'bad cron token' }, 401);
+    if (p.action === 'fetch_lines') {   // read-only, same as the signed-in path; lets the office/maintenance pull lines by number
+      if (!Array.isArray(p.shipments) || !p.shipments.length || p.shipments.length > 50) return json({ ok: false, error: 'shipments (1 to 50) is required' }, 400);
+      try { return json({ ok: true, ...(await fetchShipmentLines(p.shipments)) }); }
+      catch (e: any) { console.error('dispatch-acu fetch_lines (cron)', e); return json({ ok: false, error: String(e?.message ?? e) }, 500); }
+    }
     if (p.action === 'drain') {
       for (const env of ['test', 'live']) {
         try { targetFor(env); } catch { continue; }   // live writeback off: nothing can be queued there
