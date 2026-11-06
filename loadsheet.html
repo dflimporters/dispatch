@@ -472,7 +472,7 @@
   }
 
   startPage({
-    page: 'loadsheet', role: ['supervisor', 'manager'], title: 'Load sheets',
+    page: 'loadsheet', role: ['supervisor', 'manager', 'invoicer'], title: 'Load sheets',
     onEnvChange: () => { L.autoPrint = null; refresh(); },
     onReady: async () => {
       await refresh();

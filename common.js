@@ -296,7 +296,7 @@ async function startPage({ page, role, title, onReady, onEnvChange }) {
   const links = [['batcher.html', 'Coordinator', 'batcher'], ['salesorders.html', 'Sales Orders', 'batcher', 'salesorders'], ['transfers.html', 'Transfers', 'batcher', 'transfers'],
                  ['clerk.html', 'Trucker Liaison', 'clerk'], ['picking.html', 'Picking', 'picker'], ['checker.html', 'Checker', 'checker'],
                  ['tower.html', 'Control Tower', ['supervisor', 'manager'], 'tower'],
-                 ['loadsheet.html', 'Load sheets', ['supervisor', 'manager'], 'loadsheet'],
+                 ['loadsheet.html', 'Load sheets', ['supervisor', 'manager', 'invoicer'], 'loadsheet'],
                  ['returns.html', 'Returns', ['supervisor', 'manager'], 'returns'],
                  ['security.html', 'Security check', ['security', 'supervisor', 'manager'], 'security'],
                  ['contacts.html', 'Contacts', ['supervisor', 'manager'], 'contacts'],

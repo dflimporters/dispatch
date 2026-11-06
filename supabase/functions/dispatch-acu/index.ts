@@ -7,7 +7,7 @@
 //
 //   status                 -> test target, whether live writeback is on, UDF name. Any dispatch role.
 //   fetch_lines { shipments[] } -> read-only: item lines of Completed live shipments the line sync
-//                             never saw, into shipment_lines. Any batcher/clerk/supervisor/manager.
+//                             never saw, into shipment_lines. Any batcher/clerk/supervisor/manager/invoicer.
 //   sync_test              -> mirror the test target's open/confirmed shipments into shipments_test. Any dispatch role.
 //   sync_live_lines        -> read-only: production's Open/On Hold shipments' line items into
 //                             shipment_lines (env 'live') + shipments.shipment_value. Run by
@@ -1161,7 +1161,7 @@ Deno.serve(async (req) => {
       case 'sync_live_lines':
         return json({ ok: true, ...(await syncLiveLines()) });
       case 'fetch_lines': {
-        if (!roles.some(r => ['batcher', 'clerk', 'supervisor', 'manager'].includes(r))) return json({ ok: false, error: 'Not allowed' }, 403);
+        if (!roles.some(r => ['batcher', 'clerk', 'supervisor', 'manager', 'invoicer'].includes(r))) return json({ ok: false, error: 'Not allowed' }, 403);
         if (!Array.isArray(p.shipments) || !p.shipments.length || p.shipments.length > 50) return json({ ok: false, error: 'shipments (1 to 50) is required' }, 400);
         return json({ ok: true, ...(await fetchShipmentLines(p.shipments)) });
       }
