@@ -3,7 +3,8 @@
 -- The portal numbered loads itself (L-DDMM-NN), so it drifted from the batchers' own run of
 -- numbers. The number the batcher types is now the truth: the trigger still pre-fills the next
 -- number when a load is created (portal-built or auto-loaded from Acumatica), and the batcher
--- overwrites it to match their sheet. Format stays L-DDMM-NN, unique per env.
+-- overwrites it to match their sheet. Format stays L-DDMM-NN, unique per env. They can type just
+-- the number (5 -> L-<today's DDMM>-05); a full L-DDMM-NN is also accepted.
 --
 -- Allowed on any load (draft, sent, confirmed, Acumatica auto-loads, loads already being picked)
 -- until the checker has confirmed it (check_status confirming/confirmed), because the number
@@ -18,8 +19,12 @@ language plpgsql security definer set search_path = public as $$
 declare l loads; n loads; nbr text := upper(trim(coalesce(p_nbr, '')));
 begin
   perform _dispatch_require('batcher');
+  -- Just the number (5, 05, 99): fill in today's L-DDMM- (Jamaica time) and pad to two digits.
+  if nbr ~ '^[0-9]{1,4}$' then
+    nbr := 'L-' || to_char((now() at time zone 'America/Jamaica')::date, 'DDMM') || '-' || lpad(nbr, 2, '0');
+  end if;
   if nbr !~ '^L-[0-9]{4}-[0-9]{2,}$' then
-    raise exception 'Load number must look like L-0611-05 (L-DDMM-NN)';
+    raise exception 'Enter the load number, e.g. 5 (or the full L-0611-05)';
   end if;
   select * into l from loads where id = p_id for update;
   if not found then raise exception 'Load not found (it may have been deleted)'; end if;
