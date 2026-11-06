@@ -239,7 +239,7 @@
     const others = B.loads.filter(x => x.status === 'draft' && x.id !== l.id);
     const fit = bestFit(l.vol, l.drops);
     return `<div class="lcard st-${l.status}" data-load="${l.id}">
-      <div class="lhead"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${loadKindTags(l)}<span class="muted">${esc(l.zones.join(', '))}</span></div>${statusPill(l.status)}</div>
+      <div class="lhead"><div><span class="lnbr">${esc(l.load_nbr)}</span>${l.check_status === 'confirmed' || l.check_status === 'confirming' ? '' : ` <button class="btn small" data-act="renumber" title="Set the real load number">Edit #</button>`} ${loadKindTags(l)}<span class="muted">${esc(l.zones.join(', '))}</span></div>${statusPill(l.status)}</div>
       ${l.returned_note && draft ? `<div class="warnbox bad">Sent back by the liaison: ${esc(l.returned_note)}</div>` : ''}
       ${draft ? `<div class="lctl">
           <label class="field">Wave <select data-f="wave">${['AM', 'PM'].map(w => `<option ${w === l.wave ? 'selected' : ''}>${w}</option>`).join('')}</select></label>
@@ -365,6 +365,13 @@
     if (a === 'unload') {
       const nbrs = [...B.sel].filter(n => !freeByNbr(n));
       act(async () => { await rpc('dispatch_move_shipments', { p_env: D.env, p_shipments: nbrs, p_to: null }); B.sel.clear(); });
+      return;
+    }
+    if (a === 'renumber') {
+      const l = B.loads.find(x => x.id === id);
+      const v = prompt(`Load number for ${l.load_nbr} (format L-DDMM-NN, e.g. L-0611-05):`, l.load_nbr);
+      if (v === null || v.trim().toUpperCase() === l.load_nbr) return;
+      act(() => rpc('dispatch_set_load_nbr', { p_id: id, p_nbr: v }));
       return;
     }
     if (a === 'send') { act(() => rpc('dispatch_load_action', { p_id: id, p_action: 'send' })); return; }
