@@ -24,8 +24,10 @@
 //                             checker's step confirms it once the pick has been checked.
 //   invoice_request { env, shipments[] } -> supervisor or invoicer only. Queues Prepare Invoice for Confirmed
 //                             shipments (shipment_invoicing); the drain runs it, one shipment at a
-//                             time, and records the result. Releasing the invoice stays with
-//                             Accounts. Live also needs DISPATCH_LIVE_INVOICE = 'on'.
+//                             time, and records the result, then releases the invoices it just prepared
+//                             (so the portal can read them for printing; Balanced ones aren't returned by
+//                             the REST Invoice feed). A failed release leaves the invoice prepared and is
+//                             noted on the shipment_invoicing row. Live also needs DISPATCH_LIVE_INVOICE = 'on'.
 //   deliverv_write         -> clerk/supervisor/manager. Writes the invoice UDF DELIVERVIA for loads reassigned
 //                             after invoicing (see migration 20261026120000). Live, switched off by default.
 //   drain                  -> cron (Vault token) every minute: work through anything queued.
@@ -258,6 +260,50 @@ class Acu {
     throw new Error(`${action} still running after 60s`);
   }
   confirmShipment(id: string) { return this.shipmentAction('ConfirmShipment', id); }
+
+  // Shipment number -> invoice number for the invoices of the last few days (SalesInvoice lines carry the
+  // shipment number; same read sync-invoice-print uses for its links). One paged read serves a whole batch.
+  async invoiceRefsByShipment(daysBack = 3): Promise<Map<string, string>> {
+    const iso = (d: Date) => d.toISOString().split('T')[0];
+    const from = new Date(); from.setDate(from.getDate() - daysBack);
+    const to = new Date(); to.setDate(to.getDate() + 7);
+    const filter = `Type eq 'Invoice' and (Date ge datetimeoffset'${iso(from)}T00:00:00Z' and Date le datetimeoffset'${iso(to)}T23:59:59Z')`;
+    const out = new Map<string, string>();
+    for (let skip = 0; ; skip += 100) {
+      const r = await this.call('GET', `/SalesInvoice?$filter=${encodeURIComponent(filter)}&$expand=Details&$select=ReferenceNbr,Details/ShipmentNbr&$top=100&$skip=${skip}`);
+      if (!r.ok) throw new Error(`couldn't list invoices: ${r.status} ${acuError(r.data)}`);
+      const arr: any[] = Array.isArray(r.data) ? r.data : (r.data?.value ?? []);
+      for (const inv of arr) {
+        const ref = v(inv.ReferenceNbr); if (!ref) continue;
+        for (const d of inv.Details ?? []) { const sh = v(d.ShipmentNbr); if (sh) out.set(String(sh), String(ref)); }
+      }
+      if (arr.length < 100) break;
+    }
+    return out;
+  }
+
+  // Release an invoice (contract action: 202 + Location while running, 204 when done). Tries the AR Invoice
+  // entity first, then SalesInvoice if this endpoint doesn't offer the action there.
+  async releaseInvoice(ref: string) {
+    let lastErr = '';
+    for (const entity of ['Invoice', 'SalesInvoice']) {
+      const r = await this.call('POST', `/${entity}/ReleaseInvoice`, { entity: { Type: { value: 'Invoice' }, ReferenceNbr: { value: ref } } });
+      if (r.status === 204 || r.status === 200) return;
+      if (r.status === 202 && r.location) {
+        const loc = r.location.startsWith('http') ? r.location : `${this.t.base}${r.location}`;
+        for (let i = 0; i < 60; i++) {
+          await new Promise(res => setTimeout(res, 1000));
+          const p = await this.call('GET', loc);
+          if (p.status === 204 || p.status === 200) return;
+          if (p.status !== 202) throw new Error(`ReleaseInvoice failed: ${p.status} ${acuError(p.data)}`);
+        }
+        throw new Error('ReleaseInvoice still running after 60s');
+      }
+      lastErr = `${entity}/ReleaseInvoice refused: ${r.status} ${acuError(r.data)}`;
+      if (r.status !== 404 && r.status !== 400 && r.status !== 405) break;   // a real refusal, not "no such action"
+    }
+    throw new Error(lastErr);
+  }
 }
 
 // ------------------------------------------------------------------
@@ -533,9 +579,10 @@ async function checkConfirm(load: any, acu: Acu) {
 // invoicing: Prepare Invoice on Confirmed shipments (the supervisor's bulk screen)
 // ------------------------------------------------------------------
 // Per shipment: already invoiced -> done; not Confirmed -> refused; otherwise run
-// Prepare Invoice and read the status back. Releasing the invoice is Accounts' job.
+// Prepare Invoice and read the status back, then release the invoices just prepared (see below).
 async function invoiceShipments(env: string, rows: any[], acu: Acu) {
   const mirror = env === 'test' ? 'shipments_test' : 'shipments';
+  const prepared: string[] = [];   // shipments whose invoice this run created: released after the loop
   for (const row of rows) {
     const nbr = row.shipment_nbr as string;
     let state: 'done' | 'refused' | 'failed' = 'failed';
@@ -552,7 +599,7 @@ async function invoiceShipments(env: string, rows: any[], acu: Acu) {
         const after = await acu.getShipment(nbr, false);
         status = after.status;
         if (status === 'Confirmed') throw new Error('Prepare Invoice ran, but the shipment is still Confirmed');
-        state = 'done';
+        state = 'done'; prepared.push(nbr);
       }
     } catch (e: any) {
       state = 'failed'; detail = String(e?.message ?? e).slice(0, 400);
@@ -561,6 +608,21 @@ async function invoiceShipments(env: string, rows: any[], acu: Acu) {
     await admin.from('shipment_invoicing')
       .update({ state, detail: detail || null, finished_at: now, updated_at: now }).eq('env', env).eq('shipment_nbr', nbr);
     if (status) await admin.from(mirror).update({ status }).eq('shipment_nbr', nbr);
+  }
+
+  // Release what was just prepared. Best effort: the invoice stays prepared (and printable from Acumatica)
+  // if anything here fails, and the reason is written on the shipment_invoicing row.
+  if (!prepared.length) return;
+  const note = (nbr: string, text: string) => admin.from('shipment_invoicing')
+    .update({ detail: text.slice(0, 400), updated_at: new Date().toISOString() }).eq('env', env).eq('shipment_nbr', nbr);
+  let refs = new Map<string, string>();
+  try { await acu.lease(); refs = await acu.invoiceRefsByShipment(); }
+  catch (e: any) { for (const n of prepared) await note(n, `Prepared; couldn't look up the invoice to release it: ${String(e?.message ?? e)}`); return; }
+  for (const nbr of prepared) {
+    const ref = refs.get(nbr);
+    if (!ref) { await note(nbr, 'Prepared; invoice not found yet, so not released'); continue; }
+    try { await acu.lease(); await acu.releaseInvoice(ref); await note(nbr, `Invoice ${ref} released`); }
+    catch (e: any) { await note(nbr, `Prepared; invoice ${ref} not released: ${String(e?.message ?? e)}`); }
   }
 }
 
