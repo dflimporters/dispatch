@@ -300,7 +300,9 @@ class Acu {
         throw new Error('ReleaseInvoice still running after 60s');
       }
       lastErr = `${entity}/ReleaseInvoice refused: ${r.status} ${acuError(r.data)}`;
-      if (r.status !== 404 && r.status !== 400 && r.status !== 405) break;   // a real refusal, not "no such action"
+      // Not "a real refusal" if this login simply has no rights to that form (403, AR301000 for Invoice): the other entity
+      // is a different form (SO303000), which the integration user does have. Only stop on an error from the form itself.
+      if (r.status !== 404 && r.status !== 400 && r.status !== 405 && r.status !== 403) break;
     }
     throw new Error(lastErr);
   }
