@@ -733,7 +733,7 @@
   }
 
   startPage({
-    page: 'supervisor', role: 'supervisor', title: 'Invoicing',
+    page: 'supervisor', role: ['supervisor', 'invoicer'], title: 'Invoicing',
     onEnvChange: () => { V.sel.clear(); V.psel.clear(); refresh(); },
     onReady: () => { refresh(); keepFresh(refresh, () => V.busy || editingBoxes(), ['loads', 'check_items']); },
   });

@@ -490,8 +490,8 @@ Deno.serve(async (req) => {
   }
   const { data: u } = token ? await supabase.auth.getUser(token) : { data: null } as any;
   const { data: roleRows } = u?.user ? await supabase.from('dispatch_roles').select('role').eq('user_id', u.user.id) : { data: [] } as any;
-  if (!(roleRows ?? []).some((r: any) => ['supervisor', 'manager'].includes(r.role))) {
-    return new Response(JSON.stringify({ success: false, error: 'Only a supervisor or manager can refresh invoices for printing' }), {
+  if (!(roleRows ?? []).some((r: any) => ['supervisor', 'manager', 'invoicer'].includes(r.role))) {
+    return new Response(JSON.stringify({ success: false, error: 'Only a supervisor, manager or invoicing clerk can refresh invoices for printing' }), {
       status: 403, headers: { 'Content-Type': 'application/json', ...CORS },
     });
   }

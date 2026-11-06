@@ -12,7 +12,7 @@
 //   sync_live_lines        -> read-only: production's Open/On Hold shipments' line items into
 //                             shipment_lines (env 'live') + shipments.shipment_value. Run by
 //                             cron with the Vault token (dispatch_cron_ok), or by any dispatch role.
-//   check_confirm { load_id } -> supervisor (Invoicing) only, once the checker has finished the
+//   check_confirm { load_id } -> supervisor or invoicer (Invoicing) only, once the checker has finished the
 //                             load (loads.checker_done_at). Queues the load; the drain then, for each
 //                             shipment on it: lowers or deletes the lines the checker reduced
 //                             (check_lines), sets Control Qty to the new shipped qty, Confirm
@@ -22,7 +22,7 @@
 //                             it: sets ShipVia + load number UDF, takes it off hold, reads it back.
 //                             It does NOT confirm: the shipment stays Open for picking, and the
 //                             checker's step confirms it once the pick has been checked.
-//   invoice_request { env, shipments[] } -> supervisor only. Queues Prepare Invoice for Confirmed
+//   invoice_request { env, shipments[] } -> supervisor or invoicer only. Queues Prepare Invoice for Confirmed
 //                             shipments (shipment_invoicing); the drain runs it, one shipment at a
 //                             time, and records the result. Releasing the invoice stays with
 //                             Accounts. Live also needs DISPATCH_LIVE_INVOICE = 'on'.
@@ -1108,13 +1108,13 @@ Deno.serve(async (req) => {
         return json({ ok: true, ...(await writeDeliverVia()) });
       }
       case 'check_confirm': {
-        if (!roles.includes('supervisor')) return json({ ok: false, error: 'Only a supervisor (Invoicing) can confirm loads in Acumatica' }, 403);
+        if (!roles.some(r => ['supervisor', 'invoicer'].includes(r))) return json({ ok: false, error: 'Only a supervisor or invoicing clerk can confirm loads in Acumatica' }, 403);
         const id = Number(p.load_id);
         if (!id) return json({ ok: false, error: 'load_id is required' }, 400);
         return json(await requestJob('check', id, actorName));
       }
       case 'invoice_request': {
-        if (!roles.includes('supervisor')) return json({ ok: false, error: 'Only a supervisor can invoice shipments' }, 403);
+        if (!roles.some(r => ['supervisor', 'invoicer'].includes(r))) return json({ ok: false, error: 'Only a supervisor or invoicing clerk can invoice shipments' }, 403);
         const env = p.env === 'live' ? 'live' : 'test';
         if (!Array.isArray(p.shipments) || p.shipments.length > 300) return json({ ok: false, error: 'shipments (up to 300) is required' }, 400);
         return json(await requestInvoices(env, p.shipments, actorName));
