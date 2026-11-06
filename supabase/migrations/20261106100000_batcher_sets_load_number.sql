@@ -7,8 +7,8 @@
 -- the number (5 -> the load's own L-DDMM-05); a full L-DDMM-NN is also accepted.
 --
 -- Allowed on any load (draft, sent, confirmed, Acumatica auto-loads, loads already being picked)
--- until the checker has confirmed it (check_status confirming/confirmed), because the number
--- goes to Acumatica at confirmation. Not renumbering a load with a lowercase/typo: the input is
+-- until the invoicer confirms its shipments in Acumatica (queued, confirming, confirmed or partial),
+-- because the number goes to Acumatica then. Not renumbering a load with a lowercase/typo: the input is
 -- trimmed and upper-cased. The change is logged in the load's history with the old number.
 --
 -- The next auto number is still the highest used under that day's prefix + 1, so numbers the
@@ -21,8 +21,10 @@ begin
   perform _dispatch_require('batcher');
   select * into l from loads where id = p_id for update;
   if not found then raise exception 'Load not found (it may have been deleted)'; end if;
-  if l.check_status in ('confirming', 'confirmed') then
-    raise exception '% has already been checked and confirmed, so its number can''t be changed here', l.load_nbr;
+  -- Locked once the invoicer has confirmed the shipments in Acumatica (check_confirm): queued,
+  -- running, done, or partly done. Until then (picking, checking, checker done) it can change.
+  if l.confirm_requested_at is not null or l.check_status in ('confirming', 'confirmed', 'partial') then
+    raise exception '% has been confirmed in Acumatica by the invoicer, so its number can''t be changed here', l.load_nbr;
   end if;
   -- Just the number (5, 05, 99): keep the load's own L-DDMM- and pad to two digits. A load still on
   -- an old-format number (L-MMDD-AM-NN) gets today's DDMM (Jamaica time).

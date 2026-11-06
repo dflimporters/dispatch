@@ -239,7 +239,7 @@
     const others = B.loads.filter(x => x.status === 'draft' && x.id !== l.id);
     const fit = bestFit(l.vol, l.drops);
     return `<div class="lcard st-${l.status}" data-load="${l.id}">
-      <div class="lhead"><div><span class="lnbr">${esc(l.load_nbr)}</span>${l.check_status === 'confirmed' || l.check_status === 'confirming' ? '' : ` <button class="btn small" data-act="renumber" title="Set the real load number">Edit #</button>`} ${loadKindTags(l)}<span class="muted">${esc(l.zones.join(', '))}</span></div>${statusPill(l.status)}</div>
+      <div class="lhead"><div><span class="lnbr">${esc(l.load_nbr)}</span>${l.confirm_requested_at || ['confirming', 'confirmed', 'partial'].includes(l.check_status) ? '' : ` <button class="btn small" data-act="renumber" title="Set the real load number">Edit #</button>`} ${loadKindTags(l)}<span class="muted">${esc(l.zones.join(', '))}</span></div>${statusPill(l.status)}</div>
       ${l.returned_note && draft ? `<div class="warnbox bad">Sent back by the liaison: ${esc(l.returned_note)}</div>` : ''}
       ${draft ? `<div class="lctl">
           <label class="field">Wave <select data-f="wave">${['AM', 'PM'].map(w => `<option ${w === l.wave ? 'selected' : ''}>${w}</option>`).join('')}</select></label>
