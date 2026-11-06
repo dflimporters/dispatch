@@ -34,7 +34,7 @@ begin
                         jsonb_build_object('old_nbr', l.load_nbr, 'new_nbr', n.load_nbr));
 end $$;
 
--- Uniqueness must cover the suffixed numbers too.
-drop index if exists public.loads_nbr_unique;
-create unique index loads_nbr_unique on public.loads (env, load_nbr)
-  where load_nbr ~ '^L-[0-9]{4}-[0-9]+[A-Z]{0,3}$';
+-- Uniqueness must cover the suffixed numbers too. Added next to the existing loads_nbr_unique
+-- (which covers the plain numbers) rather than replacing it.
+create unique index if not exists loads_nbr_unique_sfx on public.loads (env, load_nbr)
+  where load_nbr ~ '^L-[0-9]{4}-[0-9]+[A-Z]{1,3}$';
