@@ -77,8 +77,52 @@
 <script src="invoice-print.js"></script>
 <script>
   const V = { ships: [], loadOf: new Map(), inv: new Map(), sel: new Set(), date: '', busy: false, poll: null, was: false,
-              pr: [], manual: [], prints: new Map(), hdr: new Map(), psel: new Set(), pbusy: false,
-              pend: [], picks: new Map(), items: new Map(), checks: [], final: new Map(), notes: new Map(), openL: new Set(), wasConf: new Map(), odate: new Map() };
+              pr: [], manual: [], marks: new Set(), showPrinted: false, prints: new Map(), hdr: new Map(), psel: new Set(), pbusy: false,
+              pend: [], picks: new Map(), items: new Map(), checks: [], final: new Map(), notes: new Map(), openL: new Set(), wasConf: new Map(), odate: new Map(),
+              subs: [], subRes: new Map() };
+
+  // ------------------------------------------------------------------
+  // Substitutions the checker flagged (check_items.sub_needed). The clerk sorts each one in Acumatica by hand
+  // (new SO for the substitute, release it, add it to the shipment, zero the unfound line), then marks it complete here.
+  // Printing an invoice on a load with an open one warns; the clerk can print anyway (logged).
+  // Needs migration 20261105210000_check_substitution.sql; without it the list is just empty.
+  // ------------------------------------------------------------------
+  async function loadSubs() {
+    try {
+      const r = await sb.from('check_items')
+        .select('load_id, inventory_id, checked_qty, sub_note, sub_by_name, sub_at, loads!inner(id, load_nbr, env, ship_via, truck_type, wave, checker_done_at)')
+        .eq('sub_needed', true).is('sub_resolved_at', null).eq('loads.env', D.env).not('loads.checker_done_at', 'is', null).order('sub_at');
+      if (r.error) throw r.error;
+      const rows = r.data || [], ids = [...new Set(rows.map(x => x.load_id))];
+      const picks = new Map();
+      if (ids.length) {
+        const b = await sb.rpc('dispatch_pick_bundle', { p_load_ids: ids, p_with_checks: false });
+        if (b.error) throw b.error;
+        (b.data.picks || []).forEach(p => picks.set(p.load_id + '|' + p.inventory_id, p));
+      }
+      V.subs = rows.map(x => { const p = picks.get(x.load_id + '|' + x.inventory_id) || {};
+        return { ...x, load: x.loads, desc: p.description || x.inventory_id, uom: p.uom || '', required: p.required != null ? Number(p.required) : null }; });
+    } catch (e) { console.warn('[invoicing subs]', e); V.subs = []; }
+  }
+
+  function renderSubs() {
+    const el = document.getElementById('invSubs');
+    if (!el) return;
+    if (!V.subs.length) { el.innerHTML = ''; return; }
+    const byLoad = new Map();
+    V.subs.forEach(s => { const k = s.load.load_nbr; if (!byLoad.has(k)) byLoad.set(k, { load: s.load, rows: [] }); byLoad.get(k).rows.push(s); });
+    el.innerHTML = `<div class="section-h" style="font-size:14px;font-weight:700;color:var(--navy);margin:0 2px 8px">Substitutions to complete (${V.subs.length})</div>
+      <div class="muted" style="margin:-4px 2px 8px">The checker couldn't find these. Do the substitution in Acumatica, then mark it complete. Printing an invoice on the load warns until it is.</div>
+      ${[...byLoad.entries()].map(([k, g]) => `<div class="grp"><div class="gh"><span class="lnbr">${esc(k)}</span>${waveTag(g.load.wave)} <b>${esc(g.load.truck_type || '')}</b> <span class="target">${esc(g.load.ship_via || '')}</span>
+          <span class="muted">${plural(g.rows.length, 'item')}</span></div>
+        <table class="inv"><thead><tr><th>Item</th><th class="r">Short</th><th>Checker's note</th><th>What was done</th><th></th></tr></thead><tbody>
+        ${g.rows.map(s => { const key = s.load_id + '|' + s.inventory_id, short = s.required != null ? s.required - Number(s.checked_qty) : null;
+          return `<tr><td><b>${esc(s.desc)}</b> <span class="muted num">${esc(s.inventory_id)}</span><div class="muted" style="font-size:12px">${esc(s.sub_by_name || '')} ${esc(stamp(s.sub_at))}</div></td>
+            <td class="r num">${short != null ? `<b style="color:var(--warn-text)">${fmt(short)}</b>` : '—'}<div class="muted" style="font-size:11px">found ${fmt(s.checked_qty)}</div></td>
+            <td>${s.sub_note ? esc(s.sub_note) : '<span class="muted">—</span>'}</td>
+            <td><input type="text" maxlength="200" data-subres="${esc(key)}" value="${esc(V.subRes.get(key) || '')}" placeholder="e.g. SO 209696, or customer declined" style="width:100%;min-width:180px"></td>
+            <td class="r"><button class="btn small primary" data-subdone="${esc(key)}">Mark complete</button></td></tr>`; }).join('')}</tbody></table></div>`).join('')}`;
+  }
 
   // ------------------------------------------------------------------
   // Loads the checker has finished, waiting to be confirmed in Acumatica.
@@ -207,8 +251,10 @@
 
   function pendItem(l, i, locked) {
     const fin = finalOf(l), notes = V.notes.get(l.id) || new Map();
+    const sc = (V.items.get(l.id) || new Map()).get(i.item), sub = sc && sc.sub_needed;
     return `<tbody><tr class="ihead ${i.checked != null && i.out !== i.checked ? 'mis' : ''}"><td><b>${esc(i.desc || i.item)}</b> <span class="muted num">${esc(i.item)}</span>
-        <div class="mis-note">Checker counted ${i.checked != null ? fmt(i.checked) : '—'} of ${fmt(i.onShip)}${i.checked != null ? ` · short ${fmt(i.onShip - i.checked)}` : ''}</div></td>
+        <div class="mis-note">Checker counted ${i.checked != null ? fmt(i.checked) : '—'} of ${fmt(i.onShip)}${i.checked != null ? ` · short ${fmt(i.onShip - i.checked)}` : ''}</div>
+        ${sub ? `<div class="mis-note">Substitute needed${sc.sub_note ? ' — ' + esc(sc.sub_note) : ''}${sc.sub_resolved_at ? ' · complete' : ''}</div>` : ''}</td>
       <td class="r num">${fmt(i.onShip)}</td><td class="r num"><b>${fmt(i.out)}</b></td></tr>
       ${i.xs.map(x => {
         const k = pkey(x.nbr, x.line_nbr), fv = fin.get(k);
@@ -224,10 +270,11 @@
     return pLinesOf(l).map(x => { const k = pkey(x.nbr, x.line_nbr), fv = fin.get(k);
       return { shipment_nbr: x.nbr, line_nbr: x.line_nbr, final_qty: fv, note: fv < x.shipped ? (notes.get(k) || null) : null }; });
   }
-  const editingBoxes = () => { const a = document.activeElement; return !!(a && a.dataset && (a.dataset.lfinal !== undefined || a.dataset.lnote !== undefined)); };
+  const editingBoxes = () => { const a = document.activeElement; return !!(a && a.dataset && (a.dataset.lfinal !== undefined || a.dataset.lnote !== undefined || a.dataset.subres !== undefined)); };
 
   async function loadAll() {
     await loadPending();
+    await loadSubs();
     const { data: ships, error } = await sb.from(shipTable()).select(SHIP_COLS)
       .eq('status', 'Confirmed').eq('operation', 'Issue').order('shipment_date').order('shipment_nbr').range(0, 999);
     if (error) throw error;
@@ -291,6 +338,13 @@
       ls.push(...(a.data || [])); pr.push(...(b.data || []));
     }
     const loadOfP = new Map(ls.map(x => [x.shipment_nbr, x.loads]));
+    V.marks = new Set();
+    const lids = [...new Set(ls.map(x => x.loads && x.loads.id).filter(Boolean))];
+    if (lids.length) {
+      const mk = await sb.from('invoice_load_marks').select('load_id').eq('env', D.env).in('load_id', lids);
+      if (mk.error) throw mk.error;
+      (mk.data || []).forEach(m => V.marks.add(m.load_id));
+    }
     pr.forEach(x => V.prints.set(x.shipment_nbr, x));            // ordered, so the last wins
     // Invoice per shipment: matched on the shipment number Acumatica puts on each invoice line (invoice_shipments),
     // so a shipment that carries a second sales order (a substitution) still finds its invoice. V.hdr is keyed by shipment.
@@ -351,15 +405,21 @@
     if (!V.pr.length) { el.innerHTML = ''; return; }
     const groups = new Map();
     V.pr.forEach(x => { const k = prLoadKey(x); if (!groups.has(k)) groups.set(k, { load: x.load, rows: [] }); groups.get(k).rows.push(x); });
-    const order = [...groups.entries()].sort(([a], [b]) => (a === '—') - (b === '—') || a.localeCompare(b));
-    el.innerHTML = `<div class="section-h" style="font-size:14px;font-weight:700;color:var(--navy);margin:0 2px 8px">Prepared invoices to print (${V.pr.length})</div>
+    // A load is finished with once every invoice on it has been printed here, or someone marked it printed
+    // (printed from Acumatica). Those drop off the list; 'Show printed' brings them back.
+    const isDone = g => g.rows.every(x => V.prints.has(x.nbr)) || (g.load && V.marks.has(g.load.id));
+    const all = [...groups.entries()].sort(([a], [b]) => (a === '—') - (b === '—') || a.localeCompare(b));
+    const nDone = all.filter(([, g]) => isDone(g)).length;
+    const order = V.showPrinted ? all : all.filter(([, g]) => !isDone(g));
+    el.innerHTML = `<div class="section-h" style="font-size:14px;font-weight:700;color:var(--navy);margin:0 2px 8px">Prepared invoices to print (${order.reduce((n, [, g]) => n + g.rows.length, 0)})${nDone ? ` <button class="btn small" data-act="pshowprinted" style="margin-left:8px">${V.showPrinted ? 'Hide' : 'Show'} printed loads (${nDone})</button>` : ''}</div>
+      ${!order.length ? '<div class="card"><div class="empty">Every prepared load has been printed.</div></div>' : ''}
       ${order.map(([k, g]) => {
         const allOn = g.rows.every(x => V.psel.has(x.nbr)), nUn = g.rows.filter(x => !V.prints.has(x.nbr)).length;
         return `<div class="grp"><div class="gh">
           <label><input type="checkbox" data-pgrp="${esc(k)}" ${allOn ? 'checked' : ''}> ${g.load ? `<span class="lnbr">${esc(k)}</span>` : 'Not on a load'}</label>
           ${g.load ? `${waveTag(g.load.wave)} <b>${esc(g.load.truck_type || '')}</b> <span class="target">${esc(g.load.ship_via || '')}</span>` : ''}
           <span class="muted">${plural(g.rows.length, 'invoice')}${nUn ? ` · ${nUn} not printed` : ' · all printed'}</span>
-          <span class="gval"><button class="btn small" data-pload="${esc(k)}" ${V.pbusy ? 'disabled' : ''}>Print load</button></span></div>
+          <span class="gval">${g.load ? (V.marks.has(g.load.id) ? `<span class="muted">Marked printed</span> <button class="btn small" data-pmark="${g.load.id}" data-to="0" ${V.pbusy ? 'disabled' : ''}>Undo</button>` : `<button class="btn small" data-pmark="${g.load.id}" data-to="1" ${V.pbusy ? 'disabled' : ''} title="Printed from Acumatica? Hide this load from the list">Mark printed</button>`) : ''} <button class="btn small" data-pload="${esc(k)}" ${V.pbusy ? 'disabled' : ''}>Print load</button></span></div>
           <table class="inv"><thead><tr><th class="cb"></th><th>Invoice</th><th>Shipment</th><th>Customer</th><th class="r">Value</th><th>Print</th></tr></thead><tbody>
           ${g.rows.map(x => `<tr class="${V.psel.has(x.nbr) ? 'sel' : ''}"><td class="cb"><input type="checkbox" data-pship="${esc(x.nbr)}" ${V.psel.has(x.nbr) ? 'checked' : ''} aria-label="Select ${esc(x.nbr)} to print"></td>
             <td class="num">${x.inv ? esc(x.inv.reference_number) : '<span class="muted" title="Not synced from Acumatica yet">pending</span>'}</td><td class="num">${esc(x.nbr)}</td>
@@ -400,6 +460,17 @@
     if (!res.ok || !(j && j.success)) throw new Error((j && j.error) || `Link refresh failed (${res.status})`);
   }
 
+  async function markLoadPrinted(loadId, on) {
+    if (V.pbusy) return;
+    V.pbusy = true; renderPrintPanel();
+    try {
+      const r = await sb.rpc('invoice_load_mark_printed', { p_env: D.env, p_load_id: loadId, p_marked: on });
+      if (r.error) throw r.error;
+      toast(on ? 'Load marked printed' : 'Mark removed');
+    } catch (e) { console.error('[invoicing mark]', e); toast(errMsg(e), true); }
+    finally { V.pbusy = false; await refresh(); }
+  }
+
   // Delivery slip: the same document as the invoice with no prices, tax or totals, for donation and promotion orders.
   // It is not logged as an invoice print, so it never makes the real invoice a "reprint".
   const isSlipKind = x => ['donation', 'promotion'].includes(kindOf(x.ship));
@@ -427,6 +498,13 @@
     if (!items.length || V.pbusy) return;
     const noInv = items.filter(x => !x.inv);
     if (noInv.length) { toast(`No invoice number yet for ${noInv.slice(0, 4).map(x => x.nbr).join(', ')}. Try again in a few minutes.`, true); return; }
+    // Open substitutions on these invoices' loads: warn, and let the clerk print anyway (logged once the print is recorded).
+    const lids = new Set(items.map(x => x.load && x.load.id).filter(Boolean));
+    const openSubs = V.subs.filter(s => lids.has(s.load_id));
+    if (openSubs.length) {
+      const list = openSubs.slice(0, 5).map(s => `${s.load.load_nbr}: ${s.desc}`).join('\n');
+      if (!confirm(`${plural(openSubs.length, 'substitution')} not complete yet on ${lids.size > 1 ? 'these loads' : 'this load'}:\n\n${list}${openSubs.length > 5 ? '\n…' : ''}\n\nThe invoice may not show the substituted item yet.\n\nPrint anyway?`)) return;
+    }
     const again = items.filter(x => V.prints.has(x.nbr));
     let reason = null;
     if (again.length) {
@@ -453,6 +531,7 @@
       if (problems.length) { toast(`Nothing printed. ${problems.slice(0, 3).join(' | ')}${problems.length > 3 ? ` (+${problems.length - 3} more)` : ''}`, true); return; }
       const r = await sb.rpc('invoice_print_record', { p_env: D.env, p_items: items.map(x => ({ shipment_nbr: x.nbr, invoice_nbr: x.inv.reference_number })), p_reason: reason });
       if (r.error) throw r.error;
+      if (openSubs.length) [...new Set(openSubs.map(s => s.load_id))].forEach(id => sb.rpc('dispatch_sub_override', { p_load_id: id, p_note: null }).then(x => { if (x.error) console.warn('[sub override log]', x.error); }));
       const prs = new Map((r.data || []).map(p => [p.shipment_nbr, p]));
       ids = (r.data || []).map(p => p.id);
       V.psel.clear();
@@ -513,7 +592,7 @@
   function ensureShell() {
     const main = document.getElementById('main');
     if (main.querySelector('#invTop')) return;
-    main.innerHTML = `<div id="invConfirm"></div>
+    main.innerHTML = `<div id="invSubs" style="margin-bottom:14px"></div><div id="invConfirm"></div>
       <div class="filt" id="invLookup" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <label for="plookup" style="margin:0">Print by invoice number</label>
         <input class="txt" id="plookup" type="search" autocomplete="off" placeholder="e.g. 1059165" style="width:180px">
@@ -547,6 +626,7 @@
 
   function render() {
     ensureShell();
+    renderSubs();
     renderPending();
     renderPrintPanel();
     const all = visible();
@@ -646,14 +726,29 @@
       });
       return;
     }
+    const sd = e.target.closest('[data-subdone]');
+    if (sd) {
+      const [lid, ...rest] = sd.dataset.subdone.split('|'), inv = rest.join('|'), key = sd.dataset.subdone;
+      const what = (V.subRes.get(key) || '').trim();
+      act(async () => {
+        const { error } = await sb.rpc('dispatch_sub_resolve', { p_load_id: Number(lid), p_inventory_id: inv, p_resolved: true, p_resolution: what || null });
+        if (error) throw error;
+        V.subRes.delete(key);
+        toast('Marked complete', false, { action: { label: 'Undo', fn: () => act(async () => { const u = await sb.rpc('dispatch_sub_resolve', { p_load_id: Number(lid), p_inventory_id: inv, p_resolved: false }); if (u.error) throw u.error; }) } });
+      });
+      return;
+    }
     const sl = e.target.closest('[data-slip]');
     if (sl) { printSlips([sl.dataset.slip]); return; }
+    const pm = e.target.closest('[data-pmark]');
+    if (pm) { markLoadPrinted(Number(pm.dataset.pmark), pm.dataset.to === '1'); return; }
     const pl = e.target.closest('[data-pload]');
     if (pl) { printInvoices(V.pr.filter(x => (x.load ? x.load.load_nbr : '—') === pl.dataset.pload).map(x => x.nbr)); return; }
     const b = e.target.closest('[data-act]');
     if (!b) return;
     const a = b.dataset.act;
     if (a === 'clear') { V.sel.clear(); render(); return; }
+    if (a === 'pshowprinted') { V.showPrinted = !V.showPrinted; renderPrintPanel(); return; }
     if (a === 'pclear') { V.psel.clear(); renderPrintPanel(); return; }
     if (a === 'print') { printInvoices([...V.psel]); return; }
     if (a === 'pslip') { printSlips(V.pr.filter(x => V.psel.has(x.nbr) && isSlipKind(x)).map(x => x.nbr)); return; }
@@ -718,6 +813,7 @@
   });
   document.getElementById('app').addEventListener('input', e => {
     const t = e.target;
+    if (t.dataset.subres !== undefined) { V.subRes.set(t.dataset.subres, t.value); return; }
     if (t.id !== 'fq' && !(t.dataset.f && t.tagName === 'INPUT')) return;
     if (t.id === 'fq') F.q = t.value; else F[t.dataset.f] = t.value;
     clearTimeout(fTimer); fTimer = setTimeout(render, 120);

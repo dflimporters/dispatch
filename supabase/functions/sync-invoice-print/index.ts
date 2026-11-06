@@ -488,6 +488,18 @@ Deno.serve(async (req) => {
   if (req.method === 'POST') {
     try { body = await req.json(); } catch { body = {}; }
   }
+  // The scheduled job (Vault dispatch_cron_token) may run the links-only pull, nothing else.
+  const { data: cronOk } = token ? await supabase.rpc('dispatch_cron_ok', { p_token: token }) : { data: false } as any;
+  if (cronOk && body?.links === true) {
+    try {
+      await login();
+      const r = await runSync({ links: true, days_back: body.days_back });
+      return new Response(JSON.stringify({ success: true, ...r }), { headers: { 'Content-Type': 'application/json', ...CORS } });
+    } catch (err) {
+      console.error('Link sync failed:', err);
+      return new Response(JSON.stringify({ success: false, error: String((err as Error)?.message ?? err) }), { status: 500, headers: { 'Content-Type': 'application/json', ...CORS } });
+    } finally { await logout(); }
+  }
   const { data: u } = token ? await supabase.auth.getUser(token) : { data: null } as any;
   const { data: roleRows } = u?.user ? await supabase.from('dispatch_roles').select('role').eq('user_id', u.user.id) : { data: [] } as any;
   if (!(roleRows ?? []).some((r: any) => ['supervisor', 'manager', 'invoicer'].includes(r.role))) {

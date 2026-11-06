@@ -13,8 +13,8 @@
   tablet per area today, maybe a phone per picker later.
 
   A load appears once its trucker is locked in (status done/partial) and stays
-  until the checker has confirmed it. By default it lists today's and tomorrow's
-  loads in load-number order (they pick tomorrow's shipment date the evening before). No carry-over
+  until the checker has confirmed it. By default it lists the loads made
+  today in load-number order (usually for tomorrow's trucks). No carry-over
   from earlier days; pick the date to see those. Required quantities come live from the
   shipment lines (dispatch_pick_list), so a corrected shipment shows at once.
   The picker records what they picked (dispatch_pick_set): "All" for a full
@@ -76,7 +76,7 @@
 <script src="common.js"></script>
 <script>
   const AREAS = [[1, 'Area 1'], [2, 'Area 2'], [3, 'Area 3'], [4, 'Area 4'], [5, 'Area 5'], [6, 'Area 6'], [7, 'Area 7'], [0, 'Unassigned']];
-  const P = { date: VIEW_BOTH, loads: [], lists: new Map(), done: [], sel: null, busy: false, area: 'all', q: '' };
+  const P = { date: jmDate(0), loads: [], lists: new Map(), done: [], sel: null, busy: false, area: 'all', q: '' };
   try { const a = localStorage.getItem('dispatch-pick-area'); if (a) P.area = a; } catch (e) {}
   function areaName(a) { return (AREAS.find(x => x[0] === Number(a)) || [0, 'Unassigned'])[1]; }
   function inArea(line) { return P.area === 'all' || line.area === Number(P.area); }
@@ -118,15 +118,14 @@
       groups.push({ a, l, lines: (P.lists.get(l.id) || []).filter(x => x.area === a) })));
     groups.sort((x, y) => (x.a || 9) - (y.a || 9));
     const empty = `<div class="card">${P.q ? emptyState(`Nothing matches “${esc(P.q)}”`, 'Check the spelling, or clear the search.', { label: 'Clear search', id: 'clear-q' })
-        : emptyState(`No loads to pick${P.area === 'all' ? '' : ' in ' + areaName(P.area)} for ${P.date === VIEW_BOTH ? 'today or tomorrow' : esc(niceDate(P.date))}`, 'A load shows here once its trucker is locked in.', P.area !== 'all' ? { label: 'Show all areas', id: 'all-areas' } : P.date === VIEW_BOTH ? undefined : P.date === jmDate(0) ? { label: 'Check tomorrow', id: 'tomorrow' } : { label: 'Check today', id: 'today' })}</div>`;
+        : emptyState(`No loads to pick${P.area === 'all' ? '' : ' in ' + areaName(P.area)} from ${P.date === jmDate(0) ? 'today' : esc(niceDate(P.date))}`, 'A load shows here once its trucker is locked in.', P.area !== 'all' ? { label: 'Show all areas', id: 'all-areas' } : P.date === jmDate(0) ? { label: 'Check yesterday', id: 'yesterday' } : { label: 'Check today', id: 'today' })}</div>`;
     morphHTML(main, `
       <div class="controls">
         <div class="seg" id="daySeg">
-          <button data-day="both" class="${P.date === VIEW_BOTH ? 'on' : ''}">Today + Tomorrow</button>
           <button data-day="0" class="${P.date === jmDate(0) ? 'on' : ''}">Today</button>
-          <button data-day="1" class="${P.date === jmDate(1) ? 'on' : ''}">Tomorrow</button>
+          <button data-day="-1" class="${P.date === jmDate(-1) ? 'on' : ''}">Yesterday</button>
         </div>
-        <input type="date" id="datePick" value="${P.date === VIEW_BOTH ? '' : P.date}" aria-label="Load date">
+        <input type="date" id="datePick" value="${P.date}" aria-label="Loads made on">
         ${searchBox(P.q)}
         ${sortButton()}
       </div>
@@ -303,11 +302,11 @@
       const id = nx.dataset.next;
       if (id === 'clear-q') { P.q = ''; render(); }
       else if (id === 'all-areas') { P.area = 'all'; try { localStorage.setItem('dispatch-pick-area', 'all'); } catch (x) {} render(); }
-      else { P.date = jmDate(id === 'tomorrow' ? 1 : 0); P.sel = null; refresh(); }
+      else { P.date = jmDate(id === 'yesterday' ? -1 : 0); P.sel = null; refresh(); }
       return;
     }
     const day = t.closest('#daySeg button');
-    if (day) { P.date = day.dataset.day === 'both' ? VIEW_BOTH : jmDate(Number(day.dataset.day)); P.sel = null; refresh(); return; }
+    if (day) { P.date = jmDate(Number(day.dataset.day)); P.sel = null; refresh(); return; }
     const ar = t.closest('[data-area]');
     if (ar) { P.area = ar.dataset.area; try { localStorage.setItem('dispatch-pick-area', P.area); } catch (x) {} render(); return; }
     const op = t.closest('[data-open]');

@@ -41,16 +41,36 @@
   .areah { font-size:13px; font-weight:700; color:var(--navy); margin:14px 2px 6px; display:flex; align-items:center; gap:8px; }
   .sumbar { position:sticky; bottom:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; background:var(--navy); color:#fff; border-radius:12px; padding:12px 14px; margin-top:12px; box-shadow:0 6px 20px rgba(15,32,68,.25); font-size:14px; }
   .sumbar .btn { border-color:#fff; font-size:16px; padding:12px 18px; min-height:50px; }
+  .item .subnote { grid-column:1 / -1; font-size:13.5px; color:var(--warn-text); background:var(--warn-bg); border-radius:8px; padding:6px 10px; }
+  .item.sub { border-left:6px solid #f59e0b; }
+  .item .acts .btn.subbtn { border-color:#f59e0b; color:var(--warn-text); }
+  .item .acts .btn.subbtn.on { background:var(--warn-bg); font-weight:700; }
+  /* Slide-in form: from the right on a tablet, up from the bottom on a phone. */
+  #subShade { position:fixed; inset:0; background:rgba(15,32,68,.45); opacity:0; pointer-events:none; transition:opacity .2s; z-index:60; }
+  #subSheet { position:fixed; top:0; right:0; bottom:0; width:min(440px,100vw); background:var(--surface); box-shadow:-8px 0 30px rgba(15,32,68,.25); transform:translateX(100%); transition:transform .22s ease; z-index:61; display:flex; flex-direction:column; padding:18px; gap:12px; overflow-y:auto; }
+  body.subopen #subShade { opacity:1; pointer-events:auto; }
+  body.subopen #subSheet { transform:none; }
+  #subSheet h2 { margin:0; font-size:19px; color:var(--navy); }
+  #subSheet .sitem { font-size:15px; font-weight:600; color:var(--navy); }
+  #subSheet .sfacts { display:flex; gap:10px; flex-wrap:wrap; }
+  #subSheet .sfacts div { flex:1 1 90px; background:var(--bg, #f1f5f9); border-radius:10px; padding:8px 10px; font-size:12px; color:var(--text-muted); }
+  #subSheet .sfacts b { display:block; font-size:22px; color:var(--navy); font-variant-numeric:tabular-nums; }
+  #subSheet textarea { width:100%; box-sizing:border-box; min-height:110px; font:inherit; font-size:17px; padding:10px 12px; border:1px solid var(--border2); border-radius:8px; resize:vertical; }
+  #subSheet .sbtns { display:flex; gap:10px; flex-wrap:wrap; margin-top:auto; }
+  #subSheet .sbtns .btn { min-height:52px; font-size:16px; flex:1 1 120px; }
+  @media (max-width:600px) { #subSheet { top:auto; width:100vw; max-height:85vh; border-radius:16px 16px 0 0; transform:translateY(100%); box-shadow:0 -8px 30px rgba(15,32,68,.25); } }
 </style>
 </head>
 <body>
 <div class="page" id="app"><div class="skel-wrap"><div class="skel-card"><div class="skel w40"></div><div class="skel w70"></div><div class="skel w55"></div></div></div></div>
+<div id="subShade" data-subclose></div>
+<aside id="subSheet" role="dialog" aria-modal="true" aria-labelledby="subTitle" aria-hidden="true"></aside>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
 <script src="common.js"></script>
 <script>
   const AREAS = [[1, 'Area 1'], [2, 'Area 2'], [3, 'Area 3'], [4, 'Area 4'], [5, 'Area 5'], [6, 'Area 6'], [7, 'Area 7'], [0, 'Unassigned']];
-  const K = { q: '', date: VIEW_BOTH, loads: [], picks: new Map(), items: new Map(), areaDone: [], staged: [], sel: null, filter: 'all', busy: false };
+  const K = { q: '', date: jmDate(0), loads: [], picks: new Map(), items: new Map(), areaDone: [], staged: [], sel: null, filter: 'all', busy: false };
   const areaName = a => (AREAS.find(x => x[0] === Number(a)) || [0, 'Unassigned'])[1];
 
   async function loadAll() {
@@ -75,7 +95,8 @@
     const ticked = picks.filter(p => (got.get(p.inventory_id) || {}).confirmed).length;
     const short = picks.filter(p => { const c = got.get(p.inventory_id); return c && c.confirmed && Number(c.checked_qty) < Number(p.required); }).length;
     const areas = [...new Set(picks.map(p => p.area))];
-    return { total: picks.length, ticked, short, areas: areas.length,
+    const subs = picks.filter(p => (got.get(p.inventory_id) || {}).sub_needed).length;
+    return { total: picks.length, ticked, short, subs, areas: areas.length,
              staged: areas.filter(a => K.staged.some(d => d.load_id === l.id && d.area === a)).length };
   }
   const withAcumatica = l => confirmQueued(l) || ['confirming', 'confirmed', 'partial'].includes(l.check_status);
@@ -118,11 +139,10 @@
     morphHTML(main, `
       <div class="controls">
         <div class="seg" id="daySeg">
-          <button data-day="both" class="${K.date === VIEW_BOTH ? 'on' : ''}">Today + Tomorrow</button>
           <button data-day="0" class="${K.date === jmDate(0) ? 'on' : ''}">Today</button>
-          <button data-day="1" class="${K.date === jmDate(1) ? 'on' : ''}">Tomorrow</button>
+          <button data-day="-1" class="${K.date === jmDate(-1) ? 'on' : ''}">Yesterday</button>
         </div>
-        <input type="date" id="datePick" value="${K.date === VIEW_BOTH ? '' : K.date}" aria-label="Load date">
+        <input type="date" id="datePick" value="${K.date}" aria-label="Loads made on">
         ${searchBox(K.q)}
         ${sortButton()}
       </div>
@@ -131,7 +151,7 @@
         <div class="kpi"><div class="l">Checked</div><div class="v">${done.length}</div><div class="s">handed to Invoicing</div></div>
         <div class="kpi"><div class="l">Short counts</div><div class="v">${K.loads.reduce((s, l) => s + checkState(l).short, 0)}</div><div class="s">items checked short</div></div>
       </div>
-      ${vis.length ? `<div class="pk">${rail(todo, done, cur)}<div class="pkmain">${loadView(cur)}</div></div>` : `<div class="card">${K.loads.length ? emptyState(`Nothing matches “${esc(K.q)}”`, 'Check the spelling, or clear the search.', { label: 'Clear search', id: 'clear-q' }) : emptyState(`No loads to check for ${K.date === VIEW_BOTH ? 'today or tomorrow' : esc(niceDate(K.date))}`, 'A load shows here once its trucker is locked in and picking has started.', K.date === VIEW_BOTH ? undefined : { label: K.date === jmDate(0) ? 'Check tomorrow' : 'Check today', id: 'other-day' })}</div>`}`);
+      ${vis.length ? `<div class="pk">${rail(todo, done, cur)}<div class="pkmain">${loadView(cur)}</div></div>` : `<div class="card">${K.loads.length ? emptyState(`Nothing matches “${esc(K.q)}”`, 'Check the spelling, or clear the search.', { label: 'Clear search', id: 'clear-q' }) : emptyState(`No loads to check from ${K.date === jmDate(0) ? 'today' : esc(niceDate(K.date))}`, 'A load shows here once its trucker is locked in and picking has started.', { label: K.date === jmDate(0) ? 'Check yesterday' : 'Check today', id: 'other-day' })}</div>`}`);
   }
 
   // Left rail: loads still to check, then the ones already handed to Invoicing.
@@ -139,7 +159,7 @@
     const btn = l => {
       const s = checkState(l);
       const st = l.checker_done_at || (s.total && s.ticked === s.total) ? 'ok' : s.ticked ? 'part' : '';
-      return `<button class="rl ${cur && cur.id === l.id ? 'on' : ''}" data-open="${l.id}"><span class="dot ${st}"></span><span class="rb"><span class="lnbr">${esc(l.load_nbr)}</span>${loadKindTags(l)}<span class="sub">${esc(l.ship_via || '')} · ${l.checker_done_at ? 'checked' : `${s.ticked}/${s.total}`}${s.short ? ` · <b style="color:var(--warn-text)">${s.short} short</b>` : ''}</span></span></button>`;
+      return `<button class="rl ${cur && cur.id === l.id ? 'on' : ''}" data-open="${l.id}"><span class="dot ${st}"></span><span class="rb"><span class="lnbr">${esc(l.load_nbr)}</span>${loadKindTags(l)}<span class="sub">${esc(l.ship_via || '')} · ${l.checker_done_at ? 'checked' : `${s.ticked}/${s.total}`}${s.short ? ` · <b style="color:var(--warn-text)">${s.short} short</b>` : ''}${s.subs ? ` · <b style="color:var(--warn-text)">${s.subs} sub</b>` : ''}</span></span></button>`;
     };
     return `<nav class="rail" aria-label="Loads">${todo.map(btn).join('')}${done.length ? `<div class="rh">Checked</div>${done.map(btn).join('')}` : ''}</nav>`;
   }
@@ -179,7 +199,7 @@
       ${lines.map(x => itemRow(l, x, got.get(x.inventory_id), locked)).join('')}
       ${all.length && !lines.length ? `<div class="card"><div class="empty">${f === 'short' ? 'No short lines.' : 'Every line is checked.'}</div></div>` : ''}
       ${all.length ? `<div class="sumbar">
-        <span><b>${s.ticked}</b> of ${s.total} lines checked${s.short ? ` · ${s.short} short` : ''}${unchecked && !finished ? ` · ${unchecked} to go` : ''}</span><span class="spacer"></span>
+        <span><b>${s.ticked}</b> of ${s.total} lines checked${s.short ? ` · ${s.short} short` : ''}${s.subs ? ` · ${plural(s.subs, 'substitution')} needed` : ''}${unchecked && !finished ? ` · ${unchecked} to go` : ''}</span><span class="spacer"></span>
         ${finished ? (canReopen ? '<button class="btn small" data-act="reopen">Reopen check</button>' : '')
           : `<button class="btn primary" data-act="finish" ${s.ticked === s.total ? '' : 'disabled'}>Finish check</button>`}
       </div>` : ''}`}
@@ -191,7 +211,9 @@
     const short = qty != null && qty < Number(x.required);
     const fill = x.picked_qty != null ? Number(x.picked_qty) : Number(x.required);
     const dis = locked ? 'disabled' : '';
-    return `<div class="item ${ok ? 'ok' : ''}" data-item="${esc(x.inventory_id)}">
+    const sub = !!(c && c.sub_needed);
+    const subBtn = short && !locked ? `<button class="btn small subbtn ${sub ? 'on' : ''}" data-sub="${esc(x.inventory_id)}">${sub ? 'Substitute needed ✎' : 'Needs substitute'}</button>` : '';
+    return `<div class="item ${ok ? 'ok' : ''} ${sub ? 'sub' : ''}" data-item="${esc(x.inventory_id)}">
       <div class="ic"><div class="desc">${esc(x.description || x.inventory_id)}</div>
         <div class="meta">${esc(x.inventory_id)} · ${esc(x.uom || '')} · ${areaName(x.area)} · ${x.picked_qty != null ? `picked ${fmt(x.picked_qty)}` : '<b style="color:var(--warn-text)">not picked</b>'}</div></div>
       <div class="need">${fmt(x.required)}<small>on load</small></div>
@@ -199,8 +221,10 @@
         <input type="number" inputmode="numeric" enterkeyhint="done" autocomplete="off" min="0" max="${Number(x.required)}" step="1" data-qty value="${qty != null ? qty : ''}" placeholder="Checked" aria-label="Checked quantity for ${esc(x.inventory_id)}" ${dis || (ok ? 'disabled' : '')}>
         ${ok || locked ? '' : `<button class="btn small" data-fill="${fill}">= ${fmt(fill)}</button><button class="btn small" data-fill="0" aria-label="None here, 0">0</button>`}
         <label class="tick"><input type="checkbox" data-tick ${ok ? 'checked' : ''} ${dis} aria-label="Line checked for ${esc(x.inventory_id)}"> Checked</label>
+        ${subBtn}
         <span class="got">${ok ? `${short ? `<b style="color:var(--warn-text)">Short ${fmt(Number(x.required) - qty)}</b> · ` : ''}${esc(c.checker_name || '')} ${esc(stamp(c.checked_at))}` : ''}</span>
       </div>
+      ${sub ? `<div class="subnote"><b>Substitute needed</b>${c.sub_note ? ' — ' + esc(c.sub_note) : ''}${c.sub_resolved_at ? ' · <b>Completed by Invoicing</b>' : ''}</div>` : ''}
     </div>`;
   }
 
@@ -223,7 +247,12 @@
     const m = itemsOf(l); K.items.set(l.id, m);
     const prev = m.get(inv);
     if (qty == null) m.delete(inv);
-    else m.set(inv, { load_id: l.id, inventory_id: inv, checked_qty: qty, confirmed, checker_name: whoOf(l.id) || (D.me && D.me.name), checked_at: new Date().toISOString() });
+    else {
+      // Keep the substitution flag while the line stays short (the database drops it once the count is back to full).
+      const req = Number(((K.picks.get(l.id) || []).find(x => x.inventory_id === inv) || {}).required);
+      const keep = prev && qty < req ? { sub_needed: prev.sub_needed, sub_note: prev.sub_note, sub_resolved_at: prev.sub_resolved_at } : {};
+      m.set(inv, { load_id: l.id, inventory_id: inv, checked_qty: qty, confirmed, checker_name: whoOf(l.id) || (D.me && D.me.name), checked_at: new Date().toISOString(), ...keep });
+    }
     render();
     K.saving = (K.saving || 0) + 1; K.epoch = (K.epoch || 0) + 1;
     saveChain = saveChain.then(async () => {
@@ -257,12 +286,51 @@
   }
   const lineOf = row => (K.picks.get(K.sel) || []).find(x => x.inventory_id === row.dataset.item);
 
+  // ---- Substitution form (slides in from the right, up from the bottom on a phone) ----
+  function openSub(inv) {
+    const l = K.loads.find(x => x.id === K.sel), x = (K.picks.get(K.sel) || []).find(p => p.inventory_id === inv), c = itemsOf(l).get(inv);
+    if (!l || !x || !c || c.checked_qty == null) { toast('Enter the checked quantity first (0 if none found)', true); return; }
+    if (!(Number(c.checked_qty) < Number(x.required))) { toast('Only a short line can need a substitute', true); return; }
+    K.sub = { loadId: l.id, inv };
+    const sh = document.getElementById('subSheet');
+    sh.innerHTML = `<h2 id="subTitle">Substitute needed</h2>
+      <div class="sitem">${esc(x.description || x.inventory_id)}<div class="muted" style="font-weight:400;font-size:13px">${esc(x.inventory_id)} · ${esc(x.uom || '')}</div></div>
+      <div class="sfacts"><div>On load<b>${fmt(x.required)}</b></div><div>Found<b>${fmt(c.checked_qty)}</b></div><div>Short<b style="color:var(--warn-text)">${fmt(Number(x.required) - Number(c.checked_qty))}</b></div></div>
+      <label for="subNote" style="font-weight:600;color:var(--navy)">Note for Invoicing <span class="muted" style="font-weight:400">(optional)</span></label>
+      <textarea id="subNote" maxlength="200" placeholder="e.g. none on the shelf, only the 6-pack here">${esc(c.sub_note || '')}</textarea>
+      <div class="sbtns"><button class="btn primary" data-subsave>${c.sub_needed ? 'Save note' : 'Flag for substitution'}</button>
+        ${c.sub_needed ? '<button class="btn" data-subclear>Remove flag</button>' : ''}<button class="btn" data-subclose>Cancel</button></div>`;
+    sh.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('subopen');
+    setTimeout(() => { const t = document.getElementById('subNote'); if (t) t.focus(); }, 230);
+  }
+  function closeSub() { K.sub = null; document.body.classList.remove('subopen'); document.getElementById('subSheet').setAttribute('aria-hidden', 'true'); }
+  function saveSub(needed) {
+    const s = K.sub; if (!s) return;
+    const note = needed ? (document.getElementById('subNote').value || '').trim() : null;
+    const l = K.loads.find(x => x.id === s.loadId);
+    closeSub();
+    act(async () => {
+      await saveChain;
+      const { error } = await sb.rpc('dispatch_check_sub', { p_load_id: s.loadId, p_inventory_id: s.inv, p_needed: needed, p_note: note, p_checker: (l && whoOf(l.id)) || null });
+      if (error) throw error;
+      toast(needed ? 'Flagged. Invoicing will see it.' : 'Flag removed');
+    });
+  }
+  document.addEventListener('click', e => {
+    const t = e.target;
+    if (t.closest('[data-subclose]')) { closeSub(); return; }
+    if (t.closest('[data-subsave]')) { saveSub(true); return; }
+    if (t.closest('[data-subclear]')) { saveSub(false); return; }
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && K.sub) closeSub(); });
+
   document.getElementById('app').addEventListener('click', e => {
     const t = e.target;
     const nx = t.closest('[data-next]');
-    if (nx) { if (nx.dataset.next === 'clear-q') { K.q = ''; render(); } else { K.date = jmDate(K.date === jmDate(0) ? 1 : 0); K.sel = null; refresh(); } return; }
+    if (nx) { if (nx.dataset.next === 'clear-q') { K.q = ''; render(); } else { K.date = jmDate(K.date === jmDate(0) ? -1 : 0); K.sel = null; refresh(); } return; }
     const day = t.closest('#daySeg button');
-    if (day) { K.date = day.dataset.day === 'both' ? VIEW_BOTH : jmDate(Number(day.dataset.day)); K.sel = null; refresh(); return; }
+    if (day) { K.date = jmDate(Number(day.dataset.day)); K.sel = null; refresh(); return; }
     const op = t.closest('[data-open]');
     if (t.closest('#sortBtn')) { toggleSort(); render(); return; }
     const fl = t.closest('[data-filter]');
@@ -275,6 +343,8 @@
       setWho(K.sel, nm); render(); return;
     }
     if (t.closest('[data-whochange]')) { setWho(K.sel, ''); render(); return; }
+    const sb_ = t.closest('[data-sub]');
+    if (sb_) { openSub(sb_.dataset.sub); return; }
     const fill = t.closest('[data-fill]');
     if (fill) {
       const row = fill.closest('.item'); row.querySelector('[data-qty]').value = fill.dataset.fill;
@@ -285,7 +355,7 @@
     const l = K.loads.find(x => x.id === K.sel);
     if (b.dataset.act === 'finish') {
       const s = checkState(l);
-      if (!confirm(`Finish checking ${l.load_nbr}?\n\n${s.short ? `${plural(s.short, 'item')} checked short. ` : ''}It goes to Invoicing, and you can't change lines after this unless you reopen it.`)) return;
+      if (!confirm(`Finish checking ${l.load_nbr}?\n\n${s.short ? `${plural(s.short, 'item')} checked short. ` : ''}${s.subs ? `${plural(s.subs, 'item')} flagged for substitution. ` : ''}It goes to Invoicing, and you can't change lines after this unless you reopen it.`)) return;
       act(async () => { await saveChain; const { error } = await sb.rpc('dispatch_check_finish', { p_load_id: l.id }); if (error) throw error; const nx = K.loads.find(x => x.id !== l.id && !x.checker_done_at); if (nx) { K.sel = nx.id; K.filter = 'all'; } toast('Check finished. With Invoicing now.', false, { action: { label: 'Undo', fn: () => act(async () => { const r = await sb.rpc('dispatch_check_reopen', { p_load_id: l.id }); if (r.error) throw r.error; toast('Check reopened'); }) } }); });
     }
     if (b.dataset.act === 'reopen') act(async () => { const { error } = await sb.rpc('dispatch_check_reopen', { p_load_id: l.id }); if (error) throw error; });

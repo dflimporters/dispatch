@@ -383,7 +383,9 @@ async function fetchLoads(date, opts) {
   ]);
   if (cur.error) throw cur.error;
   if (old.error) throw old.error;
-  const loads = (old.data || []).map(l => ({ ...l, carried: true })).concat(cur.data || []);
+  return hydrateLoads((old.data || []).map(l => ({ ...l, carried: true })).concat(cur.data || []), opts);
+}
+async function hydrateLoads(loads, opts) {
   const ids = loads.map(l => l.id);
   let ls = [], evs = [];
   if (ids.length) {
@@ -405,16 +407,23 @@ async function fetchLoads(date, opts) {
   });
 }
 
-// Picker / Checker view: 'both' = today's loads then tomorrow's (the pickers work tomorrow's
-// shipment date the evening before), or a single ISO date. No carry-over from earlier days;
-// pick the date to see those.
-const VIEW_BOTH = 'both';
-async function fetchLoadsView(view, opts) {
-  if (view !== VIEW_BOTH) return fetchLoads(view, opts);
-  const [a, b] = await Promise.all([fetchLoads(jmDate(0), opts), fetchLoads(jmDate(1), opts)]);
-  return a.concat(b);
+// Picker / Checker view: the loads CREATED on `day` (an ISO date), i.e. the ones whose number starts
+// L-DDMM- for that day, whatever their shipment date. That is how the guys pick and check: today's
+// list is the loads made today (usually for tomorrow's trucks) and numbering restarts at 01 each day.
+// No carry-over; pick another creation day with the date box.
+const VIEW_BOTH = 'both'; // legacy value, treated as today
+async function fetchLoadsView(day, opts) {
+  if (!day || day === VIEW_BOTH) day = jmDate(0);
+  const prefix = 'L-' + day.slice(8, 10) + day.slice(5, 7) + '-';
+  const since = new Date(Date.parse(day + 'T00:00:00Z') - 3 * 86400e3).toISOString(); // DDMM repeats yearly
+  const r = await sb.from('loads').select('*').eq('env', D.env).like('load_nbr', prefix + '%').gte('created_at', since)
+    .order('seq').order('wave');
+  if (r.error) throw r.error;
+  const loads = await hydrateLoads(r.data || [], opts);
+  markFresh();
+  return loads;
 }
-// Small tag on a card whose shipment date isn't today (tomorrow's loads in the combined view).
+// Small tag on a card whose shipment date isn't today (loads made today for tomorrow's trucks).
 function shipsTag(l) {
   return l.load_date && l.load_date !== jmDate(0) ? `<span class="tag" title="Shipment date">Ships ${esc(niceDate(l.load_date))}</span>` : '';
 }
@@ -801,7 +810,8 @@ function eventList(evs, key) {
   if (!evs.length) return '';
   const label = e => ({ create:'Created', edit:'Edited', move:'Shipments', send:'Sent to liaison', pull_back:'Pulled back', return:'Sent back to coordinator',
     call: e.outcome || 'Call', confirm:'Trucker confirmed', unconfirm:'Confirmation undone', writeback:'Acumatica', unstick:'Marked stuck', delete:'Deleted',
-    pick_done:'Picked', pick_reopen:'Pick reopened', check_save:'Split saved', check_done:'Check finished', check_reopen:'Check reopened', check_confirm:'Confirmed in Acumatica' }[e.kind] || e.kind);
+    pick_done:'Picked', pick_reopen:'Pick reopened', check_save:'Split saved', check_done:'Check finished', check_reopen:'Check reopened', check_confirm:'Confirmed in Acumatica',
+    sub_flag:'Substitute needed', sub_unflag:'Substitute flag removed', sub_resolve:'Substitution complete', sub_reopen:'Substitution reopened', sub_override:'Printed past substitution warning' }[e.kind] || e.kind);
   return `<details ${key ? keep(key) : ''}><summary>History (${evs.length})</summary><ul class="evs">${evs.map(e => `<li><b>${esc(label(e))}</b>${e.ship_via ? ' · ' + esc(e.ship_via) : ''}${e.contractor ? ' · ' + esc(e.contractor) : ''}${e.note ? ' — ' + esc(e.note) : ''}
     <span style="float:right">${esc(e.actor_name || '')}, ${esc(stamp(e.created_at))}</span></li>`).join('')}</ul></details>`;
 }
