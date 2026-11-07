@@ -157,7 +157,30 @@
     const unticked = items.filter(i => !X.ticks[i.code]).length;
     return { missing, mism, unticked, clear: !missing && !mism && !unticked };
   };
+  // A closed load is finished: show what was recorded, but no form to check it again.
+  function renderClosed() {
+    const r = X.res, l = r.load, hb = r.handback || [];
+    const last = (r.checks || [])[0];
+    main().innerHTML = `<div class="secwrap">
+      <div class="warnbox info"><b>This load is closed.</b> No more checks can be recorded for it.</div>
+      <div class="card" style="padding:14px 16px;margin-bottom:12px">
+        <div class="muted">Load</div><div class="big">${esc(l.load_nbr)}</div>
+        <div style="font-weight:700;margin:4px 0 8px">${esc(l.trucker || l.ship_via || '')}${l.truck_type ? ` <span class="muted" style="font-weight:500">· ${esc(l.truck_type)}</span>` : ''}</div>
+        <div class="kv"><span>Date</span><b>${esc(niceDate(l.load_date))}</b></div>
+        <div class="kv"><span>Driver</span><b>${esc(l.claimed_name || '—')}${l.claimed_phone ? ' · ' + esc(l.claimed_phone) : ''}</b></div>
+        <div class="kv"><span>Status</span><b>${esc(STATE.closed)}</b></div>
+      </div>
+      ${last ? `<div class="warnbox ${last.result === 'clear' ? 'info' : 'bad'}">Last check: <b>${esc(last.result === 'clear' ? 'clear' : 'flagged')}</b> by ${esc(last.checked_by || '?')} at ${esc(stamp(last.checked_at))}${last.note ? ' · ' + esc(last.note) : ''}</div>` : ''}
+      ${allLines().length ? `<h3 style="margin:14px 0 2px">Return sheet (${plural(allLines().length, 'line')})</h3>
+      <div class="card" style="padding:6px 16px;margin-bottom:12px">
+        ${hb.map(s => `<div class="hb"><div class="c">${esc(s.customer)}</div>
+            ${(s.lines || []).map(x => `<div class="l"><span>${esc(x.description || '')}${x.why ? `<small>${esc(x.why)}</small>` : ''}</span>
+              <span class="muted">${num(x.qty)}${x.uom ? ' ' + esc(x.uom) : ''}</span></div>`).join('')}</div>`).join('')}
+      </div>` : ''}
+      <div class="row2"><button class="btn primary" data-act="scan">Scan another truck</button></div></div>`;
+  }
   function renderResult() {
+    if (X.res.load.status === 'closed') { renderClosed(); return; }
     const r = X.res, l = r.load, items = r.items || [], hb = r.handback || [];
     const last = (r.checks || [])[0];
     const totalHb = allLines().length;
