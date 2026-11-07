@@ -54,6 +54,7 @@
   .sheet .cmeta b { font-size:10.5px; letter-spacing:.6px; text-transform:uppercase; color:#444; margin-right:4px; }
   .sheet.cs th.r, .sheet.cs td.r { text-align:right; }
   .sheet.cs th.b, .sheet.cs td.b { width:19mm; text-align:center; }
+  .sheet.cs td.cust { font-size:10.5px; }
   .sheet.cs td.nt { min-width:24mm; }
   .sheet.cs tr.tot td { border-top:2px solid #000; border-bottom:0; }
   .sheet.cs td.mono { font-family:ui-monospace,Consolas,monospace; white-space:nowrap; }
@@ -383,9 +384,9 @@
     const list = [...items.values()].sort((x, y) => String(x.descr || x.id).localeCompare(String(y.descr || y.id), undefined, { numeric: true, sensitivity: 'base' }));
     return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: by item')}
       <div class="cmeta"><span><b>Items</b> ${list.length}</span><span><b>Stops</b> ${(s.stops || []).length}</span><span><b>Units</b> ${qn(list.reduce((t, x) => t + x.total, 0))}</span></div>
-      ${list.map(it => `<div class="stop"><div class="stophd"><span class="mono"><b>${esc(it.id || '')}</b></span><span>${esc(it.descr || '')}</span><span class="sp"></span><span>${esc(it.uom || '')}</span><span class="z">Total ${qn(it.total)}</span></div>
+      ${list.map(it => `<div class="stop"><div class="stophd"><span class="mono"><b>${esc(it.id || '')}</b></span><span><b>${esc(it.descr || '')}</b></span><span class="sp"></span><span>${esc(it.uom || '')}</span><span class="z">Total ${qn(it.total)}</span></div>
         <table><thead><tr><th class="b">Loaded</th><th>#</th><th>Customer</th><th>Area</th><th>Invoice</th><th class="r">Qty</th><th class="b">Delivered</th></tr></thead><tbody>
-          ${it.rows.map(r => `<tr><td class="b"><span class="box"></span></td><td class="n">${r.seq}</td><td>${esc(r.cust)}</td><td>${esc(r.zone || '')}</td><td class="mono">${esc(r.inv)}</td><td class="r"><b>${qn(r.qty)}</b></td><td class="b"><span class="box"></span></td></tr>`).join('')}
+          ${it.rows.map(r => `<tr><td class="b"><span class="box"></span></td><td class="n">${r.seq}</td><td class="cust">${esc(r.cust)}</td><td>${esc(r.zone || '')}</td><td class="mono">${esc(r.inv)}</td><td class="r"><b>${qn(r.qty)}</b></td><td class="b"><span class="box"></span></td></tr>`).join('')}
         </tbody></table></div>`).join('')}
       ${checkFoot(s)}</div>`;
   }
