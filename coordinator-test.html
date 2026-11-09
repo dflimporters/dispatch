@@ -68,7 +68,13 @@
   .lcard.lc .lsum .row2 { padding-left:0; }
   .dryban { background:#fef3c7; border:1px solid #f59e0b; color:#78350f; border-radius:10px; padding:8px 12px; font-size:13px; margin-bottom:12px; }
   .dryban.live { background:#fee2e2; border-color:#ef4444; color:#7f1d1d; }
-  .viewseg { margin-left:8px; }
+  .ltabs { display:flex; gap:2px; border-bottom:1px solid var(--border); margin:10px 0 8px; }
+  .ltabs button { background:none; border:0; border-bottom:2px solid transparent; padding:7px 12px; font:inherit; font-size:13px; font-weight:600; color:var(--text-muted); cursor:pointer; display:flex; gap:6px; align-items:center; margin-bottom:-1px; }
+  .ltabs button:hover { color:var(--text); }
+  .ltabs button.on { color:var(--navy); border-bottom-color:var(--accent); }
+  .ltabs .tb { font-style:normal; font-size:11px; font-weight:600; padding:1px 7px; border-radius:999px; background:#e2e8f0; color:#475569; }
+  .ltabs .tb.warn { background:#fef3c7; color:#92400e; }
+  .ltabs .tb.ok { background:#d1fae5; color:#065f46; }
   .shead { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.3px; color:var(--navy); margin:12px 2px 6px; display:flex; gap:8px; align-items:center; }
   .shead .n { color:var(--text-muted); font-weight:500; text-transform:none; letter-spacing:0; }
   .kpi.clk { cursor:pointer; }
@@ -86,7 +92,7 @@
 <script src="common.js"></script>
 <script>
   const B = { date: jmDate(0), free: [], hasSv: [], loads: [], dates: [], sel: new Set(), sync: null, busy: false, wave: loadWaveFilter('batcher'), tab: loadKindTab(),
-    view: (() => { try { return localStorage.getItem('lms.test.view') || 'both'; } catch (e) { return 'both'; } })(),
+    ltab: new Map(),
     drafts: new Map(), returning: new Set(), was: new Map(), poll: null, open: new Set(), seen: new Set() };
   const LIVE_WRITES = new URLSearchParams(location.search).get('live') === '1';
   // Dry-run guard: every write path rejects unless ?live=1. Reads pass.
@@ -126,7 +132,6 @@
     const terms = B.q.toLowerCase().split(/\s+/).filter(Boolean);
     return visLoads()
       .filter(l => B.status === 'all' || (B.status === 'written' ? ['confirmed', 'writing', 'done', 'partial'].includes(l.status) : l.status === B.status))
-      .filter(l => B.view === 'build' ? l.status === 'draft' : B.view === 'trucker' ? l.status !== 'draft' : true)
       .filter(l => !terms.length || nbrMatches(l.load_nbr, B.q) || loadMatches(l, terms))
       .sort(LOAD_SORTS[B.sortBy][1]);
   }
@@ -134,12 +139,7 @@
     const all = visLoads(), loads = shownLoads();
     if (!all.length) return `<div class="card"><div class="empty">No ${B.wave !== 'all' ? B.wave + ' ' : ''}loads yet. Use <b>Suggest loads</b>, or tick shipments and add them to a new load.</div></div>`;
     if (!loads.length) return `<div class="card"><div class="empty">No loads match the filter. <button class="btn small" data-act="clear_filter">Clear filter</button></div></div>`;
-    if (B.view === 'trucker') {
-      const need = loads.filter(l => l.status === 'ready'), wr = loads.filter(l => l.status !== 'ready');
-      const sec = (t, a) => a.length ? `<div class="shead">${t}<span class="n">${plural(a.length, 'load')}</span></div><div class="lgrid">${a.map(liaisonCard).join('')}</div>` : '';
-      return sec('Need a trucker', need) + sec('Trucker confirmed · writing / done', wr);
-    }
-    return loads.map(loadCardAny).join('');
+    return loads.map(loadCard).join('');
   }
   function loadFilterHtml() {
     return `<div class="controls" id="loadFilter">
@@ -231,8 +231,6 @@
 
     const kc = { special: B.free.filter(r => kindOf(r)).length + B.loads.filter(isSpecialLoad).length };
     kc.delivery = B.free.length + B.loads.length - kc.special;
-    const one = B.view === 'trucker';
-    const viewSeg = `<div class="seg viewseg" id="viewSeg">${[['build', 'Build loads'], ['both', 'Both'], ['trucker', 'Trucker desk']].map(([v, n]) => `<button data-view="${v}" class="${B.view === v ? 'on' : ''}">${n}</button>`).join('')}</div>`;
     document.getElementById('main').innerHTML = `
       <div class="dryban ${LIVE_WRITES ? 'live' : ''}">${LIVE_WRITES ? '<b>?live=1</b> — buttons on this layout test page WRITE for real.' : '<b>Layout test.</b> Reads real data; every button that would save or write to Acumatica is switched off.'} Compare with Coordinator and Trucker Liaison.</div>
       ${kindTabsHtml(B.tab, kc)}
@@ -246,7 +244,6 @@
         ${D.env === 'test'
           ? '<button class="btn small" data-act="sync_test">Pull fresh TEST data</button>'
           : '<button class="btn small" data-act="sync_live" title="Pull the latest shipments and items from Acumatica now">↻ Refresh shipments</button>'}
-        ${viewSeg}
         <span class="spacer"></span>
         ${waveFilterHtml(B.wave)}
         <button class="btn primary" data-act="suggest" ${free.length ? '' : 'disabled'}>Suggest loads${B.sel.size && [...B.sel].every(freeByNbr) ? ' for selected' : B.wave !== 'all' ? ' (' + B.wave + ')' : ''}</button>
@@ -258,15 +255,15 @@
         <div class="kpi ${withClerk.length ? 'warn' : ''} clk" data-status="ready" title="Show only these"><div class="l">Need a trucker</div><div class="v">${withClerk.length}</div><div class="s">waiting for a trucker</div></div>
         <div class="kpi"><div class="l">Trucker confirmed</div><div class="v">${written.length}</div><div class="s">${written.filter(l => l.status === 'done').length} written to Acumatica</div></div>
       </div>
-      <div class="cols ${one ? 'one' : ''}">
-        ${one ? '' : `<div>
+      <div class="cols">
+        <div>
           <h2>Not on a load <span class="muted">${esc(niceDate(B.date))}${free.some(r => r.shipment_date < B.date) ? ' and earlier' : ''}${B.wave !== 'all' ? ' · ' + B.wave + ' only' : ''}</span></h2>
           <div class="card">${renderPool(free)}</div>
           ${B.hasSv.length ? `<details class="has-sv" ${keep('has-sv')}><summary>${plural(B.hasSv.length, 'shipment')} on this date already have a Ship Via in Acumatica (not loadable here)</summary>
             <div class="card" style="margin-top:6px">${shipTable_(B.hasSv, { cb: false, sv: true })}</div></details>` : ''}
-        </div>`}
+        </div>
         <div class="lcol">
-          <h2>${B.view === 'build' ? 'Draft loads' : B.view === 'trucker' ? 'Trucker desk' : 'Loads'} <span class="muted">${esc(niceDate(B.date))}</span></h2>
+          <h2>Loads <span class="muted">${esc(niceDate(B.date))}</span></h2>
           ${loadFilterHtml()}
           <div id="loadsList">${loadsListHtml()}</div>
         </div>
@@ -321,6 +318,7 @@
     const results = written ? new Map(l.ships.map(s => [s.shipment_nbr, s])) : null;
     const others = B.loads.filter(x => x.status === 'draft' && x.id !== l.id);
     const fit = bestFit(l.vol, l.drops);
+    const tab = curTab(l);
     return `<div class="lcard st-${l.status}" data-load="${l.id}">
       <div class="lhead"><div><span class="lnbr">${esc(l.load_nbr)}</span>${l.confirm_requested_at || ['confirming', 'confirmed', 'partial'].includes(l.check_status) ? '' : ` <button class="btn small" data-act="renumber" title="Set the real load number">Edit #</button>`} ${loadKindTags(l)}<span class="muted">${esc(l.zones.join(', '))}</span></div>${statusPill(l.status)}</div>
       ${l.returned_note && draft ? `<div class="warnbox bad">Sent back by the liaison: ${esc(l.returned_note)}</div>` : ''}
@@ -332,7 +330,8 @@
       <div class="lstats">${waveTag(l.wave)}<span>${plural(l.count, 'shipment')}</span><span>${l.drops} / ${MAX_DROPS} drops</span>${capBar(l)}<span>${fmt(l.qty)} qty</span><span><b>${money(l.value)}</b></span>
         ${draft && fit && fitLabel(fit) !== l.truck_type ? `<span>best fit: ${esc(fitLabel(fit))}</span>` : ''}</div>
       ${loadWarnings(l)}
-      ${rows.length ? shipTable_(rows, { zone: l.zones.length > 1, results, cb: draft || written, pickable: n => canPick(l, l.ships.find(s => s.shipment_nbr === n)) }) : '<div class="muted">No shipments on this load. Tick some and add them here.</div>'}
+      ${tabsBar(l)}
+      ${tab === 'trucker' ? truckerPane(l) : `${rows.length ? shipTable_(rows, { zone: l.zones.length > 1, results, cb: draft || written, pickable: n => canPick(l, l.ships.find(s => s.shipment_nbr === n)) }) : '<div class="muted">No shipments on this load. Tick some and add them here.</div>'}
       <div class="lactions">
         ${draft ? `<button class="btn primary small" data-act="send">Send to liaison</button>
           ${others.length ? `<select data-merge aria-label="Merge into"><option value="">Merge into…</option>${others.map(o => `<option value="${o.id}">${esc(o.load_nbr)} (${fmt(o.vol)} vol)</option>`).join('')}</select>` : ''}
@@ -340,9 +339,28 @@
         ${l.status === 'ready' ? '<button class="btn small" data-act="pull_back">Pull back to edit</button>' : ''}
         ${l.status === 'partial' ? '<span class="muted">Tick refused or failed shipments to move them to another load, or take them off.</span>' : ''}
       </div>
-      <div class="inline-err" data-err></div>
-      ${eventList(l.events, 'hist-' + l.id)}
+      <div class="inline-err" data-err></div>`}
     </div>`;
+  }
+
+  const TRUCKER_STATES = ['ready', 'confirmed', 'writing', 'partial'];
+  function curTab(l) { return B.ltab.get(l.id) || (TRUCKER_STATES.includes(l.status) ? 'trucker' : 'details'); }
+  function canTruck() { return !!(D.me && D.me.roles.some(r => r === 'clerk' || r === 'admin')); }
+  function tabsBar(l) {
+    const t = curTab(l);
+    const badge = l.status === 'draft' ? '<i class="tb mute">not sent</i>'
+      : l.status === 'ready' ? '<i class="tb warn">needs trucker</i>'
+      : l.ship_via ? `<i class="tb ok">${esc(l.ship_via)}</i>` : '';
+    return `<div class="ltabs" role="tablist"><button role="tab" data-ltab="details" class="${t === 'details' ? 'on' : ''}">Details <i class="tb mute">${l.count}</i></button><button role="tab" data-ltab="trucker" class="${t === 'trucker' ? 'on' : ''}">Trucker ${badge}</button></div>`;
+  }
+  function truckerPane(l) {
+    let body;
+    if (l.status === 'draft') body = `<div class="muted" style="padding:6px 2px">Not sent to the liaison yet. Use <b>Send to liaison</b> on the Details tab.</div>`;
+    else if (l.status === 'ready') body = readyBody(l);
+    else body = writtenBody(l);
+    const ro = !canTruck() && l.status !== 'draft';
+    return (ro ? '<div class="warnbox info">View only: this needs the Trucker Liaison role.</div><fieldset disabled style="border:0;padding:0;margin:0;min-width:0">' + body + '</fieldset>' : body)
+      + eventList(l.events, 'hist-' + l.id);
   }
 
   // What the clerk has typed but not submitted, so a refresh doesn't wipe it.
@@ -354,31 +372,13 @@
     const d = B.drafts.get(l.id);
     return !!d && (d.ship_via !== (l.ship_via || '') || d.callNote || d.ret || d.notes);
   }
-  function isOpen(l) { return B.open.has(l.id) || B.returning.has(l.id) || typedIn(l); }
-  
 
-  // Collapsed view: what the clerk needs to pick the next call.
-  function summary(l) {
-    const calls = l.events.filter(e => e.kind === 'call');
-    const last = calls[0];
-    const written = ['confirmed', 'writing', 'done', 'partial'].includes(l.status);
-    const who = written
-      ? `<span class="target">${esc(l.ship_via)}</span><span>${esc(l.contractor || (codeInfo(l.ship_via) || {}).description || '')}</span>`
-      : last ? `<span class="last ${last.outcome === 'Accepted' ? 'ok' : ''}">${plural(calls.length, 'call')} · last: <b>${esc(last.outcome || 'Call')}</b>${last.contractor || last.ship_via ? ' · ' + esc(last.contractor || last.ship_via) : ''}, ${esc(stamp(last.created_at))}</span>`
-      : '<span class="last">No calls yet</span>';
-    const bad = l.ships.filter(s => ['refused', 'failed'].includes(s.result)).length;
-    return `<div class="lsum" data-toggle>
-      <div class="row1">${ICON.chev}<span class="lnbr">${esc(l.load_nbr)}</span>${waveTag(l.wave)}<b style="font-size:13px">${esc(l.truck_type || 'No truck')}</b>
-        <span class="zones" title="${esc(l.zones.join(', '))}">${esc(l.zones.join(', '))}</span>${writeQueued(l) ? '<span class="pill warn">Queued for Acumatica</span>' : statusPill(l.status)}</div>
-      <div class="row2"><span>${plural(l.count, 'ship')} · ${l.drops} drop${l.drops === 1 ? '' : 's'}</span>${capBar(l)}<b>${money(l.value)}</b>${who}${bad ? `<span class="pill bad">${bad} not written</span>` : ''}</div>
-    </div>`;
-  }
+  
 
   function readyBody(l) {
     const d = draftOf(l);
     const ret = B.returning.has(l.id);
     return `${l.notes ? `<div class="warnbox info">Coordinator's note: ${esc(l.notes)}</div>` : ''}
-      ${loadWarnings(l)}
       <div class="cform">
         <label class="field">Trucker's Ship Via<input data-d="ship_via" list="shipViaList" value="${esc(d.ship_via)}" placeholder="Code or name" autocomplete="off"></label>
         <label class="field">Trucker / driver<input data-d="contractor" value="${esc(d.contractor)}" placeholder="As confirmed on the call"></label>
@@ -387,7 +387,6 @@
       <div class="lactions">
         <button class="btn primary small" data-act="confirm">Confirm trucker &amp; write to Acumatica</button>
         <button class="btn small" data-act="return_open">Send back to draft</button>
-        <button class="btn small" data-act="pull_back">Pull back to edit</button>
       </div>
       ${ret ? `<div class="retbox"><input class="txt" data-d="ret" value="${esc(d.ret)}" placeholder="Why? e.g. too much for one 10 Ton, split it"><button class="btn small" data-act="return">Send back</button><button class="btn small" data-act="return_cancel">Cancel</button></div>` : ''}
       <div class="inline-err" data-err></div>
@@ -396,8 +395,7 @@
         <input class="txt" data-d="callNote" value="${esc(d.callNote)}" placeholder="Who you called, what they said">
         <button class="btn small" data-act="call">Log call</button>
       </div>
-      ${eventList(l.events, 'hist-' + l.id)}
-      <details ${keep('ships-' + l.id)}><summary>Shipments on this load (${l.count})</summary>${shipTable_(l.ships.map(s => s.row || { shipment_nbr: s.shipment_nbr, missing: true }), { cb: false })}</details>`;
+`;
   }
 
   function writtenBody(l) {
@@ -410,25 +408,15 @@
       ${queued ? progressBox('Queued for Acumatica' + (D.env === 'test' ? ' TEST' : ''), 0, l.count, 'Starts as soon as the load ahead of it is done. You can carry on with other loads.') : ''}
       ${l.status === 'writing' ? progressBox('Writing to Acumatica' + (D.env === 'test' ? ' TEST' : ''), through, l.count, 'A few seconds per shipment. You can carry on with other loads.') : ''}
       ${l.status === 'partial' && !writing ? `<div class="warnbox bad">${plural(bad.length, 'shipment')} didn't go through.${refused ? ` Refused ones changed in Acumatica since the load was built; the coordinator has to move them.` : ''} Failed ones can be retried.</div>` : ''}
-      ${shipTable_(l.ships.map(s => s.row || { shipment_nbr: s.shipment_nbr, missing: true }), { results: new Map(l.ships.map(s => [s.shipment_nbr, s])), cb: ['confirmed','partial','done'].includes(l.status), pickable: n => canPick(l, l.ships.find(s => s.shipment_nbr === n)) })}
       <div class="lactions">
         ${l.status === 'confirmed' && !writing ? `<button class="btn primary small" data-act="apply">Write to Acumatica</button><button class="btn small" data-act="unconfirm">Undo confirmation</button>` : ''}
         ${l.status === 'partial' && !writing ? `<button class="btn primary small" data-act="apply">Retry ${plural(bad.length, 'shipment')}</button>` : ''}
         ${stuck ? '<button class="btn small" data-act="unstick">Writing seems stuck: mark it so it can be retried</button>' : ''}
       </div>
-      <div class="inline-err" data-err></div>
-      ${eventList(l.events, 'hist-' + l.id)}`;
+      <div class="inline-err" data-err></div>`;
   }
 
 
-  function liaisonCard(l) {
-    const open = isOpen(l);
-    return `<div class="lcard lc st-${l.status} ${open ? 'open' : ''}" data-load="${l.id}">
-      ${summary(l)}
-      ${open ? `<div class="lbody">${l.status === 'ready' ? readyBody(l) : writtenBody(l)}${l.status === 'partial' ? '<div class="muted">Tick refused or failed shipments to move them to another load, or take them off.</div>' : ''}</div>` : ''}
-    </div>`;
-  }
-  function loadCardAny(l) { return l.status === 'draft' ? loadCard(l) : liaisonCard(l); }
 
   function selBar() {
     if (!B.sel.size) return '';
@@ -525,19 +513,10 @@
   }
 
   document.getElementById('app').addEventListener('click', e => {
-    const vb = e.target.closest('#viewSeg button');
-    if (vb) { B.view = vb.dataset.view; try { localStorage.setItem('lms.test.view', B.view); } catch (x) {} render(); return; }
+    const lt = e.target.closest('[data-ltab]');
+    if (lt) { B.ltab.set(Number(lt.closest('[data-load]').dataset.load), lt.dataset.ltab); render(); return; }
     const kp = e.target.closest('.kpi[data-status]');
     if (kp) { B.status = B.status === kp.dataset.status ? 'all' : kp.dataset.status; render(); return; }
-    const tog = e.target.closest('[data-toggle]');
-    if (tog) {
-      const id = Number(tog.closest('[data-load]').dataset.load), l = B.loads.find(x => x.id === id);
-      if (isOpen(l)) {
-        if (typedIn(l) && !confirm("Close " + l.load_nbr + "? What you've typed here and not saved will be cleared.")) return;
-        B.open.delete(id); B.returning.delete(id); if (typedIn(l)) B.drafts.delete(id);
-      } else B.open.add(id);
-      render(); return;
-    }
     const chip = e.target.closest('[data-date]');
     if (chip) { setDate(chip.dataset.date); return; }
     const day = e.target.closest('#daySeg button');
