@@ -100,7 +100,12 @@
   // Acumatica only ships lines whose Ship On date is on or before the shipment date, so an order whose Ship On is
   // after the date picked below can't be shipped on it.
   const notDue = r => !!r.sched_shipment && r.sched_shipment > S.date;
-  const canShip = r => !CANT_SHIP.includes(r.status) && r.open_qty > 0 && !notDue(r);
+  // A future Ship On no longer blocks selection (loads are batched the day before): such an order is shipped dated
+  // on its Ship On date, the later of that and the date picked. The server moves Ship On to today just while the
+  // shipment is made, then puts it back.
+  const effDate = r => (r.sched_shipment && r.sched_shipment > S.date) ? r.sched_shipment : S.date;
+  const byDate = orders => { const m = {}; orders.forEach(n => { const r = S.rows.find(x => x.order_nbr === n); (m[r ? effDate(r) : S.date] ||= []).push(n); }); return m; };
+  const canShip = r => !CANT_SHIP.includes(r.status) && r.open_qty > 0;
   function visible() {
     const q = S.q.trim().toLowerCase();
     const k = S.sort.key, d = S.sort.dir;
@@ -164,7 +169,7 @@
             <td>${esc(r.order_date ? niceDate(r.order_date) + ' ' + r.order_date.slice(0, 4) : '')}</td>
             <td>${esc(r.sched_shipment ? niceDate(r.sched_shipment) + ' ' + r.sched_shipment.slice(0, 4) : '')}</td>
             <td class="r">${fmt(r.open_qty)}</td><td class="r">${fmt(r.open_volume)}</td><td class="r">${money(r.order_total)}</td>
-            <td><button class="btn small" data-po="${esc(r.order_nbr)}" ${S.poBusy ? 'disabled' : ''} title="Print the customer's purchase order attached to this sales order">${S.poBusy === r.order_nbr ? 'Opening…' : 'PO'}</button> ${notDue(r) ?`<span class="tag old" title="Acumatica won't ship lines before their Ship On date. Set the shipment date to ${esc(niceDate(r.sched_shipment))} or later.">Ship on ${esc(niceDate(r.sched_shipment))}: set that date</span>` : ''}${r.open_shipments ? `<span class="tag" title="Already on an open shipment">On shipment${r.open_shipments > 1 ? ' ×' + r.open_shipments : ''}</span> ` : ''}${r.short_lines ? `<span class="tag old" title="Open qty is more than on hand at 71 on these lines">Short ${r.short_lines}</span>` : ''}${CANT_SHIP.includes(r.status) ? '<span class="tag old">Can\'t ship</span>' : ''}</td>
+            <td><button class="btn small" data-po="${esc(r.order_nbr)}" ${S.poBusy ? 'disabled' : ''} title="Print the customer's purchase order attached to this sales order">${S.poBusy === r.order_nbr ? 'Opening…' : 'PO'}</button> ${notDue(r) ?`<span class="tag old" title="Selectable now: the shipment will be dated ${esc(niceDate(r.sched_shipment))}, its Ship On date.">Ship on ${esc(niceDate(r.sched_shipment))}</span>` : ''}${r.open_shipments ? `<span class="tag" title="Already on an open shipment">On shipment${r.open_shipments > 1 ? ' ×' + r.open_shipments : ''}</span> ` : ''}${r.short_lines ? `<span class="tag old" title="Open qty is more than on hand at 71 on these lines">Short ${r.short_lines}</span>` : ''}${CANT_SHIP.includes(r.status) ? '<span class="tag old">Can\'t ship</span>' : ''}</td>
           </tr>`).join('')}</tbody></table>` : `<div class="empty">No ${S.tab === 'delivery' ? '' : esc(KINDS[S.tab]) + ' '}${esc(S.statuses.join(' / '))} orders${S.q || S.zone !== 'all' ? ' match that search' : ''}.</div>`}
       </div></div>
       <div class="so-bar">
@@ -198,12 +203,17 @@
     if (!orders.length) return;
     if (orders.length > 20) { toast('Select 20 orders or fewer at a time', true); return; }
     const where = D.env === 'test' ? 'Acumatica TEST' : 'live Acumatica';
-    if (!confirm(`Create shipments for ${plural(orders.length, 'order')} dated ${niceDate(S.date)} ${S.date.slice(0, 4)} in ${where}?\n\nAcumatica ships only what's available; orders with nothing in stock get no shipment.`)) return;
+    const groups = byDate(orders), later = Object.keys(groups).filter(d => d !== S.date).sort();
+    const note = later.length ? `\n\nFuture Ship On: ${later.map(d => `${plural(groups[d].length, 'order')} dated ${niceDate(d)} ${d.slice(0, 4)}`).join('; ')}.` : '';
+    if (!confirm(`Create shipments for ${plural(orders.length, 'order')} dated ${niceDate(S.date)} ${S.date.slice(0, 4)} in ${where}?${note}\n\nAcumatica ships only what's available; orders with nothing in stock get no shipment.`)) return;
     S.busy = true; render();
     try {
-      const r = await callOrders('create_shipments', { env: D.env, orders, shipment_date: S.date });
-      if (!r.ok) throw new Error(r.error || "Couldn't create shipments");
-      S.results = r.results || [];
+      S.results = [];
+      for (const [d, list] of Object.entries(groups)) {
+        const r = await callOrders('create_shipments', { env: D.env, orders: list, shipment_date: d });
+        if (!r.ok) { if (!S.results.length) throw new Error(r.error || "Couldn't create shipments"); toast(r.error || "Couldn't create some shipments", true); break; }
+        S.results.push(...(r.results || []));
+      }
       const done = new Set(S.results.filter(x => x.state === 'created').map(x => x.order_nbr));
       done.forEach(n => S.sel.delete(n));
       toast(`${plural(done.size, 'order')} shipped`);
@@ -225,7 +235,7 @@
         toast(`Order ${i + 1} of ${orders.length}: ${orders[i]}…`);
         let r;
         try {
-          const j = await callOrders('ship_invoice', { env: D.env, orders: [orders[i]], shipment_date: S.date });
+          const j = await callOrders('ship_invoice', { env: D.env, orders: [orders[i]], shipment_date: effDate(S.rows.find(x => x.order_nbr === orders[i]) || {}) });
           r = (j.results && j.results[0]) || { order_nbr: orders[i], state: 'failed', detail: j.error || 'No answer' };
           if (!j.ok && !(j.results && j.results.length)) r = { order_nbr: orders[i], state: 'failed', detail: j.error || 'Failed' };
         } catch (e) { r = { order_nbr: orders[i], state: 'failed', detail: errMsg(e) }; }

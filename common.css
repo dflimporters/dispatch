@@ -20,6 +20,8 @@ body { background:var(--bg); color:var(--text); font-family:'Inter',sans-serif; 
 
 /* Chrome: top bar, tab strip, page title. Same look as the DFLHQ portal and
    scoreboard: navy bar, gold rule, Montserrat headings. */
+#chrome.hdr { display:contents; }
+.lms-pin { position:sticky; top:0; z-index:30; }
 .lms-top { background:linear-gradient(135deg,var(--navy) 0%,var(--navy2) 100%); border-bottom:3px solid var(--gold); box-shadow:0 2px 8px rgba(0,0,0,.2); }
 .lms-top-in { max-width:1680px; margin:0 auto; padding:10px 20px; display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .lms-brand { display:flex; flex-direction:column; align-items:flex-start; gap:2px; text-decoration:none; }
@@ -334,7 +336,7 @@ input[data-qty] { scroll-margin: 35vh 0; }
 
 /* Load rail + lines pane (Picking and Checker) */
 .pk { display:grid; grid-template-columns:230px minmax(0,1fr); gap:14px; align-items:start; }
-.rail { position:sticky; top:8px; max-height:calc(100vh - 16px); overflow-y:auto; display:flex; flex-direction:column; gap:6px; }
+.rail { position:sticky; top:calc(var(--pin-h,0px) + 8px); max-height:calc(100vh - var(--pin-h,0px) - 16px); overflow-y:auto; display:flex; flex-direction:column; gap:6px; }
 .rail .rh { font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--text-muted); margin:8px 2px 0; }
 .rl { display:flex; align-items:center; gap:10px; width:100%; text-align:left; font:inherit; background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:10px 12px; min-height:52px; cursor:pointer; color:var(--text); }
 .rl.on { border-color:var(--navy); box-shadow:inset 4px 0 0 var(--navy); background:#f1f5f9; }

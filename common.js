@@ -242,14 +242,18 @@ function drawChrome({ title, nav, name, roles }) {
     nav.map(([href, label, on]) => `<a href="${href}" class="${on ? 'on' : ''}"${on ? ' aria-current="page"' : ''}>${esc(label)}</a>`).join('')}</nav></div>` : '';
   const crumb = title ? `<div class="crumb"><a href="index.html">${LMS_NAME}</a> / ${esc(title)}</div>` : '';
   el.innerHTML = `
-    <div class="lms-top"><div class="lms-top-in">
+    <div class="lms-pin"><div class="lms-top"><div class="lms-top-in">
       <a class="lms-brand" href="index.html" title="${LMS_NAME}"><img src="assets/dfl-logo-white.png" alt="DFL Importers"><span>${LMS_NAME}</span></a>
       <div class="lms-who"><a class="home" href="index.html?all=1" title="All my pages" aria-label="All my pages">${ICON.grid}</a><button class="thm" id="thmbtn" title="Dark mode" aria-label="Toggle dark mode">${ICON.moon2}</button><button class="snd${FB.sound ? ' on' : ''}" id="sndbtn" title="Sound on pick and check" aria-label="Sound feedback" aria-pressed="${FB.sound}">${ICON.speaker}</button><div class="av">${esc(initials(name))}</div><div class="nm"><b>${esc(name)}</b>${roles && roles.length ? `<span>${esc(roles.map(r => ROLE_NAMES[r] || r).join(' · '))}</span>` : ''}</div><button class="btn small" id="signout">Sign out</button></div>
     </div></div>
-    ${tabs}
+    ${tabs}</div>
     ${title ? `<div class="lms-title"><div>${crumb}<h1>${esc(title)}</h1></div><div class="chips-r"><span class="saved" id="savedchip" aria-live="polite">✓ Saved</span><span class="fresh" id="freshchip"></span></div></div>` : ''}`;
   if (title) document.title = title + ' — ' + LMS_NAME;
   paintFresh();
+  // Pin the top bar and tab strip; pages that stick things below it read --pin-h.
+  const pin = el.querySelector('.lms-pin');
+  const setPin = () => document.documentElement.style.setProperty('--pin-h', (pin ? pin.offsetHeight : 0) + 'px');
+  setPin(); window.addEventListener('resize', setPin);
   document.getElementById('thmbtn').onclick = () => { const t = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'; applyTheme(t); try { localStorage.setItem('dispatch-theme', t); } catch (e) {} };
   const snd = document.getElementById('sndbtn');
   snd.onclick = () => { setSound(!FB.sound); snd.classList.toggle('on', FB.sound); snd.setAttribute('aria-pressed', FB.sound); toast(FB.sound ? 'Sound on' : 'Sound off'); if (FB.sound) feedback('ok'); };
