@@ -91,7 +91,7 @@
       data = rows.data || [];
       S.synced = sync.data ? new Date(sync.data) : null;
     }
-    await loadKinds();
+    await Promise.all([loadKinds(), loadAddrs()]);
     S.rows = data.map(r => ({ ...r, order_total: Number(r.order_total) || 0, open_qty: Number(r.open_qty) || 0, open_volume: Number(r.open_volume) || 0 }));
     const have = new Set(S.rows.filter(canShip).map(r => r.order_nbr));
     S.sel = new Set([...S.sel].filter(n => have.has(n)));
@@ -111,7 +111,7 @@
     const k = S.sort.key, d = S.sort.dir;
     const num = ['open_qty', 'open_volume', 'order_total'].includes(k);
     return S.rows.filter(r => (kindOf(r) || 'delivery') === S.tab && (S.zone === 'all' || r.shipping_zone === S.zone)
-      && (!q || [r.order_nbr, r.customer_name, r.customer_id].some(v => String(v || '').toLowerCase().includes(q))))
+      && (!q || [r.order_nbr, r.customer_name, r.customer_id, addrOf(r.customer_id)].some(v => String(v || '').toLowerCase().includes(q))))
       .sort((a, b) => d * (num ? (a[k] - b[k])
         : String(a[k] || '').localeCompare(String(b[k] || ''), undefined, { numeric: true, sensitivity: 'base' }))
         || String(b.order_nbr).localeCompare(String(a.order_nbr), undefined, { numeric: true }));
@@ -163,7 +163,7 @@
           <tbody>${rows.map(r => `<tr class="${canShip(r) ? '' : 'blocked'} ${S.sel.has(r.order_nbr) ? 'sel' : ''}">
             <td><input type="checkbox" data-pick="${esc(r.order_nbr)}" aria-label="Select order ${esc(r.order_nbr)}" ${S.sel.has(r.order_nbr) ? 'checked' : ''} ${canShip(r) ? '' : 'disabled'}></td>
             <td class="nbr">${esc(r.order_nbr)}</td>
-            <td class="cust" title="${esc(r.customer_name || '')}">${kindTag(kindOf(r))}${esc(r.customer_name || r.customer_id || '')}</td>
+            <td class="cust" title="${esc(r.customer_name || '')}">${kindTag(kindOf(r))}${esc(r.customer_name || r.customer_id || '')}${addrHtml(r.customer_id)}</td>
             <td>${esc(r.shipping_zone || '')}</td>
             <td>${statusPill(r.status)}</td>
             <td>${esc(r.order_date ? niceDate(r.order_date) + ' ' + r.order_date.slice(0, 4) : '')}</td>

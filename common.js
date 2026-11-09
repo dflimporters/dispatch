@@ -451,6 +451,19 @@ async function loadKinds() {
     _kinds.at = Date.now();
   } catch (e) { console.warn('[kinds]', e); _kinds.at = Date.now() - 4 * 60e3; }
 }
+// Delivery address per customer (dispatch_customer_addresses), for the coordinator and Sales Orders screens.
+const _addrs = { map: new Map(), at: 0 };
+async function loadAddrs() {
+  if (Date.now() - _addrs.at < 10 * 60e3) return;
+  try {
+    const { data, error } = await sb.rpc('dispatch_customer_addresses');
+    if (error) throw error;
+    _addrs.map = new Map((data || []).map(r => [r.customer_id, [r.address, r.city].filter(Boolean).join(', ')]));
+    _addrs.at = Date.now();
+  } catch (e) { console.warn('[addrs]', e); _addrs.at = Date.now() - 9 * 60e3; }
+}
+function addrOf(customerId) { return _addrs.map.get(customerId) || ''; }
+function addrHtml(customerId) { const a = addrOf(customerId); return a ? `<div class="muted addr" title="${esc(a)}">${esc(a)}</div>` : ''; }
 // Kind of a customer id / shipment row ({customer_id, ship_via}), or null for a normal delivery.
 function kindOf(r) {
   if (!r) return null;

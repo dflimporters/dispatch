@@ -345,3 +345,4 @@ input[data-qty] { scroll-margin: 35vh 0; }
 .dot { flex:none; width:12px; height:12px; border-radius:50%; background:#cbd5e1; }
 .dot.part { background:#f59e0b; } .dot.ok { background:#16a34a; } .dot.bad { background:#dc2626; }
 @media (max-width:760px) { .pk { grid-template-columns:1fr; } .rail { position:static; flex-direction:row; overflow-x:auto; max-height:none; } .rl { width:auto; flex:none; } .rail .rh { display:none; } }
+.addr { font-size:11px; font-weight:400; overflow:hidden; text-overflow:ellipsis; }

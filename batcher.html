@@ -56,7 +56,7 @@
   B.q = ''; B.status = 'all'; B.sortBy = 'newest';
   function loadMatches(l, terms) {
     const hay = [l.load_nbr, l.status, l.wave, l.truck_type, l.ship_via, l.contractor, l.notes, ...l.zones,
-      ...l.ships.flatMap(s => [s.shipment_nbr, s.row && s.row.customer_name, s.row && s.row.customer_id, s.row && s.row.ship_via, s.row && s.row.shipping_zone])]
+      ...l.ships.flatMap(s => [s.shipment_nbr, s.row && s.row.customer_name, s.row && s.row.customer_id, s.row && addrOf(s.row.customer_id), s.row && s.row.ship_via, s.row && s.row.shipping_zone])]
       .filter(Boolean).join(' ').toLowerCase();
     return terms.every(t => hay.includes(t));
   }
@@ -97,7 +97,7 @@
       openDates(),
     ]);
     if (pool.error) throw pool.error;
-    await loadKinds();
+    await Promise.all([loadKinds(), loadAddrs()]);
     const rows = pool.data || [];
     // Which of these are already on a load (any date)?
     const taken = new Set();
@@ -204,7 +204,7 @@
         return `<tr class="${sel ? 'sel' : ''}">
           ${cb ? `<td class="cb">${pickable(n) ? `<input type="checkbox" data-pick="${esc(n)}" ${sel ? 'checked' : ''} aria-label="Select ${esc(n)}">` : ''}</td>` : ''}
           <td class="num">${shipToggle(n)} ${w ? waveTag(w, 'Suggested run') : ''}</td>
-          <td class="cust" title="${esc(r.customer_name || '')}">${kindTag(kindOf(r))}${esc(r.customer_name || r.customer_id || '—')} ${tags.join(' ')}</td>
+          <td class="cust" title="${esc(r.customer_name || '')}">${kindTag(kindOf(r))}${esc(r.customer_name || r.customer_id || '—')} ${tags.join(' ')}${addrHtml(r.customer_id)}</td>
           ${zone ? `<td class="hide-m">${esc(r.shipping_zone || '—')}</td>` : ''}
           <td class="r num">${fmt(qty(r))}</td>
           <td class="r num">${fmt(vol(r))}</td>
