@@ -206,6 +206,7 @@ function loadEnv() {
   try { const e = localStorage.getItem('dispatch-env'); if (e === 'live' || e === 'test') D.env = e; } catch (e) {}
 }
 function setEnv(e) {
+  if (D.me && !D.me.roles.includes('admin')) return;   // non-admins stay on Live
   D.env = e;
   try { localStorage.setItem('dispatch-env', e); } catch (x) {}
 }
@@ -283,6 +284,7 @@ async function startPage({ page, role, title, onReady, onEnvChange }) {
   const { data: me, error } = await sb.rpc('dispatch_me');
   if (error) { gate(`<h2>Something went wrong</h2><p>${esc(errMsg(error))}</p><button class="btn" onclick="signOut()">Sign out</button>`); return; }
   D.me = me;
+  if (!me.roles.includes('admin')) D.env = 'live';   // Test is admin-only: everyone else is pinned to Live
   const needs = [].concat(role);   // a page can allow more than one role
   if (!needs.some(r => me.roles.includes(r))) {
     const roleName = needs.map(r => ROLE_NAMES[r] || r).join(' or ');
@@ -296,7 +298,7 @@ async function startPage({ page, role, title, onReady, onEnvChange }) {
   const links = [['batcher.html', 'Coordinator', 'batcher'], ['salesorders.html', 'Sales Orders', 'batcher', 'salesorders'], ['transfers.html', 'Transfers', 'batcher', 'transfers'],
                  ['clerk.html', 'Trucker Liaison', 'clerk'], ['picking.html', 'Picking', 'picker'], ['checker.html', 'Checker', 'checker'],
                  ['tower.html', 'Control Tower', ['supervisor', 'manager'], 'tower'],
-                 ['loadsheet.html', 'Load sheets', ['supervisor', 'manager', 'invoicer'], 'loadsheet'],
+                 ['loadsheet.html', 'Load sheets', ['supervisor', 'manager', 'invoicer', 'checker'], 'loadsheet'],
                  ['returns.html', 'Returns', ['supervisor', 'manager'], 'returns'],
                  ['security.html', 'Security check', ['security', 'supervisor', 'manager'], 'security'],
                  ['contacts.html', 'Contacts', ['supervisor', 'manager'], 'contacts'],
@@ -317,6 +319,7 @@ async function startPage({ page, role, title, onReady, onEnvChange }) {
 
 function renderEnvBar(onEnvChange) {
   const el = document.getElementById('envbar');
+  if (!D.me || !D.me.roles.includes('admin')) { el.innerHTML = ''; return; }   // no Test/Live bar for non-admins
   const test = D.env === 'test';
   el.innerHTML = `<div class="envbar ${test ? 'test' : 'live'}">
     ${test
