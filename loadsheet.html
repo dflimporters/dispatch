@@ -52,7 +52,13 @@
   .sheet .foot { margin-top:10px; font-size:11px; color:#444; display:flex; justify-content:space-between; }
   .sheet .cmeta { display:flex; gap:22px; flex-wrap:wrap; font-size:13px; margin-bottom:10px; }
   .sheet .cmeta b { font-size:10.5px; letter-spacing:.6px; text-transform:uppercase; color:#444; margin-right:4px; }
-  .sheet.cs th.r, .sheet.cs td.r { text-align:right; }
+  .sheet .cmeta.big { font-size:20px; font-weight:700; gap:12px 34px; margin-bottom:12px; }
+  .sheet .cmeta.big b { font-size:12px; color:#000; }
+  .sheet .farthest { border:3px solid #000; padding:6px 12px; margin-bottom:12px; font-size:15px; display:flex; align-items:baseline; gap:12px; }
+  .sheet .farthest b.l { font-size:11px; letter-spacing:.8px; text-transform:uppercase; }
+  .sheet .farthest .v { font-size:30px; font-weight:800; text-transform:uppercase; }
+  .sheet.cs td.addr { font-size:10.5px; }
+  .sheet.cs th.r,.sheet.cs td.r { text-align:right; }
   .sheet.cs th.b, .sheet.cs td.b { width:19mm; text-align:center; }
   .sheet.cs td.cust { font-size:10.5px; }
   .sheet.cs td.nt { min-width:24mm; }
@@ -351,9 +357,10 @@
   // detailed = every item line under each customer's invoice. Quantities are what is going out (the checker's final
   // qty), from lm_check_sheet. Works at any stage of the load.
   const qn = n => Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
-  function checkHead(s, title) {
+  function checkHead(s, title, big) {
+    const far = big && s.farthest ? `<div class="farthest"><b class="l">Furthest stop</b><span class="v">${esc(s.farthest.label || s.farthest.zone)}</span></div>` : '';
     return `<div class="sh"><img src="assets/dfl-logo-color.png" alt="DFL Importers"><div class="t">${title}<b>${esc(s.load_nbr)}</b></div></div>
-      <div class="cmeta"><span><b>Trucker</b> ${esc(s.trucker || s.ship_via || '')}</span><span><b>Ship via</b> ${esc(s.ship_via || '')}${s.truck_type ? ' · ' + esc(s.truck_type) : ''}</span>
+      ${far}<div class="cmeta${big ? ' big' : ''}"><span><b>Trucker</b> ${esc(s.trucker || s.ship_via || '')}</span><span><b>Ship via</b> ${esc(s.ship_via || '')}${s.truck_type ? ' · ' + esc(s.truck_type) : ''}</span>
         <span><b>Date</b> ${esc(niceDate(s.load_date))}${s.wave && s.wave !== 'ACU' ? ' · ' + esc(s.wave) : ''}</span></div>`;
   }
   const stopUnits = st => (st.shipments || []).reduce((t, x) => t + (x.lines || []).reduce((u, l) => u + Number(l.qty || 0), 0), 0);
@@ -365,11 +372,11 @@
   function checkSummaryHtml(s) {
     const stops = s.stops || [];
     return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: summary')}
-      <table><thead><tr><th>#</th><th>Customer</th><th>Area</th><th>Invoices</th><th class="r">Lines</th><th class="r">Units</th><th class="b">Loaded</th><th class="b">Delivered</th><th>Notes</th></tr></thead><tbody>
-        ${stops.map(x => `<tr><td class="n">${x.seq}</td><td><b>${esc(x.customer_name || x.customer_id)}</b></td><td>${esc(x.zone || x.city || '')}</td>
+      <table><thead><tr><th>#</th><th>Customer</th><th>Address</th><th>Area</th><th>Invoices</th><th class="r">Lines</th><th class="r">Units</th><th class="b">Loaded</th><th class="b">Delivered</th><th>Notes</th></tr></thead><tbody>
+        ${stops.map(x => `<tr><td class="n">${x.seq}</td><td><b>${esc(x.customer_name || x.customer_id)}</b></td><td class="addr">${esc([x.address, x.city].filter(Boolean).join(', '))}</td><td>${esc(x.zone || x.city || '')}</td>
           <td>${esc((x.shipments || []).map(i => i.invoice_nbr || i.shipment_nbr).join(', '))}</td><td class="r">${stopLines(x)}</td><td class="r">${qn(stopUnits(x))}</td>
           <td class="b"><span class="box"></span></td><td class="b"><span class="box"></span></td><td class="nt"></td></tr>`).join('')}
-        <tr class="tot"><td></td><td><b>Total</b></td><td></td><td>${plural(stops.reduce((t, x) => t + (x.shipments || []).length, 0), 'invoice')}</td><td class="r">${stops.reduce((t, x) => t + stopLines(x), 0)}</td><td class="r">${qn(stops.reduce((t, x) => t + stopUnits(x), 0))}</td><td></td><td></td><td></td></tr>
+        <tr class="tot"><td></td><td><b>Total</b></td><td></td><td></td><td></td><td>${plural(stops.reduce((t, x) => t + (x.shipments || []).length, 0), 'invoice')}</td><td class="r">${stops.reduce((t, x) => t + stopLines(x), 0)}</td><td class="r">${qn(stops.reduce((t, x) => t + stopUnits(x), 0))}</td><td></td><td></td><td></td></tr>
       </tbody></table>${checkFoot(s)}</div>`;
   }
   // Detailed: item first, then each customer taking it. The trucker loads one item for everyone at a time.
@@ -383,7 +390,7 @@
       it.rows.push({ seq: st.seq, cust: st.customer_name || st.customer_id, zone: st.zone, inv: i.invoice_nbr || i.shipment_nbr, qty: l.qty });
     })));
     const list = [...items.values()].sort((x, y) => String(x.descr || x.id).localeCompare(String(y.descr || y.id), undefined, { numeric: true, sensitivity: 'base' }));
-    return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: by item')}
+    return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: by item', true)}
       <div class="cmeta"><span><b>Items</b> ${list.length}</span><span><b>Stops</b> ${(s.stops || []).length}</span><span><b>Units</b> ${qn(list.reduce((t, x) => t + x.total, 0))}</span></div>
       ${list.map(it => `<div class="stop"><div class="stophd"><span class="mono"><b>${esc(it.id || '')}</b></span><span><b>${esc(it.descr || '')}</b></span><span class="sp"></span><span>${esc(it.uom || '')}</span><span class="z">Total ${qn(it.total)}</span></div>
         <table><thead><tr><th class="b">Loaded</th><th>#</th><th>Customer</th><th>Area</th><th>Invoice</th><th class="r">Qty</th><th class="b">Delivered</th></tr></thead><tbody>

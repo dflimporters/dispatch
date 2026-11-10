@@ -316,7 +316,7 @@ async function startPage({ page, role, title, onReady, onEnvChange }) {
     <div id="main">${skeleton(3)}</div>`;
   renderEnvBar(onEnvChange);
 
-  try { await Promise.all([loadTruckTypes(), loadCodes()]); }
+  try { await Promise.all([withRetry(loadTruckTypes, 'tt'), withRetry(loadCodes, 'codes')]); }
   catch (e) { document.getElementById('main').innerHTML = errBox(e, "Couldn't load setup data"); return; }
   onReady();
 }
@@ -344,6 +344,22 @@ function renderEnvBar(onEnvChange) {
 // ------------------------------------------------------------------
 // Data
 // ------------------------------------------------------------------
+// The database is shared and sometimes busy (statement timeouts). Retry transient
+// failures with backoff; if it still fails, use the copy this device last loaded OK
+// (truck types and ship-via codes change rarely) rather than blocking the page.
+async function withRetry(fn, cacheKey) {
+  const ck = 'dfl-setup-' + cacheKey;
+  let last;
+  for (let i = 0; i < 3; i++) {
+    try { await fn(); try { localStorage.setItem(ck, JSON.stringify(cacheKey === 'tt' ? D.truckTypes : D.codes)); } catch (_) {} return; }
+    catch (e) { last = e; if (i < 2) await new Promise(r => setTimeout(r, 800 * (i + 1) + Math.random() * 400)); }
+  }
+  try {
+    const c = JSON.parse(localStorage.getItem(ck) || 'null');
+    if (Array.isArray(c) && c.length) { if (cacheKey === 'tt') D.truckTypes = c; else D.codes = c; console.warn('[load] using cached', cacheKey, last); return; }
+  } catch (_) {}
+  throw last;
+}
 async function loadTruckTypes() {
   const { data, error } = await sb.from('truck_types').select('name, capacity_volume').eq('active', true).order('capacity_volume');
   if (error) throw error;
