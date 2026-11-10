@@ -370,8 +370,15 @@ async function createShipments(env: string, orders: string[], date: string, acto
             catch (e: any) {
               if (!/does not contain any items planned for shipment/i.test(String(e?.message ?? e))) throw e;
               moved = await moveShipOnToToday(acu, nbr, before.data.id, date);
-              if (!moved.length) throw e;
-              await create();
+              if (!moved.length) {
+                // Nothing qualified for the Ship On move: say what the lines hold so the cause is visible in the log.
+                const lines = await acu.call('GET', `/SalesOrder/SO/${encodeURIComponent(nbr)}?$expand=Details`);
+                const seen = (lines.data?.Details ?? []).map((d: any) =>
+                  `#${v(d.LineNbr) ?? '?'} ShipOn=${String(v(d.ShipOn) ?? 'blank').split('T')[0]} open=${v(d.OpenQty) ?? '?'} wh=${v(d.WarehouseID) ?? '?'}${v(d.Completed) ? ' completed' : ''}`).join('; ');
+                throw new Error(`${String(e?.message ?? e)} [no line due ${jmToday()}..${date} to move; lines: ${seen || 'none read'}]`);
+              }
+              try { await create(); }
+              catch (e2: any) { throw new Error(`${String(e2?.message ?? e2)} [still refused after moving Ship On to today on line ${moved.map(m => m.line).join(', ')}]`); }
             }
           } catch (e: any) { createErr = e; }
           // Always put the dates back, whether or not the shipment was made.
