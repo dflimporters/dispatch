@@ -8,6 +8,7 @@
 <meta name="robots" content="noindex, nofollow">
 <title>Logistics Coordinator — Logistics Management System</title>
 <!--
+  Each load card has Details | Trucker tabs: the Trucker tab is the liaison workflow from clerk.html (clerk/admin roles act; others view only).
   Internal Logistics Coordinator (ILC; was "batcher"): builds loads out of
   open outbound shipments. Never picks the trucker; that's the Trucker Liaison
   (clerk.html). A load goes draft -> ready (sent to the liaison). Drafts can be edited, merged and deleted; a ready load can be
@@ -25,16 +26,72 @@
   .cols h2 { font-size:14px; font-weight:700; color:var(--navy); margin:0 2px 8px; display:flex; align-items:center; gap:8px; }
   .cols h2 .muted { font-weight:400; }
   .has-sv { margin-top:12px; }
+
+  .lgrid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; align-items:start; }
+  .lgrid .lcard { margin-bottom:0; padding:0; }
+  .lsum { padding:10px 14px; cursor:pointer; user-select:none; }
+  .lsum:hover { background:#f8fafc; border-radius:12px; }
+  .lcard.open .lsum:hover { border-radius:12px 12px 0 0; }
+  .lsum .row1 { display:flex; align-items:center; gap:8px; }
+  .lsum .zones { color:var(--text-muted); font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0; }
+  .lsum .row2 { display:flex; align-items:center; gap:12px; flex-wrap:wrap; font-size:12.5px; color:var(--text-muted); margin-top:6px; padding-left:22px; }
+  .lsum .row2 b { color:var(--text); font-weight:600; }
+  .lsum .cap { min-width:150px; }
+  .lsum .last { color:var(--text-muted); }
+  .lsum .last.ok { color:var(--ok-text); }
+  .lbody { padding:4px 14px 14px 36px; border-top:1px solid var(--border); }
+  .cform { display:grid; grid-template-columns:1fr 1fr; gap:8px 10px; margin:10px 0 4px; }
+  .cform .wide { grid-column:1 / -1; }
+  .cform textarea { min-height:34px; }
+  .callrow { display:grid; grid-template-columns:130px 1fr auto; gap:8px; margin-top:10px; padding-top:10px; border-top:1px solid var(--border); }
+  .retbox { display:flex; gap:8px; margin-top:8px; }
+  .retbox input { flex:1; }
+  .section-h { display:flex; align-items:center; gap:10px; font-size:13px; font-weight:700; color:var(--navy); margin:18px 2px 8px; text-transform:uppercase; letter-spacing:0.3px; }
+  .section-h .n { font-weight:500; color:var(--text-muted); text-transform:none; letter-spacing:0; }
+  @media (max-width:1100px) { .lgrid { grid-template-columns:1fr; } }
+  @media (max-width:640px) {
+    .cform { grid-template-columns:1fr; }
+    .callrow { grid-template-columns:1fr auto; }
+    .callrow input { grid-column:1 / -1; grid-row:2; }
+    .lbody { padding-left:14px; }
+    .lsum .row2 { padding-left:0; }
+  }
+
+  .lgrid .lcard { margin-bottom:0; }
+  .cols.one { grid-template-columns:minmax(0,1fr); }
+  .cols .lcol .lcard { margin-bottom:10px; }
+  .cols.one .lcol .lcard { margin-bottom:0; }
+  .lcol .lgrid { grid-template-columns:minmax(0,1fr); }
+  .cols.one .lgrid { grid-template-columns:repeat(2, minmax(0,1fr)); }
+  .lcard.lc { padding:0; }
+  .lcard.lc .lbody { padding:4px 14px 14px 14px; }
+  .lcard.lc .lsum .row2 { padding-left:0; }
+  .ltabs { display:flex; gap:2px; border-bottom:1px solid var(--border); margin:10px 0 8px; }
+  .ltabs button { background:none; border:0; border-bottom:2px solid transparent; padding:7px 12px; font:inherit; font-size:13px; font-weight:600; color:var(--text-muted); cursor:pointer; display:flex; gap:6px; align-items:center; margin-bottom:-1px; }
+  .ltabs button:hover { color:var(--text); }
+  .ltabs button.on { color:var(--navy); border-bottom-color:var(--accent); }
+  .ltabs .tb { font-style:normal; font-size:11px; font-weight:600; padding:1px 7px; border-radius:999px; background:#e2e8f0; color:#475569; }
+  .ltabs .tb.warn { background:#fef3c7; color:#92400e; }
+  .ltabs .tb.ok { background:#d1fae5; color:#065f46; }
+  .shead { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.3px; color:var(--navy); margin:12px 2px 6px; display:flex; gap:8px; align-items:center; }
+  .shead .n { color:var(--text-muted); font-weight:500; text-transform:none; letter-spacing:0; }
+  .kpi.clk { cursor:pointer; }
+  .kpi.clk:hover { border-color:var(--accent); }
+  @media (max-width:1100px) { .cols.one .lgrid { grid-template-columns:1fr; } }
+
   @media (max-width:900px) { .cols { grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
+<datalist id="shipViaList"></datalist>
 <div class="page" id="app"><div class="skel-wrap"><div class="skel-card"><div class="skel w40"></div><div class="skel w70"></div><div class="skel w55"></div></div></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
 <script src="common.js"></script>
 <script>
-  const B = { date: jmDate(0), free: [], hasSv: [], loads: [], dates: [], sel: new Set(), sync: null, busy: false, wave: loadWaveFilter('batcher'), tab: loadKindTab() };
+  const B = { date: jmDate(0), free: [], hasSv: [], loads: [], dates: [], sel: new Set(), sync: null, busy: false, wave: loadWaveFilter('batcher'), tab: loadKindTab(),
+    ltab: new Map(),
+    drafts: new Map(), returning: new Set(), was: new Map(), poll: null, open: new Set(), seen: new Set() };
 
   // The All / AM / PM filter: free shipments by suggested wave, loads by their wave.
   function inWave(r) { return B.wave === 'all' || suggestWave(r, B.date) === B.wave; }
@@ -115,6 +172,17 @@
     // Items for everything on screen, so the "short" tags show without opening.
     await loadLines([...B.free, ...B.hasSv].map(r => r.shipment_nbr).concat(loads.flatMap(l => l.ships.map(s => s.shipment_nbr))));
     B.dates = dates;
+    B.loads.forEach(l => {
+      if (!B.seen.has(l.id) && l.status === 'partial') B.open.add(l.id);
+      B.seen.add(l.id);
+      const was = B.was.get(l.id), busy = l.status === 'writing' || writeQueued(l);
+      if (was && !busy) {
+        const bad = l.ships.filter(s => ['refused', 'failed'].includes(s.result)).length;
+        if (l.status === 'done') toast(l.load_nbr + ' written to Acumatica');
+        else { toast(l.load_nbr + ': ' + (bad ? plural(bad, 'shipment') + " didn't go through" : 'not written'), true); B.open.add(l.id); }
+      }
+      if (busy) B.was.set(l.id, true); else B.was.delete(l.id);
+    });
     // Keep only selections that still make sense.
     const selectable = new Set([...B.free.map(r => r.shipment_nbr), ...B.loads.flatMap(l => l.ships.filter(s => canPick(l, s)).map(s => s.shipment_nbr))]);
     B.sel = new Set([...B.sel].filter(n => selectable.has(n)));
@@ -172,7 +240,7 @@
       <div class="kpis">
         <div class="kpi ${free.length ? 'warn' : ''}"><div class="l">Not on a load</div><div class="v">${fmt(free.length)}</div><div class="s">${free.length ? fmt(fs_.vol) + ' vol · ' + money(fs_.value) : 'all loaded'}</div></div>
         <div class="kpi"><div class="l">Draft loads</div><div class="v">${drafts.length}</div><div class="s">${fmt(drafts.reduce((s, l) => s + l.vol, 0))} vol · ${money(drafts.reduce((s, l) => s + l.value, 0))}</div></div>
-        <div class="kpi"><div class="l">With the liaison</div><div class="v">${withClerk.length}</div><div class="s">waiting for a trucker</div></div>
+        <div class="kpi ${withClerk.length ? 'warn' : ''} clk" data-status="ready" title="Show only these"><div class="l">Need a trucker</div><div class="v">${withClerk.length}</div><div class="s">waiting for a trucker</div></div>
         <div class="kpi"><div class="l">Trucker confirmed</div><div class="v">${written.length}</div><div class="s">${written.filter(l => l.status === 'done').length} written to Acumatica</div></div>
       </div>
       <div class="cols">
@@ -182,7 +250,7 @@
           ${B.hasSv.length ? `<details class="has-sv" ${keep('has-sv')}><summary>${plural(B.hasSv.length, 'shipment')} on this date already have a Ship Via in Acumatica (not loadable here)</summary>
             <div class="card" style="margin-top:6px">${shipTable_(B.hasSv, { cb: false, sv: true })}</div></details>` : ''}
         </div>
-        <div>
+        <div class="lcol">
           <h2>Loads <span class="muted">${esc(niceDate(B.date))}</span></h2>
           ${loadFilterHtml()}
           <div id="loadsList">${loadsListHtml()}</div>
@@ -238,6 +306,7 @@
     const results = written ? new Map(l.ships.map(s => [s.shipment_nbr, s])) : null;
     const others = B.loads.filter(x => x.status === 'draft' && x.id !== l.id);
     const fit = bestFit(l.vol, l.drops);
+    const tab = curTab(l);
     return `<div class="lcard st-${l.status}" data-load="${l.id}">
       <div class="lhead"><div><span class="lnbr">${esc(l.load_nbr)}</span>${l.confirm_requested_at || ['confirming', 'confirmed', 'partial'].includes(l.check_status) ? '' : ` <button class="btn small" data-act="renumber" title="Set the real load number">Edit #</button>`} ${loadKindTags(l)}<span class="muted">${esc(l.zones.join(', '))}</span></div>${statusPill(l.status)}</div>
       ${l.returned_note && draft ? `<div class="warnbox bad">Sent back by the liaison: ${esc(l.returned_note)}</div>` : ''}
@@ -249,7 +318,8 @@
       <div class="lstats">${waveTag(l.wave)}<span>${plural(l.count, 'shipment')}</span><span>${l.drops} / ${MAX_DROPS} drops</span>${capBar(l)}<span>${fmt(l.qty)} qty</span><span><b>${money(l.value)}</b></span>
         ${draft && fit && fitLabel(fit) !== l.truck_type ? `<span>best fit: ${esc(fitLabel(fit))}</span>` : ''}</div>
       ${loadWarnings(l)}
-      ${rows.length ? shipTable_(rows, { zone: l.zones.length > 1, results, cb: draft || written, pickable: n => canPick(l, l.ships.find(s => s.shipment_nbr === n)) }) : '<div class="muted">No shipments on this load. Tick some and add them here.</div>'}
+      ${tabsBar(l)}
+      ${tab === 'trucker' ? truckerPane(l) : `${rows.length ? shipTable_(rows, { zone: l.zones.length > 1, results, cb: draft || written, pickable: n => canPick(l, l.ships.find(s => s.shipment_nbr === n)) }) : '<div class="muted">No shipments on this load. Tick some and add them here.</div>'}
       <div class="lactions">
         ${draft ? `<button class="btn primary small" data-act="send">Send to liaison</button>
           ${others.length ? `<select data-merge aria-label="Merge into"><option value="">Merge into…</option>${others.map(o => `<option value="${o.id}">${esc(o.load_nbr)} (${fmt(o.vol)} vol)</option>`).join('')}</select>` : ''}
@@ -257,10 +327,84 @@
         ${l.status === 'ready' ? '<button class="btn small" data-act="pull_back">Pull back to edit</button>' : ''}
         ${l.status === 'partial' ? '<span class="muted">Tick refused or failed shipments to move them to another load, or take them off.</span>' : ''}
       </div>
-      <div class="inline-err" data-err></div>
-      ${eventList(l.events, 'hist-' + l.id)}
+      <div class="inline-err" data-err></div>`}
     </div>`;
   }
+
+  const TRUCKER_STATES = ['ready', 'confirmed', 'writing', 'partial'];
+  function curTab(l) { return B.ltab.get(l.id) || (TRUCKER_STATES.includes(l.status) ? 'trucker' : 'details'); }
+  function canTruck() { return !!(D.me && D.me.roles.some(r => r === 'clerk' || r === 'admin')); }
+  function tabsBar(l) {
+    const t = curTab(l);
+    const badge = l.status === 'draft' ? '<i class="tb mute">not sent</i>'
+      : l.status === 'ready' ? '<i class="tb warn">needs trucker</i>'
+      : l.ship_via ? `<i class="tb ok">${esc(l.ship_via)}</i>` : '';
+    return `<div class="ltabs" role="tablist"><button role="tab" data-ltab="details" class="${t === 'details' ? 'on' : ''}">Details <i class="tb mute">${l.count}</i></button><button role="tab" data-ltab="trucker" class="${t === 'trucker' ? 'on' : ''}">Trucker ${badge}</button></div>`;
+  }
+  function truckerPane(l) {
+    let body;
+    if (l.status === 'draft') body = `<div class="muted" style="padding:6px 2px">Not sent to the liaison yet. Use <b>Send to liaison</b> on the Details tab.</div>`;
+    else if (l.status === 'ready') body = readyBody(l);
+    else body = writtenBody(l);
+    const ro = !canTruck() && l.status !== 'draft';
+    return (ro ? '<div class="warnbox info">View only: this needs the Trucker Liaison role.</div><fieldset disabled style="border:0;padding:0;margin:0;min-width:0">' + body + '</fieldset>' : body)
+      + eventList(l.events, 'hist-' + l.id);
+  }
+
+  // What the clerk has typed but not submitted, so a refresh doesn't wipe it.
+  function draftOf(l) {
+    if (!B.drafts.has(l.id)) B.drafts.set(l.id, { ship_via: l.ship_via || '', contractor: l.contractor || '', notes: '', outcome: 'No answer', callNote: '', ret: '' });
+    return B.drafts.get(l.id);
+  }
+  function typedIn(l) {
+    const d = B.drafts.get(l.id);
+    return !!d && (d.ship_via !== (l.ship_via || '') || d.callNote || d.ret || d.notes);
+  }
+
+  
+
+  function readyBody(l) {
+    const d = draftOf(l);
+    const ret = B.returning.has(l.id);
+    return `${l.notes ? `<div class="warnbox info">Coordinator's note: ${esc(l.notes)}</div>` : ''}
+      <div class="cform">
+        <label class="field">Trucker's Ship Via<input data-d="ship_via" list="shipViaList" value="${esc(d.ship_via)}" placeholder="Code or name" autocomplete="off"></label>
+        <label class="field">Trucker / driver<input data-d="contractor" value="${esc(d.contractor)}" placeholder="As confirmed on the call"></label>
+        <label class="field wide">Notes<textarea data-d="notes" rows="1" placeholder="Rate agreed, pickup time, driver phone… (blank keeps the coordinator's note)">${esc(d.notes)}</textarea></label>
+      </div>
+      <div class="lactions">
+        <button class="btn primary small" data-act="confirm">Confirm trucker &amp; write to Acumatica</button>
+        <button class="btn small" data-act="return_open">Send back to draft</button>
+      </div>
+      ${ret ? `<div class="retbox"><input class="txt" data-d="ret" value="${esc(d.ret)}" placeholder="Why? e.g. too much for one 10 Ton, split it"><button class="btn small" data-act="return">Send back</button><button class="btn small" data-act="return_cancel">Cancel</button></div>` : ''}
+      <div class="inline-err" data-err></div>
+      <div class="callrow">
+        <select data-d="outcome" aria-label="Call outcome">${['No answer', 'Declined', 'Left message', 'Accepted'].map(o => `<option ${o === d.outcome ? 'selected' : ''}>${o}</option>`).join('')}</select>
+        <input class="txt" data-d="callNote" value="${esc(d.callNote)}" placeholder="Who you called, what they said">
+        <button class="btn small" data-act="call">Log call</button>
+      </div>
+`;
+  }
+
+  function writtenBody(l) {
+    const queued = writeQueued(l), writing = l.status === 'writing' || queued;
+    const stuck = l.status === 'writing' && Date.now() - new Date(l.updated_at).getTime() > 5 * 60e3;
+    const through = l.ships.filter(s => s.result).length;
+    const bad = l.ships.filter(s => ['refused', 'failed'].includes(s.result));
+    const refused = bad.filter(s => s.result === 'refused').length;
+    return `<div class="lstats"><span>confirmed ${esc(stamp(l.confirmed_at))}</span>${l.notes ? `<span>${esc(l.notes)}</span>` : ''}</div>
+      ${queued ? progressBox('Queued for Acumatica' + (D.env === 'test' ? ' TEST' : ''), 0, l.count, 'Starts as soon as the load ahead of it is done. You can carry on with other loads.') : ''}
+      ${l.status === 'writing' ? progressBox('Writing to Acumatica' + (D.env === 'test' ? ' TEST' : ''), through, l.count, 'A few seconds per shipment. You can carry on with other loads.') : ''}
+      ${l.status === 'partial' && !writing ? `<div class="warnbox bad">${plural(bad.length, 'shipment')} didn't go through.${refused ? ` Refused ones changed in Acumatica since the load was built; the coordinator has to move them.` : ''} Failed ones can be retried.</div>` : ''}
+      <div class="lactions">
+        ${l.status === 'confirmed' && !writing ? `<button class="btn primary small" data-act="apply">Write to Acumatica</button><button class="btn small" data-act="unconfirm">Undo confirmation</button>` : ''}
+        ${l.status === 'partial' && !writing ? `<button class="btn primary small" data-act="apply">Retry ${plural(bad.length, 'shipment')}</button>` : ''}
+        ${stuck ? '<button class="btn small" data-act="unstick">Writing seems stuck: mark it so it can be retried</button>' : ''}
+      </div>
+      <div class="inline-err" data-err></div>`;
+  }
+
+
 
   function selBar() {
     if (!B.sel.size) return '';
@@ -320,7 +464,47 @@
     });
   }
 
+  function cardErr(id, msg) { const el = document.querySelector('[data-load="' + id + '"] [data-err]'); if (el) el.textContent = msg || ''; }
+  async function apply(id) { const r = await callAcu('apply', { load_id: id }); if (!r.ok) throw new Error(r.error || "Couldn't queue the load"); B.was.set(id, true); }
+  function poll() {
+    if (!B.loads.some(l => l.status === 'writing' || writeQueued(l)) || B.poll) return;
+    B.poll = setTimeout(async () => { B.poll = null; if (!B.busy && !editing()) await refresh(); else poll(); }, 3000);
+  }
+  async function lact(id, fn) {
+    if (B.busy) return; B.busy = true; cardErr(id, '');
+    try { await fn(); await refresh(); }
+    catch (e) { console.error('[test]', e); B.open.add(id); await refresh(); cardErr(id, errMsg(e)); }
+    finally { B.busy = false; }
+  }
+  function fillShipVias() {
+    document.getElementById('shipViaList').innerHTML = shipViaChoices().map(c => '<option value="' + esc(c.ship_via) + '">' + esc(c.description || '') + (c.ships ? ' · ' + c.ships + ' orders in the last year' : '') + '</option>').join('');
+  }
+  function liaisonAction(a, id) {
+    const l = B.loads.find(x => x.id === id), d = draftOf(l);
+    if (a === 'return_open') { B.returning.add(id); render(); return; }
+    if (a === 'return_cancel') { B.returning.delete(id); render(); return; }
+    if (a === 'return') { lact(id, async () => { await rpc('dispatch_load_action', { p_id: id, p_action: 'return', p_note: d.ret }); B.returning.delete(id); B.drafts.delete(id); B.open.delete(id); }); return; }
+    if (a === 'call') {
+      if (!d.ship_via.trim() && !d.contractor.trim() && !d.callNote.trim()) { cardErr(id, 'Say who you called: fill in the Ship Via, the name, or a note.'); return; }
+      lact(id, async () => { await rpc('dispatch_log_call', { p_id: id, p_outcome: d.outcome, p_ship_via: d.ship_via, p_contractor: d.contractor, p_note: d.callNote }); d.callNote = ''; B.open.add(id); }); return;
+    }
+    if (a === 'confirm') {
+      const sv = d.ship_via.trim();
+      if (!sv) { cardErr(id, "Pick the trucker's Ship Via."); return; }
+      if (!shipViaChoices().some(c => c.ship_via === sv)) { cardErr(id, sv + " isn't a Ship Via code in Acumatica. Pick one from the list."); return; }
+      if (!confirm('Lock in ' + sv + ' for ' + l.load_nbr + '?')) return;
+      lact(id, async () => { await rpc('dispatch_confirm_load', { p_id: id, p_ship_via: sv, p_contractor: d.contractor, p_notes: d.notes.trim() || l.notes || '' }); B.drafts.delete(id); await apply(id); }); return;
+    }
+    if (a === 'apply') { lact(id, () => apply(id)); return; }
+    if (a === 'unconfirm') { lact(id, () => rpc('dispatch_load_action', { p_id: id, p_action: 'unconfirm' })); return; }
+    if (a === 'unstick') { lact(id, () => rpc('dispatch_load_action', { p_id: id, p_action: 'unstick' })); }
+  }
+
   document.getElementById('app').addEventListener('click', e => {
+    const lt = e.target.closest('[data-ltab]');
+    if (lt) { B.ltab.set(Number(lt.closest('[data-load]').dataset.load), lt.dataset.ltab); render(); return; }
+    const kp = e.target.closest('.kpi[data-status]');
+    if (kp) { B.status = B.status === kp.dataset.status ? 'all' : kp.dataset.status; render(); return; }
     const chip = e.target.closest('[data-date]');
     if (chip) { setDate(chip.dataset.date); return; }
     const day = e.target.closest('#daySeg button');
@@ -374,6 +558,7 @@
       act(() => rpc('dispatch_set_load_nbr', { p_id: id, p_nbr: v }));
       return;
     }
+    if (id && ['return_open','return_cancel','return','call','confirm','apply','unconfirm','unstick'].includes(a)) { liaisonAction(a, id); return; }
     if (a === 'send') { act(() => rpc('dispatch_load_action', { p_id: id, p_action: 'send' })); return; }
     if (a === 'pull_back') { act(() => rpc('dispatch_load_action', { p_id: id, p_action: 'pull_back' })); return; }
     if (a === 'delete') {
@@ -385,6 +570,8 @@
 
   // Typing only redraws the list, so the box keeps focus.
   document.getElementById('app').addEventListener('input', e => {
+    const dc = e.target.closest('[data-load]');
+    if (dc && e.target.dataset.d) { const l = B.loads.find(x => x.id === Number(dc.dataset.load)); if (l) draftOf(l)[e.target.dataset.d] = e.target.value; return; }
     if (e.target.id !== 'loadQ') return;
     B.q = e.target.value;
     document.getElementById('loadsList').innerHTML = loadsListHtml();
@@ -400,6 +587,12 @@
       visFree().filter(r => (r.shipping_zone || 'No zone') === t.dataset.zone)
         .forEach(r => t.checked ? B.sel.add(r.shipment_nbr) : B.sel.delete(r.shipment_nbr));
       render(); return;
+    }
+    if (t.dataset.d === 'outcome') { t.dispatchEvent(new Event('input', { bubbles: true })); return; }
+    if (t.dataset.d === 'ship_via') {
+      const who = t.closest('[data-load]').querySelector('[data-d="contractor"]'), info = codeInfo(t.value.trim());
+      if (info && who && !who.value.trim()) { who.value = info.description || ''; who.dispatchEvent(new Event('input', { bubbles: true })); }
+      return;
     }
     const card = t.closest('[data-load]');
     if (!card) return;
@@ -422,7 +615,7 @@
   function setDate(iso) { B.date = iso; B.sel.clear(); refresh(); }
 
   async function refresh() {
-    try { await loadAll(); render(); }
+    try { await loadAll(); render(); poll(); }
     catch (e) {
       console.error('[batcher]', e);
       document.getElementById('main').innerHTML = errBox(e);
@@ -438,10 +631,11 @@
 
   startPage({
     page: 'batcher', role: 'batcher', title: 'Logistics Coordinator',
-    onEnvChange: () => { B.sel.clear(); refresh(); },
+    onEnvChange: () => { B.sel.clear(); B.drafts.clear(); fillShipVias(); refresh(); },
     onReady: () => {
+      fillShipVias();
       refresh();
-      keepFresh(refresh, () => B.busy || editing() || B.sel.size > 0, ['loads', 'load_shipments']);
+      keepFresh(refresh, () => B.busy || editing() || B.sel.size > 0, ['loads', 'load_shipments', 'load_events']);
       setInterval(() => { if (!B.busy && !editing() && !B.sel.size) refresh(); }, 60 * 1000);
     },
   });
