@@ -15,8 +15,8 @@
   pulled back. Written loads are read-only here except that shipments
   Acumatica refused can be taken off and re-loaded.
 
-  "Free" shipment = outbound, On Hold/Open, no real ShipVia (empty or an old
-  BATCH placeholder), not on any load. Dated up to POOL_DAYS_BACK before the
+  "Free" shipment = outbound, On Hold/Open, not on any load (whatever Ship Via
+  Acumatica has on it; the lock-in replaces it). Dated up to POOL_DAYS_BACK before the
   load date; older ones are flagged.
 -->
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -165,8 +165,10 @@
       (data || []).forEach(x => taken.add(x.shipment_nbr));
     }
     const notTaken = rows.filter(r => !taken.has(r.shipment_nbr));
-    B.free = notTaken.filter(r => !r.ship_via || isBatch(r.ship_via));
-    B.hasSv = notTaken.filter(r => r.ship_via && !isBatch(r.ship_via) && r.shipment_date === B.date);
+    // Loads are built on the portal only: a shipment with a Ship Via already set in Acumatica is still
+    // loadable (the writeback replaces it; it shows as a tag). hasSv stays empty, kept for the old section.
+    B.free = notTaken;
+    B.hasSv = [];
     B.loads = loads;
     B.sync = sync;
     // Items for everything on screen, so the "short" tags show without opening.
@@ -268,6 +270,7 @@
         const tags = [];
         if (r.shipment_date && r.shipment_date < B.date) tags.push(`<span class="tag old" title="Shipment date">${esc(niceDate(r.shipment_date))}</span>`);
         if (r.missing) tags.push('<span class="tag old">not found</span>');
+        if (!sv && r.ship_via && !isBatch(r.ship_via)) tags.push(`<span class="tag" title="Ship Via already set in Acumatica; locking in a load replaces it">Acumatica: ${esc(r.ship_via)}</span>`);
         const w = !r.missing && suggestWave(r, B.date);
         return `<tr class="${sel ? 'sel' : ''}">
           ${cb ? `<td class="cb">${pickable(n) ? `<input type="checkbox" data-pick="${esc(n)}" ${sel ? 'checked' : ''} aria-label="Select ${esc(n)}">` : ''}</td>` : ''}
