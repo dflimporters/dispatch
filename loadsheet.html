@@ -347,7 +347,7 @@
       <div class="how"><b>Driver:</b> open the DFL Driver app and scan this QR code, or type the code above. Check the load number and your name on the screen before you take responsibility for the load.</div>
       <div class="how link"><b>Camera not working?</b> On your phone, open this link in the browser. It takes you to the same screen as the QR code.<span class="url">${esc(link)}</span></div>
       <table><thead><tr><th>#</th><th>Customer</th><th>Area</th><th>Invoices</th></tr></thead><tbody>
-        ${stops.map(x => `<tr><td class="n">${x.seq}</td><td>${esc(x.customer_name || x.customer_id)}</td><td>${esc(x.zone || x.city || '')}</td><td>${esc((x.shipments || []).join(', '))}</td></tr>`).join('')}
+        ${stops.map(x => `<tr><td class="n">${x.seq}</td><td>${esc(x.customer_name || x.customer_id)}</td><td>${esc(x.zone || x.city || '')}</td><td>${esc((x.invoices || []).filter(Boolean).join(', ') || 'not invoiced yet')}</td></tr>`).join('')}
       </tbody></table>
       <div class="foot"><span>Suggested order. The driver may change it in the app.</span><span>Printed ${esc(stamp(new Date().toISOString()))}</span></div>
     </div>`;
@@ -374,7 +374,7 @@
     return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: summary')}
       <table><thead><tr><th>#</th><th>Customer</th><th>Address</th><th>Area</th><th>Invoices</th><th class="r">Lines</th><th class="r">Units</th><th class="b">Loaded</th><th class="b">Delivered</th><th>Notes</th></tr></thead><tbody>
         ${stops.map(x => `<tr><td class="n">${x.seq}</td><td><b>${esc(x.customer_name || x.customer_id)}</b></td><td class="addr">${esc([x.address, x.city].filter(Boolean).join(', '))}</td><td>${esc(x.zone || x.city || '')}</td>
-          <td>${esc((x.shipments || []).map(i => i.invoice_nbr || i.shipment_nbr).join(', '))}</td><td class="r">${stopLines(x)}</td><td class="r">${qn(stopUnits(x))}</td>
+          <td>${esc((x.shipments || []).map(i => i.invoice_nbr || 'not invoiced').join(', '))}</td><td class="r">${stopLines(x)}</td><td class="r">${qn(stopUnits(x))}</td>
           <td class="b"><span class="box"></span></td><td class="b"><span class="box"></span></td><td class="nt"></td></tr>`).join('')}
         <tr class="tot"><td></td><td><b>Total</b></td><td></td><td></td><td></td><td>${plural(stops.reduce((t, x) => t + (x.shipments || []).length, 0), 'invoice')}</td><td class="r">${stops.reduce((t, x) => t + stopLines(x), 0)}</td><td class="r">${qn(stops.reduce((t, x) => t + stopUnits(x), 0))}</td><td></td><td></td><td></td></tr>
       </tbody></table>${checkFoot(s)}</div>`;
@@ -387,7 +387,7 @@
       if (!items.has(k)) items.set(k, { id: l.inventory_id, descr: l.description, uom: l.uom, total: 0, rows: [] });
       const it = items.get(k);
       it.total += Number(l.qty || 0);
-      it.rows.push({ seq: st.seq, cust: st.customer_name || st.customer_id, zone: st.zone, inv: i.invoice_nbr || i.shipment_nbr, qty: l.qty });
+      it.rows.push({ seq: st.seq, cust: st.customer_name || st.customer_id, zone: st.zone, inv: i.invoice_nbr || 'not invoiced', qty: l.qty });
     })));
     const list = [...items.values()].sort((x, y) => String(x.descr || x.id).localeCompare(String(y.descr || y.id), undefined, { numeric: true, sensitivity: 'base' }));
     return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: by item', true)}
