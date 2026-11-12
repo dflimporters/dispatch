@@ -101,7 +101,7 @@
       const one = await sb.from('loads').select('load_date,env').eq('id', L.autoPrint).maybeSingle();
       if (one.data) { L.date = one.data.load_date; if (one.data.env !== D.env) { setEnv(one.data.env); renderEnvBar(() => refresh()); } }
     }
-    L.days = [L.date, addDays(L.date, -1)];   // the chosen day and the day before
+    L.days = [addDays(L.date, 1), L.date, addDays(L.date, -1)];   // the day after, the chosen day, the day before
     const { data: loads, error } = await sb.from('loads')
       .select('id,load_nbr,load_date,wave,seq,truck_type,ship_via,contractor,status,check_status,sheet_stale_at')
       .eq('env', D.env).in('load_date', L.days).in('status', ['done', 'partial']).order('seq').order('wave');
@@ -301,12 +301,12 @@
       ${L.days.map(daySection).join('')}`;
   }
 
-  // One collapsible section per day: the chosen day open, the day before closed (until opened).
+  // One collapsible section per day (tomorrow, today, yesterday): the chosen day open, the others closed (until opened).
   function daySection(day, i) {
     const loads = L.loads.filter(l => l.load_date === day);
     const printed = loads.filter(l => L.lm.has(l.id)).length;
     const pend = L.pending[day] || 0;
-    const open = day in L.open ? L.open[day] : i === 0;
+    const open = day in L.open ? L.open[day] : day === L.date;
     const sub = loads.length
       ? `${plural(loads.length, 'load')} · ${printed} printed${loads.length - printed ? ` · <b>${loads.length - printed} to print</b>` : ''}`
       : 'no loads';
