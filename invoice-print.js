@@ -153,12 +153,13 @@
 .ip-box h6 { margin:0 0 2pt; font:400 8.5pt/${LH}pt 'Courier New',Courier,monospace; }
 .ip-ref { display:grid; height:24pt; margin-top:6pt; border:1pt solid #000; }
 .ip-ref.a { grid-template-columns:1.1fr 1.4fr 1.5fr; }
+.ip-sl .ip-ref.a { grid-template-columns:1fr 1fr; }
 .ip-ref.b { grid-template-columns:1fr 1.2fr 1.2fr 1.4fr; margin-top:4pt; }
 .ip-ref div { padding:1pt 5pt; border-left:1pt solid #000; overflow:hidden; white-space:nowrap; }
 .ip-ref div:first-child { border-left:0; }
 .ip-ref i { display:block; font-style:normal; font-weight:400; font-size:7pt; line-height:9pt; }
 .ip-th, .ip-row { display:grid; grid-template-columns:4ch 62ch 8ch 5ch 12ch 5ch 1fr; }
-.ip-sl .ip-th, .ip-sl .ip-row { grid-template-columns:4ch 62ch 8ch 1fr; }
+.ip-sl .ip-th, .ip-sl .ip-row { grid-template-columns:4ch 1fr 8ch 8ch; }
 .ip-th { margin-top:8pt; height:16pt; line-height:14pt; font-weight:400; border:1pt solid #000; }
 .ip-th > div + div { border-left:1pt solid #000; }
 .ip-th > div, .ip-row > div { padding:0 2pt; }
@@ -223,7 +224,7 @@
       + `<div class="ip-hr"><div class="ip-title"><b>${slip ? 'DELIVERY SLIP' : 'TAX INVOICE'}</b>${slip ? '' : esc(GCT_REF)}${rp ? `<span class="ip-rp">REPRINT ${rp}</span>` : ''}</div>`
       + `<div class="ip-meta"><div><span>${slip ? 'Invoice Ref.:' : 'Invoice No.:'}</span><span>${esc(inv.ref)}</span></div><div><span>Date:</span><span>${esc(niceDate(inv.date))}</span></div>${slip ? '' : `<div><span>Due Date:</span><span>${esc(niceDate(inv.due_date))}</span></div>`}<div><span>Customer ID:</span><span>${esc(inv.customer_id)}</span></div><div><span>Currency:</span><span>${esc(cur)}</span></div></div></div></div>`
       + `<div class="ip-addr">${addrBox('BILL TO:', inv.bill)}${addrBox('SHIP TO:', inv.ship)}</div>`
-      + `<div class="ip-ref a">${refCell('CUSTOMER REF. NUMBER', inv.customer_ref)}${refCell('TERMS', inv.terms)}${refCell('CONTACT', inv.salesperson)}</div>`
+      + `<div class="ip-ref a">${refCell('CUSTOMER REF. NUMBER', inv.customer_ref)}${slip ? '' : refCell('TERMS', inv.terms)}${refCell('CONTACT', inv.salesperson)}</div>`
       + `<div class="ip-ref b">${refCell('SHIP VIA', inv.ship_via)}${refCell('SO NUMBER', inv.so_number)}${refCell('SHIPMENT NUMBER', inv.shipment_nbr)}${refCell('CUSTOMER P.O. NO.', inv.customer_po)}</div>`
       + `<div class="ip-th"><div>NO.</div><div>ITEM</div><div class="r">QTY.</div><div class="u">UOM</div>${slip ? '' : '<div class="r">UNIT PRICE</div><div class="c">TAX</div><div class="r">EXTENDED</div>'}</div>`
       + `<div class="ip-body" style="height:${last ? BODY_LAST : BODY_MORE}pt">${body}</div>`
