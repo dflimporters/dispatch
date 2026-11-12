@@ -949,10 +949,11 @@
       u.searching = true; paintSubResults(k);
       u.timer = setTimeout(async () => {
         const asked = u.q;
-        try { const r = await callSub('search_items', { q: asked }); if (asked !== u.q) return; if (!r.ok) throw new Error(r.error || 'Search failed'); u.results = r.items || []; u.err = ''; }
+        // Searches the local item list (stock_items_raw): every word typed must be in the name or item number, in any order.
+        try { const r = await sb.rpc('sub_item_search', { p_q: asked }); if (asked !== u.q) return; if (r.error) throw r.error; u.results = r.data || []; u.err = ''; }
         catch (err) { u.results = []; u.err = errMsg(err); }
         u.searching = false; paintSubResults(k);
-      }, 450);
+      }, 200);
       return;
     }
     if (t.id !== 'fq' && !(t.dataset.f && t.tagName === 'INPUT')) return;
