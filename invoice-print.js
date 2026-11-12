@@ -36,9 +36,9 @@
   // page geometry in pt (Letter = 612 x 792). Every block has a fixed height so the body budget is exact.
   const LH = 11;                 // line height
   const ROW_GAP = 3;             // space under each invoice line
-  const ITEM_WRAP = 52;          // chars per line in the ITEM column
+  const ITEM_WRAP = 60;          // chars per line in the ITEM column
   const NOTE_WRAP = 70;          // chars per line for a line note
-  const TOP_USED = 314;          // everything above the first line row
+  const TOP_USED = 306;          // everything above the first line row
   const BOTTOM_MORE = 40;        // continued/page row + bottom margin, non-last pages
   const BOTTOM_LAST = 26 + 14 + 108 + 4;   // margin + page row + footer block + gap, last page
   const BODY_MORE = 792 - TOP_USED - BOTTOM_MORE;
@@ -137,13 +137,13 @@
 .ip-wm img { height:40pt; display:block; }
 .ip-rwm { position:absolute; left:0; right:0; top:4.3in; text-align:center; transform:rotate(-30deg); font:700 96pt/1 Arial,sans-serif; color:rgba(0,0,0,.11); pointer-events:none; white-space:nowrap; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
 .ip-in { position:absolute; left:.4in; right:.4in; top:30pt; bottom:0; }
-.ip-head { display:flex; justify-content:space-between; height:112pt; }
+.ip-head { display:flex; justify-content:space-between; height:104pt; }
 .ip-co img { height:48pt; display:block; margin-bottom:4pt; }
 .ip-co div { font-weight:400; }
 .ip-hr { width:3.5in; }
-.ip-title { border:1pt solid #000; text-align:center; padding:3pt 0; height:40pt; }
+.ip-title { border:1pt solid #000; text-align:center; padding:3pt 0; height:32pt; position:relative; }
 .ip-title b { display:block; font:700 13pt/15pt 'Courier New',Courier,monospace; }
-.ip-rp { display:inline-block; margin-top:1pt; padding:0 6pt; border:1.2pt solid #000; font-weight:700; }
+.ip-rp { position:absolute; right:4pt; top:3pt; padding:0 4pt; border:1.2pt solid #000; font-weight:700; }
 .ip-meta { margin-top:0; }
 .ip-meta div { display:flex; height:13pt; line-height:12pt; border:1pt solid #000; border-top:0; }
 .ip-meta span:first-child { flex:1; padding-left:4pt; }
@@ -157,8 +157,8 @@
 .ip-ref div { padding:1pt 5pt; border-left:1pt solid #000; overflow:hidden; white-space:nowrap; }
 .ip-ref div:first-child { border-left:0; }
 .ip-ref i { display:block; font-style:normal; font-weight:400; font-size:7pt; line-height:9pt; }
-.ip-th, .ip-row { display:grid; grid-template-columns:4ch 54ch 9ch 6ch 13ch 5ch 1fr; }
-.ip-sl .ip-th, .ip-sl .ip-row { grid-template-columns:4ch 54ch 9ch 1fr; }
+.ip-th, .ip-row { display:grid; grid-template-columns:4ch 62ch 8ch 5ch 12ch 5ch 1fr; }
+.ip-sl .ip-th, .ip-sl .ip-row { grid-template-columns:4ch 62ch 8ch 1fr; }
 .ip-th { margin-top:8pt; height:16pt; line-height:14pt; font-weight:400; border:1pt solid #000; }
 .ip-th > div + div { border-left:1pt solid #000; }
 .ip-th > div, .ip-row > div { padding:0 2pt; }
@@ -168,12 +168,12 @@
 .ip-row { white-space:pre; margin-bottom:${ROW_GAP}pt; }
 .ip-note { white-space:pre; padding-left:4ch; margin-bottom:0; }
 .ip-pg { position:absolute; left:0; right:0; bottom:26pt; height:14pt; display:flex; justify-content:space-between; }
-.ip-foot { position:absolute; left:0; right:0; bottom:44pt; height:108pt; display:flex; gap:14pt; padding-top:4pt; }
+.ip-foot { position:absolute; left:0; right:0; bottom:44pt; height:108pt; display:flex; gap:14pt; border-top:1pt solid #000; padding-top:4pt; }
 .ip-fl { flex:1; }
 .ip-fl p { margin:0 0 4pt; }
 .ip-sig { white-space:nowrap; }
-.ip-tot { width:2.2in; border:1pt solid #000; align-self:flex-start; }
-.ip-tot div { display:flex; justify-content:space-between; padding:0 6pt; height:17pt; line-height:17pt; border-top:1pt solid #000; }
+.ip-tot { width:2in; border:1pt solid #000; align-self:flex-start; }
+.ip-tot div { display:flex; justify-content:space-between; padding:0 6pt; height:15pt; line-height:15pt; border-top:1pt solid #000; }
 .ip-tot div:first-child { border-top:0; }
 
 @media print {
@@ -220,7 +220,7 @@
       + (slip ? '</div>' : `<div class="ip-tot"><div><span>Sales</span><span>${money(inv.sales_total)}</span></div><div><span>Discount:</span><span>${money(inv.discount_total)}</span></div><div><span>Tax Total:</span><span>${money(inv.tax_total)}</span></div><div><span>Total</span><span>${money(inv.total)}</span></div></div></div>`) : '';
     return `<div class="ip-sheet${slip ? ' ip-sl' : ''}">${watermark(opts.logo)}${rp ? `<div class="ip-rwm">REPRINT ${rp}</div>` : ''}<div class="ip-in">`
       + `<div class="ip-head"><div class="ip-co"><img src="${esc(opts.logo)}" alt="DFL">${COMPANY.map(t => `<div>${esc(t)}</div>`).join('')}</div>`
-      + `<div class="ip-hr"><div class="ip-title"><b>${slip ? 'DELIVERY SLIP' : 'TAX INVOICE'}</b>${slip ? '' : esc(GCT_REF)}${rp ? `<br><span class="ip-rp">REPRINT ${rp}</span>` : ''}</div>`
+      + `<div class="ip-hr"><div class="ip-title"><b>${slip ? 'DELIVERY SLIP' : 'TAX INVOICE'}</b>${slip ? '' : esc(GCT_REF)}${rp ? `<span class="ip-rp">REPRINT ${rp}</span>` : ''}</div>`
       + `<div class="ip-meta"><div><span>${slip ? 'Invoice Ref.:' : 'Invoice No.:'}</span><span>${esc(inv.ref)}</span></div><div><span>Date:</span><span>${esc(niceDate(inv.date))}</span></div>${slip ? '' : `<div><span>Due Date:</span><span>${esc(niceDate(inv.due_date))}</span></div>`}<div><span>Customer ID:</span><span>${esc(inv.customer_id)}</span></div><div><span>Currency:</span><span>${esc(cur)}</span></div></div></div></div>`
       + `<div class="ip-addr">${addrBox('BILL TO:', inv.bill)}${addrBox('SHIP TO:', inv.ship)}</div>`
       + `<div class="ip-ref a">${refCell('CUSTOMER REF. NUMBER', inv.customer_ref)}${refCell('TERMS', inv.terms)}${refCell('CONTACT', inv.salesperson)}</div>`
