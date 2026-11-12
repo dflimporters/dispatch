@@ -235,6 +235,7 @@
   function pages(inv, opts) {
     opts = Object.assign({ logo: 'assets/dfl-logo-color.png' }, opts || {});
     injectCss();
+    try { new Image().src = opts.logo; } catch (e) {}
     const sets = paginate((inv.lines || []).map(prepLine));
     return sets.map((rows, i) => sheet(inv, rows, i, sets.length, opts));
   }
@@ -247,7 +248,17 @@
     document.body.classList.add('printing');
     const done = () => { document.body.classList.remove('printing'); w.innerHTML = ''; window.removeEventListener('afterprint', done); };
     window.addEventListener('afterprint', done);
-    window.print();
+    // Print only once the logo / watermark images have loaded (they are the same file, so this is quick). Printing
+    // straight away can send the sheets to the printer with no logo and no watermark. 5s cap so a missing image
+    // never blocks the print.
+    const waits = Array.from(new Set(Array.from(w.querySelectorAll('img')).map(i => i.src))).map(src => new Promise(res => {
+      const im = new Image();
+      im.onload = im.onerror = () => res();
+      im.src = src;
+      if (im.complete) res();
+    }));
+    const imgs = Array.from(w.querySelectorAll('img')).map(i => (i.decode ? i.decode().catch(() => {}) : null));
+    Promise.race([Promise.all(waits.concat(imgs)), new Promise(res => setTimeout(res, 5000))]).then(() => window.print());
   }
 
   window.InvoicePrint = { check, pages, show, niceDate };
