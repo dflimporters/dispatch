@@ -157,7 +157,7 @@
       const r = subRowOf(s, z), done = r && r.state === 'done', fixed = r && r.step !== 'none';
       const def = u.qty.has(z.shipment) ? u.qty.get(z.shipment) : (r ? Number(r.qty) : (s.ctxLines.length === 1 && s.required != null ? Math.max(0, Math.min(Number(z.qty), s.required - Number(s.checked_qty))) : ''));
       const st = !r ? '' : done
-        ? `<span style="color:var(--ok-text,#067647)">Done</span> · SO ${esc(r.new_order_nbr || '')} · shipment ${esc(r.new_shipment_nbr || '')}`
+        ? `<span style="color:var(--ok-text,#067647)">Done</span> · SO ${esc(r.new_order_nbr || '')} · shipment ${esc(r.new_shipment_nbr || '')}${r.note ? `<div style="font-size:12px;color:var(--warn-text)"><b>Check:</b> ${esc(r.note)}</div>` : ''}`
         : r.state === 'failed'
           ? `<b style="color:var(--bad-text,#b42318)">Stopped after: ${esc(SUB_STEP[r.step] || r.step)}</b><div style="font-size:12px">${esc(r.error || '')}</div>`
           : `${esc(SUB_STEP[r.step] || r.step)}…`;

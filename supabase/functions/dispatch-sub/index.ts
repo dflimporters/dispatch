@@ -291,13 +291,28 @@ async function runOne(acu: Acu, env: string, row: any, load: any, warehouse: str
   await acu.lease();
   const sh = await acu.call('GET', `${shUrl}?$expand=Details`);
   if (!sh.ok) throw new Error(`couldn't read shipment ${row.new_shipment_nbr} to join it to the load: ${sh.status} ${acuError(sh.data)}`);
-  const unit = Number(row.unit_price) || 0;
+  // Each line's price comes from the SO line it ships (the SO was priced by Acumatica at the customer's default price).
+  await acu.lease();
+  const od = await acu.call('GET', `/SalesOrder/SO/${encodeURIComponent(row.new_order_nbr)}?$expand=Details`);
+  const price = new Map<string, number>();
+  if (od.ok) for (const d of od.data?.Details ?? []) price.set(String(v(d.LineNbr)), Number(v(d.UnitPrice)) || 0);
   const lines = (sh.data.Details ?? []).map((d: any) => {
-    const q = Number(v(d.ShippedQty)) || 0;
+    const q = Number(v(d.ShippedQty)) || 0, unit = price.get(String(v(d.OrderLineNbr))) ?? 0;
     return { line_nbr: v(d.LineNbr), inventory_id: v(d.InventoryID), description: v(d.Description), uom: v(d.UOM),
              ordered_qty: Number(v(d.OrderedQty)) || 0, shipped_qty: q, order_nbr: v(d.OrderNbr), order_line_nbr: v(d.OrderLineNbr),
              location_id: v(d.LocationID), unit_price: unit || null, line_value: unit ? Math.round(unit * q * 100) / 100 : null };
   });
+  // The SO line is Cancel Remainder, so if less than the asked-for quantity was available Acumatica ships what it has and
+  // cancels the rest. Say so instead of reporting the full quantity.
+  const shipped = lines.reduce((t: number, l: any) => t + l.shipped_qty, 0);
+  if (shipped <= 0) throw new Error(`shipment ${row.new_shipment_nbr} has nothing on it (shipped qty 0)`);
+  if (shipped < Number(row.qty)) {
+    const note = `Asked for ${row.qty} but only ${shipped} of ${row.sub_inventory_id} could ship; the rest was cancelled on SO ${row.new_order_nbr}.`;
+    await setRow(row.id, { qty: shipped, note, unit_price: lines[0]?.unit_price ?? null });
+    row = { ...row, qty: shipped };
+  } else {
+    await setRow(row.id, { unit_price: lines[0]?.unit_price ?? null });
+  }
   const header = {
     shipment_nbr: row.new_shipment_nbr, status: v(sh.data.Status), shipment_date: String(v(sh.data.ShipmentDate) ?? '').split('T')[0] || jmToday(),
     customer_id: row.customer_id, customer_name: row.customer_name, warehouse_id: v(sh.data.WarehouseID) ?? warehouse,
