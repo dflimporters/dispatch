@@ -132,9 +132,9 @@
 .ip-sheet { position:relative; width:8.5in; height:11in; box-sizing:border-box; overflow:hidden; background:#fff; color:#000; font:8.5pt/${LH}pt 'Courier New',Courier,monospace; break-after:page; page-break-after:always; }
 .ip-sheet:last-child { break-after:auto; page-break-after:auto; }
 .ip-sheet * { box-sizing:border-box; }
-.ip-wm { position:absolute; left:0; top:0; width:100%; height:100%; overflow:hidden; display:flex; flex-wrap:wrap; align-content:flex-start; gap:60pt 30pt; padding:20pt 6pt; opacity:.045; pointer-events:none; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-.ip-wm span { display:flex; align-items:center; gap:8pt; font:700 14pt/1 Arial,sans-serif; letter-spacing:2pt; }
-.ip-wm img { height:34pt; }
+.ip-wm { position:absolute; left:0; top:0; width:100%; height:100%; overflow:hidden; display:flex; flex-wrap:wrap; align-content:flex-start; gap:64pt 46pt; padding:20pt 14pt; opacity:.045; pointer-events:none; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+.ip-wm span { display:block; }
+.ip-wm img { height:40pt; display:block; }
 .ip-rwm { position:absolute; left:0; right:0; top:4.3in; text-align:center; transform:rotate(-30deg); font:700 96pt/1 Arial,sans-serif; color:rgba(0,0,0,.11); pointer-events:none; white-space:nowrap; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
 .ip-in { position:absolute; left:.4in; right:.4in; top:30pt; bottom:0; }
 .ip-head { display:flex; justify-content:space-between; height:112pt; }
@@ -200,8 +200,8 @@
   const refCell = (label, val) => `<div><i>${label}</i>${esc(val)}</div>`;
 
   function watermark(logo) {
-    const one = `<span><img src="${esc(logo)}" alt="">IMPORTERS</span>`;
-    return `<div class="ip-wm">${one.repeat(40)}</div>`;
+    const one = `<span><img src="${esc(logo)}" alt=""></span>`;
+    return `<div class="ip-wm">${one.repeat(48)}</div>`;
   }
 
   function sheet(inv, rows, pg, npages, opts) {
