@@ -152,22 +152,42 @@ function addressBlock(contact: any, addr: any) {
 }
 
 // ── fetch + map ────────────────────────────────────────────────────────────
-// Invoice: money, terms, per-line TaxCategory/UOM/prices. SalesInvoice: bill/ship blocks, order and shipment numbers.
-// Both are read for the same invoices (by ref list, or by date / modified filter) and merged by ReferenceNbr.
+// The SalesInvoice entity (SO303000) is the only source: it lists invoices from Prepare Invoice onward (Balanced, so no
+// release is needed before printing), and carries the totals, tax, due date, terms ID, bill/ship blocks, order and
+// shipment numbers and per-line prices / tax category. (The AR Invoice entity doesn't return Balanced invoices.)
 const TYPE = "Type eq 'Invoice'";
 const SALES_EXPAND = 'Details,BillToContact,BillToAddress,ShipToContact,ShipToAddress';
 
+// Reshape a SalesInvoice record into the header/lines form mapInvoices reads.
+function fromSalesInvoice(s: any): any {
+  const date = dateOnly(v(s, 'Date')), due = dateOnly(v(s, 'DueDate'));
+  let terms: string | null = t(v(s, 'Terms', 'TermsID'));   // added to the SO Invoice feed
+  if (!terms && date && due) {   // fallback: 'N DAYS' from the due date
+    const d = Math.round((Date.parse(due) - Date.parse(date)) / 86400000); if (d > 0) terms = `${d}DAYS`;
+  }
+  return {
+    ReferenceNbr: v(s, 'ReferenceNbr'), Date: v(s, 'Date'), DueDate: v(s, 'DueDate'), Status: v(s, 'Status'),
+    Customer: v(s, 'CustomerID'), Currency: v(s, 'Currency'), Terms: terms,
+    TaxTotal: v(s, 'TaxTotal'), Amount: v(s, 'Amount'), LastModifiedDateTime: v(s, 'LastModifiedDateTime'),
+    Details: (s.Details ?? []).map((d: any) => ({
+      LineNbr: v(d, 'LineNbr'), InventoryID: v(d, 'InventoryID'), TransactionDescription: v(d, 'TransactionDescr'),
+      Qty: v(d, 'Qty'), UOM: v(d, 'UOM'), UnitPrice: v(d, 'UnitPrice'), ExtendedPrice: v(d, 'Amount'),
+      DiscountAmount: v(d, 'DiscountAmount'), TaxCategory: v(d, 'TaxCategory'),
+    })),
+  };
+}
+
 async function fetchPair(filter: string): Promise<{ inv: any[]; sales: Map<string, any> }> {
-  const inv = await listAll('Invoice', { $filter: `${TYPE} and (${filter})`, $expand: 'Details' });
   const sales = new Map<string, any>();
-  if (inv.length === 0) return { inv, sales };
-  const refs = inv.map(i => String(v(i, 'ReferenceNbr')));
+  // Light list first (refs only), then the full records in small chunks to keep each payload small.
+  const listed = await listAll('SalesInvoice', { $filter: `${TYPE} and (${filter})`, $select: 'ReferenceNbr' });
+  const refs = [...new Set(listed.map(r => String(v(r, 'ReferenceNbr'))).filter(Boolean))];
   for (let i = 0; i < refs.length; i += REF_CHUNK) {
     const f = refs.slice(i, i + REF_CHUNK).map(r => `ReferenceNbr eq '${esc(r)}'`).join(' or ');
     const rows = await listAll('SalesInvoice', { $filter: `${TYPE} and (${f})`, $expand: SALES_EXPAND });
     for (const r of rows) sales.set(String(v(r, 'ReferenceNbr')), r);
   }
-  return { inv, sales };
+  return { inv: [...sales.values()].map(fromSalesInvoice), sales };
 }
 
 // ShipVia lives on the shipment (not on the invoice). One lookup per distinct shipment, best effort.
