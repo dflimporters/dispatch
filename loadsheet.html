@@ -108,11 +108,19 @@
     if (error) throw error;
     const all = loads || [];
     L.loads = all.filter(l => l.check_status === 'confirmed');
-    if (L.loads.length) {   // a load whose shipments were all added to another load is left empty: hide it
+    if (L.loads.length) {   // a load whose shipments were all added to another load is left empty: show it as cancelled
       const has = await sb.from('load_shipments').select('load_id').in('load_id', L.loads.map(l => l.id));
       if (has.error) throw has.error;
       const withShip = new Set((has.data || []).map(r => r.load_id));
-      L.loads = L.loads.filter(l => withShip.has(l.id));
+      const empty = L.loads.filter(l => !withShip.has(l.id));
+      if (empty.length) {
+        const ev = await sb.from('load_events').select('load_id,detail,note,created_at').eq('kind', 'reassign')
+          .in('load_id', empty.map(l => l.id)).order('created_at', { ascending: false });
+        empty.forEach(l => {
+          const e = (ev.data || []).find(x => x.load_id === l.id && x.detail && x.detail.role === 'source');
+          l.cancelled = { to: e?.detail?.to_load || '', reason: e?.detail?.reason || '', at: e?.created_at || '' };
+        });
+      }
     }
     L.pending = {};
     all.filter(l => l.check_status !== 'confirmed').forEach(l => { L.pending[l.load_date] = (L.pending[l.load_date] || 0) + 1; });
@@ -138,6 +146,14 @@
   }
 
   function card(l) {
+    if (l.cancelled) {
+      return `<div class="lcard" data-load="${l.id}" style="opacity:.75;border-left:4px solid #b91c1c">
+        <div class="lhead"><div><span class="lnbr" style="text-decoration:line-through">${esc(l.load_nbr)}</span> ${waveTag(l.wave)} <span class="pill bad">Cancelled: not active</span></div>
+          <div class="lactions" style="margin:0"><a class="btn small" href="tower.html#load=${l.id}">Open in Control Tower</a></div></div>
+        <div class="lstats"><span>Added to <b>${esc(l.cancelled.to || 'another load')}</b>${l.cancelled.reason ? ' · Reason: ' + esc(l.cancelled.reason) : ''}</span>
+          <span class="muted">was ${esc(l.ship_via || '—')}. Don't send this sheet out.</span></div>
+      </div>`;
+    }
     const m = L.lm.get(l.id);
     const st = stateOf(l);
     return `<div class="lcard ${st.cls}" data-load="${l.id}">
@@ -182,7 +198,7 @@
     if (!l) return '';
     const opts = shipViaChoices().filter(c => c.ship_via !== l.ship_via)
       .map(c => `<option value="${esc(c.ship_via)}" ${R.via === c.ship_via ? 'selected' : ''}>${esc(c.ship_via)}${c.description ? ' — ' + esc(c.description) : ''}</option>`).join('');
-    const targets = R.via ? L.loads.filter(x => x.id !== l.id && x.ship_via === R.via && (!L.lm.get(x.id) || L.lm.get(x.id).status === 'ready')) : [];
+    const targets = R.via ? L.loads.filter(x => !x.cancelled && x.id !== l.id && x.ship_via === R.via && (!L.lm.get(x.id) || L.lm.get(x.id).status === 'ready')) : [];
     const rows = R.rows.map(s => `<tr>
         <td><input type="checkbox" data-rsel="${esc(s.shipment_nbr)}" ${R.sel.has(s.shipment_nbr) ? 'checked' : ''}></td>
         <td>${esc(s.customer_name || s.customer_id || '')}</td><td class="mono">${esc(s.shipment_nbr)}</td>
@@ -319,11 +335,13 @@
   // One collapsible section per day (tomorrow, today, yesterday): the chosen day open, the others closed (until opened).
   function daySection(day, i) {
     const loads = L.loads.filter(l => l.load_date === day);
-    const printed = loads.filter(l => L.lm.has(l.id)).length;
+    const printed = loads.filter(l => !l.cancelled && L.lm.has(l.id)).length;
+    const nCancel = loads.filter(l => l.cancelled).length;
     const pend = L.pending[day] || 0;
     const open = day in L.open ? L.open[day] : day === L.date;
+    const live = loads.length - nCancel;
     const sub = loads.length
-      ? `${plural(loads.length, 'load')} · ${printed} printed${loads.length - printed ? ` · <b>${loads.length - printed} to print</b>` : ''}`
+      ? `${plural(live, 'load')} · ${printed} printed${live - printed ? ` · <b>${live - printed} to print</b>` : ''}${nCancel ? ` · ${nCancel} cancelled` : ''}`
       : 'no loads';
     return `<details class="dayblk" data-day="${day}" ${open ? 'open' : ''} style="margin:10px 0">
       <summary style="cursor:pointer;font-weight:700;padding:8px 2px">${esc(niceDate(day))}${day === jmDate(0) ? ' · today' : ''}
