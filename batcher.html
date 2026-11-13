@@ -91,13 +91,28 @@
 <script>
   const B = { date: jmDate(0), free: [], hasSv: [], loads: [], dates: [], sel: new Set(), sync: null, busy: false, wave: loadWaveFilter('batcher'), tab: loadKindTab(),
     ltab: new Map(),
-    drafts: new Map(), returning: new Set(), was: new Map(), poll: null, open: new Set(), seen: new Set() };
+    drafts: new Map(), returning: new Set(), was: new Map(), poll: null, open: new Set(), seen: new Set(),
+    cycle: null, cycMap: new Map(), cycleOnly: true };
+
+  // Transfer cycle (transfers.html): the orders that were on the latest transfer list when it was built at the 2pm cut-off.
+  // Late-night batching only takes the shipments of those orders, once the transfer is received at 71.
+  function cycleState(r) {
+    if (!B.cycle) return null;
+    const orders = String(r.order_nbr || '').split(/,\s*/).filter(Boolean);
+    if (!orders.length) return 'out';
+    const o = orders.map(n => B.cycMap.get(n));
+    if (o.every(x => x && x.counted)) return 'in';
+    if (o.some(x => x && x.far_dated)) return 'far';
+    return 'out';
+  }
+  const cycleGated = () => !!(B.cycle && B.cycle.status === 'sent');
 
   // The All / AM / PM filter: free shipments by suggested wave, loads by their wave.
   function inWave(r) { return B.wave === 'all' || suggestWave(r, B.date) === B.wave; }
   function loadInWave(l) { return B.wave === 'all' || l.wave === B.wave; }
   const inTab = r => (B.tab === 'special') === !!kindOf(r);
-  function visFree() { return B.free.filter(inWave).filter(inTab); }
+  const inCycleView = r => !(B.cycle && B.cycleOnly) || cycleState(r) === 'in';
+  function visFree() { return B.free.filter(inWave).filter(inTab).filter(inCycleView); }
   function visLoads() { return B.loads.filter(loadInWave).filter(l => (B.tab === 'special') === isSpecialLoad(l)); }
 
   // Search box + sort for the Loads column. Newest first by default (ids only ever go up).
@@ -155,6 +170,12 @@
     ]);
     if (pool.error) throw pool.error;
     await Promise.all([loadKinds(), loadAddrs()]);
+    try {
+      const c = await sb.rpc('dispatch_transfer_cycle', { p_env: D.env });
+      B.cycle = c.error ? null : c.data;
+      if (B.cycle && Date.now() - new Date(B.cycle.cutoff_to).getTime() > 36 * 3600 * 1000) B.cycle = null;   // an old cycle no longer applies
+    } catch (e) { B.cycle = null; }
+    B.cycMap = new Map(((B.cycle && B.cycle.orders) || []).map(o => [o.order_nbr, o]));
     const rows = pool.data || [];
     // Which of these are already on a load (any date)?
     const taken = new Set();
@@ -239,6 +260,7 @@
         <button class="btn primary" data-act="suggest" ${free.length ? '' : 'disabled'}>Suggest loads${B.sel.size && [...B.sel].every(freeByNbr) ? ' for selected' : B.wave !== 'all' ? ' (' + B.wave + ')' : ''}</button>
       </div>
       ${chips ? `<div class="controls">${chips}</div>` : ''}
+      ${cycleBanner()}
       <div class="kpis">
         <div class="kpi ${free.length ? 'warn' : ''}"><div class="l">Not on a load</div><div class="v">${fmt(free.length)}</div><div class="s">${free.length ? fmt(fs_.vol) + ' vol · ' + money(fs_.value) : 'all loaded'}</div></div>
         <div class="kpi"><div class="l">Draft loads</div><div class="v">${drafts.length}</div><div class="s">${fmt(drafts.reduce((s, l) => s + l.vol, 0))} vol · ${money(drafts.reduce((s, l) => s + l.value, 0))}</div></div>
@@ -270,6 +292,9 @@
         const tags = [];
         if (r.shipment_date && r.shipment_date < B.date) tags.push(`<span class="tag old" title="Shipment date">${esc(niceDate(r.shipment_date))}</span>`);
         if (r.missing) tags.push('<span class="tag old">not found</span>');
+        const cs = !r.missing && !results && cycleState(r);
+        if (cs === 'out') tags.push('<span class="tag old" title="Not on the transfer list\'s order snapshot: arrived after the cut-off, or older. Don\'t batch against the transfer stock.">not in cycle</span>');
+        if (cs === 'far') tags.push('<span class="tag old" title="Ship date beyond the transfer window">ships later</span>');
         if (!sv && r.ship_via && !isBatch(r.ship_via)) tags.push(`<span class="tag" title="Ship Via already set in Acumatica; locking in a load replaces it">Acumatica: ${esc(r.ship_via)}</span>`);
         const w = !r.missing && suggestWave(r, B.date);
         return `<tr class="${sel ? 'sel' : ''}">
@@ -284,6 +309,17 @@
           ${results ? `<td>${res ? resultPill(res) + (res.result_detail ? `<div class="muted">${esc(res.result_detail)}</div>` : '') : ''}</td>` : ''}
         </tr>${linesRow(n, cols)}`;
       }).join('')}</tbody></table>`;
+  }
+
+  function cycleBanner() {
+    const c = B.cycle;
+    if (!c) return '';
+    const t = iso => iso ? new Date(iso).toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+    const counted = (c.orders || []).filter(o => o.counted).length;
+    const waiting = B.free.filter(r => cycleState(r) === 'in').length, other = B.free.length - waiting;
+    const toggle = other ? ` <button class="btn small" data-act="cycletoggle">${B.cycleOnly ? `Show all ${B.free.length} shipments` : 'Show cycle only'}</button>` : '';
+    if (c.status === 'sent') return `<div class="warnbox bad"><b>Don't batch yet.</b> Transfer ${esc(c.list_nbr)} was sent to Ashenheim at ${esc(t(c.sent_at))} and isn't received at 71 yet. A coordinator marks it received on the Transfers page once it's up and released in Acumatica.</div>`;
+    return `<div class="warnbox info"><b>${esc(c.list_nbr)}</b> released at 71 ${esc(t(c.received_at))}${c.received_name ? ' by ' + esc(c.received_name) : ''}. Batch only its ${plural(counted, 'order')} (cut-off ${esc(t(c.cutoff_to))}): ${plural(waiting, 'shipment')} waiting${other ? `, ${other} not in this cycle` : ''}.${toggle}</div>`;
   }
 
   function renderPool(free) {
@@ -523,6 +559,8 @@
     const a = btn.dataset.act;
     if (a === 'clear') { B.sel.clear(); render(); return; }
     if (a === 'clear_filter') { B.q = ''; B.status = 'all'; render(); return; }
+    if (cycleGated() && (a === 'suggest' || a === 'move')) { toast("Transfer " + B.cycle.list_nbr + " isn't received at 71 yet. Batching waits for that.", true); return; }
+    if (a === 'cycletoggle') { B.cycleOnly = !B.cycleOnly; B.sel.clear(); render(); return; }
     if (a === 'suggest') { suggest(); return; }
     if (a === 'sync_test') {
       btn.disabled = true; btn.textContent = 'Pulling from TEST…';

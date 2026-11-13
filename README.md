@@ -70,17 +70,21 @@ A load cut off mid-write is set to `partial` by the next drain so it can be retr
 
 ## Transfers
 
-Built from what was **bumped off shipments**: per open SO order line, what's still open minus
-what made it onto open shipments (`dispatch_transfer_preview`). That catches short lines and
-lines Acumatica left off entirely; orders with no shipment at all count where 71 couldn't cover them.
+See `docs/transfer-cycle.md` for the daily cycle. Lists (`transfers.html`, coordinator role) are built from
+**open sales orders**, not shipments (`dispatch_transfer_preview`):
 
-- Each list covers shipments created since the previous list's cut-off (first one: last 24 h).
-  Sections: **new this run** and **still short from earlier**.
-- Suggested = bumped + extra %. Ashenheim's stock isn't used: Ashenheim decides what it can send.
-- **Build** saves a numbered draft (`transfer_lists` / `transfer_lines`); one draft at a time.
-  **Mark sent** freezes it. Items on a list sent in the last 24 h show as in transit; after that,
-  anything still short returns, so items Ashenheim never sent don't drop off.
-- No receiving step yet: later the portal will read completed Transfer Orders from Acumatica.
+- Orders created in the window (default last 24 h, selectable) with status Open / Back Order; items summed,
+  less on hand at 71 = need. Suggested = need + extra %. Ashenheim decides what it can send.
+- Orders whose Ship On date is more than 48 h past the cut-off are left out unless "Include" is ticked, and are
+  always flagged (on the page and in the saved snapshot).
+- Pallets from `item_pallet_sizes`; containers estimated from pallets (pallets per container is a page setting, default 20).
+- Items can be added by hand (`dispatch_transfer_add_item`, or in the preview before Build).
+- **Build** saves a numbered draft (`transfer_lists` / `transfer_lines`) and a snapshot of the orders in the cycle
+  (`transfer_list_orders`). **Mark sent** freezes it; **Mark received at 71** (transfer up and released in Acumatica)
+  opens batching. Items on a sent, unreceived list show as in transit.
+- `batcher.html` reads `dispatch_transfer_cycle`: it shows the latest cycle, blocks Suggest/Add-to-load until the transfer is
+  received, and by default lists only shipments of the cycle's orders (others are tagged "not in cycle").
+- Not built yet: writing the Acumatica Transfer Order (TR) from a sent list, and reading received from Acumatica.
 
 ## Live line items
 

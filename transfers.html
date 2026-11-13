@@ -8,22 +8,22 @@
 <meta name="robots" content="noindex, nofollow">
 <title>Transfer Lists — Logistics Management System</title>
 <!--
-  Transfer lists, Ashenheim -> 71 Molynes (the DC). Built by the Internal
-  Logistics Coordinator, numbered TR-MMDD-NN, time-bound:
+  Transfer lists, Ashenheim -> 71 Molynes (the DC). Built by the Internal Logistics Coordinator at the 2pm
+  sales order cut-off, numbered TR-MMDD-NN. See docs/transfer-cycle.md.
 
-    Next list (preview)  what was bumped since the last list's cut-off ("new
-                         this run") plus older bumps still open ("still short
-                         from earlier"). Nothing is saved until Build.
-    Draft                saved and frozen at build time; quantities and ticks
-                         can still change. Only one draft at a time.
-    Sent                 marked sent to Ashenheim; read-only. Its items count as
-                         in transit for 24 hours; after that, anything still
-                         short comes back on the next list.
+    Next list (preview)  built from OPEN SALES ORDERS (no shipments): items on the open SOs created in the
+                         window (default last 24 hours, selectable), less what is on hand at 71. Orders whose
+                         Ship On date is beyond 48 hours are left out unless ticked, and are always flagged.
+                         Items that were never on the list can be added by hand. Nothing is saved until Build.
+    Draft                saved and frozen at build time (with the snapshot of the orders in the cycle);
+                         quantities, ticks and manual items can still change. Only one draft at a time.
+    Sent                 passed to Ashenheim; read-only. Items count as in transit until it is received.
+    Received             the transfer is up and released in Acumatica at 71. The late-night batcher can batch
+                         (batcher.html shows this list's orders and this status).
 
-  Bumped = per open order line, what's still open minus what made it onto open
-  shipments (dispatch_transfer_preview). Suggested = bumped + extra %; Ashenheim's
-  stock isn't used: Ashenheim decides what it can send. No receiving step yet: later the portal will read
-  completed Transfer Orders from Acumatica.
+  Pallets come from item_pallet_sizes; containers are estimated from pallets (pallets per container is a
+  setting, default 20). Later: the Acumatica Transfer Order (TR) is written from the sent list, and
+  received is read from the completed order.
 -->
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="common.css">
@@ -32,6 +32,11 @@
   .tctl { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
   .tctl label { display:flex; align-items:center; gap:6px; font-size:13px; color:var(--text-muted); font-weight:500; }
   .tctl input[type=number] { width:70px; font:inherit; font-size:13px; padding:5px 8px; border:1px solid var(--border2); border-radius:8px; }
+  .tctl select { font:inherit; font-size:13px; padding:5px 8px; border:1px solid var(--border2); border-radius:8px; background:var(--surface); }
+  .perc { width:56px; font:inherit; font-size:12px; padding:2px 6px; border:1px solid var(--border2); border-radius:6px; }
+  .addbox input[type=search] { font:inherit; font-size:13px; padding:7px 10px; border:1px solid var(--border2); border-radius:8px; }
+  .findres { display:flex; flex-direction:column; gap:4px; margin-top:8px; align-items:flex-start; }
+  .findrow { text-align:left; }
   .sec-h { font-size:13px; font-weight:700; color:var(--navy); margin:16px 2px 6px; display:flex; gap:8px; align-items:baseline; }
   .sec-h .muted { font-weight:400; }
   table.tlist { width:100%; border-collapse:collapse; font-size:13px; }
@@ -63,8 +68,17 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
 <script src="common.js"></script>
 <script>
-  const T = { lists: [], view: 'next', preview: [], lines: [], extra: 10, edits: new Map(), skip: new Set(), tick: new Set(), synced: null, busy: false };
-  try { const s = JSON.parse(localStorage.getItem('dispatch-transfer-opts') || '{}'); if (s.extra != null) T.extra = s.extra; } catch (e) {}
+  const WINDOWS = [[12, '12 hours'], [24, '24 hours'], [48, '48 hours'], [72, '3 days'], [168, '7 days']];
+  const HORIZON = 48;                      // hours: orders shipping later than this are "far dated"
+  const T = { lists: [], view: 'next', preview: [], lines: [], listOrders: [], win: null, hours: 24, includeFar: false, extra: 10, perContainer: 20,
+              edits: new Map(), skip: new Set(), tick: new Set(), manual: new Map(), synced: null, busy: false, find: { q: '', results: [], pick: null, searching: false, err: '' } };
+  try {
+    const s = JSON.parse(localStorage.getItem('dispatch-transfer-opts') || '{}');
+    if (s.extra != null) T.extra = s.extra;
+    if (s.hours != null) T.hours = s.hours;
+    if (s.perContainer > 0) T.perContainer = s.perContainer;
+  } catch (e) {}
+  const saveOpts = () => { try { localStorage.setItem('dispatch-transfer-opts', JSON.stringify({ extra: T.extra, hours: T.hours, perContainer: T.perContainer })); } catch (x) {} };
 
   async function loadAll() {
     const [lists, sync] = await Promise.all([
@@ -76,20 +90,45 @@
     T.synced = sync.data ? new Date(sync.data) : null;
     if (T.view !== 'next' && !T.lists.some(l => l.id === T.view)) T.view = 'next';
     if (T.view === 'next') {
-      const { data, error } = await sb.rpc('dispatch_transfer_preview', { p_env: D.env, p_extra_pct: T.extra });
+      const w = await sb.rpc('dispatch_transfer_window', { p_hours: T.hours, p_horizon_hours: HORIZON, p_include_far: T.includeFar });
+      if (w.error) throw w.error;
+      T.win = w.data;
+      const { data, error } = await sb.rpc('dispatch_transfer_preview', { p_env: D.env, p_extra_pct: T.extra, p_hours: T.hours,
+        p_include_far: T.includeFar, p_horizon_hours: HORIZON, p_to: T.win.to });
       if (error) throw error;
       T.preview = data || [];
     } else {
-      const { data, error } = await sb.from('transfer_lines').select('*').eq('list_id', T.view).order('bumped', { ascending: false });
-      if (error) throw error;
-      T.lines = data || [];
+      const [ln, od] = await Promise.all([
+        sb.from('transfer_lines').select('*').eq('list_id', T.view).order('bumped', { ascending: false }),
+        sb.from('transfer_list_orders').select('*').eq('list_id', T.view).order('order_nbr'),
+      ]);
+      if (ln.error) throw ln.error;
+      if (od.error) throw od.error;
+      T.lines = ln.data || [];
+      T.listOrders = od.data || [];
     }
   }
   const draft = () => T.lists.find(l => l.status === 'draft');
   const fmtTime = iso => iso ? new Date(iso).toLocaleString('en-GB', { weekday:'short', day:'numeric', month:'short', hour:'2-digit', minute:'2-digit' }) : '';
+  const fmtDay = d => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-GB', { weekday:'short', day:'numeric', month:'short' }) : '';
+  const r1 = n => (Math.round(n * 10) / 10).toLocaleString('en-US');
+  const winLabel = h => (WINDOWS.find(w => w[0] === h) || [h, h + ' hours'])[1];
+
+  // Pallets and containers for a set of {qty, pallet}.
+  function totals(rows) {
+    let cases = 0, pallets = 0, unsized = 0, unsizedCases = 0;
+    rows.forEach(r => {
+      cases += r.qty;
+      if (r.pallet > 1) pallets += r.qty / r.pallet; else if (r.qty > 0) { unsized++; unsizedCases += r.qty; }
+    });
+    return { items: rows.length, cases, pallets, unsized, unsizedCases, containers: pallets / T.perContainer };
+  }
+  const palletKpis = (t, label) => `
+    <div class="kpi"><div class="l">Pallets (est.)</div><div class="v">${r1(t.pallets)}</div><div class="s">${t.unsized ? `${plural(t.unsized, 'item')} (${fmt(t.unsizedCases)} cases) have no pallet size` : 'all items sized'}</div></div>
+    <div class="kpi"><div class="l">Containers (est.)</div><div class="v">${r1(t.containers)}</div><div class="s">at <input type="number" id="perc" class="perc" min="1" step="1" value="${T.perContainer}" aria-label="Pallets per container"> pallets each</div></div>`;
 
   // ------------------------------------------------------------------
-  // Preview: default ticks = not in transit and Ashenheim has some.
+  // Preview: default ticks = not in transit.
   function pTicked(r) {
     const k = r.inventory_id;
     if (T.skip.has(k)) return false;
@@ -97,46 +136,94 @@
     return !r.in_transit;
   }
   function pQty(r) { return T.edits.has(r.inventory_id) ? T.edits.get(r.inventory_id) : Number(r.suggested); }
+  const manualRows = () => [...T.manual.values()];
+  const previewSend = () => T.preview.filter(pTicked).map(r => ({ qty: pQty(r), pallet: Number(r.cases_per_pallet) || 0 }))
+    .concat(manualRows().map(m => ({ qty: m.qty, pallet: Number(m.cases_per_pallet) || 0 })));
 
   function render() {
     const d = draft();
     const chips = `<div class="lists">
       <button class="chip ${T.view === 'next' ? 'on' : ''}" data-view="next">Next list</button>
-      ${T.lists.map(l => `<button class="chip ${T.view === l.id ? 'on' : ''}" data-view="${l.id}">${esc(l.list_nbr)} · ${l.status === 'draft' ? 'draft' : 'sent'}</button>`).join('')}
+      ${T.lists.map(l => `<button class="chip ${T.view === l.id ? 'on' : ''}" data-view="${l.id}">${esc(l.list_nbr)} · ${esc(l.status)}</button>`).join('')}
     </div>`;
     document.getElementById('main').innerHTML = chips + (T.view === 'next' ? nextView(d) : listView(T.lists.find(l => l.id === T.view)));
+  }
+
+  function farBox() {
+    const w = T.win || {};
+    if (!w.far_orders) return '';
+    const list = (w.far_list || []).slice(0, 12).map(o => `${esc(o.order_nbr)} ${esc(o.customer || '')} (ships ${esc(fmtDay(o.ship_on))})`).join(' · ');
+    const more = w.far_list && w.far_list.length > 12 ? ` · +${w.far_list.length - 12} more` : '';
+    return T.includeFar
+      ? `<div class="warnbox bad noprint"><b>This list includes ${plural(w.far_orders, 'order')} shipping more than ${HORIZON} hours out.</b> Their items are counted in the totals below. ${list}${more}</div>`
+      : `<div class="warnbox noprint"><b>${plural(w.far_orders, 'order')} ship more than ${HORIZON} hours out and are left off this list.</b> ${list}${more}</div>`;
   }
 
   function nextView(d) {
     if (d) return `<div class="card"><div class="empty">Draft <b>${esc(d.list_nbr)}</b> is still open. Mark it sent to Ashenheim (or delete it) before building the next list.
       <div style="margin-top:10px"><button class="btn primary small" data-view="${d.id}">Open ${esc(d.list_nbr)}</button></div></div></div>`;
     const rows = T.preview;
-    const from = rows[0] ? rows[0].cutoff_from : null;
-    const last = T.lists[0];
-    const send = rows.filter(pTicked);
+    const w = T.win || {};
+    const send = previewSend();
+    const t = totals(send);
     const mins = T.synced ? Math.round((Date.now() - T.synced.getTime()) / 60000) : null;
     return `
       <div class="tctl">
-        <span><b>Covers</b> shipments created since ${from ? esc(fmtTime(from)) : '—'}${last ? ` (end of ${esc(last.list_nbr)})` : ' (last 24 hours)'}</span>
+        <label>Orders created in the last <select id="hours">${WINDOWS.map(x => `<option value="${x[0]}" ${x[0] === T.hours ? 'selected' : ''}>${x[1]}</option>`).join('')}</select></label>
+        <label><input type="checkbox" id="far" ${T.includeFar ? 'checked' : ''}> Include orders shipping beyond ${HORIZON} h</label>
         <label>Extra <input type="number" id="extra" min="0" max="100" step="5" value="${T.extra}">%</label>
-        <span class="sync">${mins == null ? '' : `Orders and stock as of ${mins < 1 ? 'just now' : mins + ' min ago'}`}</span>
         <span class="spacer"></span>
         <button class="btn small" data-act="refresh">Refresh</button>
-        <button class="btn primary" data-act="build" ${send.length ? '' : 'disabled'}>Build transfer list</button>
+        <button class="btn primary" data-act="build" ${t.items ? '' : 'disabled'}>Build transfer list</button>
       </div>
-      ${D.env === 'live' ? '<div class="warnbox info noprint">Live: until the live item sync is running, every open order line counts as unshipped, so this list is much too long.</div>' : ''}
+      <div class="tctl"><span><b>Covers</b> ${plural(w.orders || 0, 'open order')} created ${esc(fmtTime(w.from))} → ${esc(fmtTime(w.to))}</span>
+        <span class="sync">${mins == null ? '' : `Orders and stock as of ${mins < 1 ? 'just now' : mins + ' min ago'}`}</span></div>
+      ${farBox()}
+      ${T.hours > 24 ? `<div class="warnbox info noprint">The window is ${winLabel(T.hours)}, wider than the usual 24 hours.</div>` : ''}
       <div class="kpis">
-        <div class="kpi"><div class="l">New this run</div><div class="v">${rows.filter(r => r.section === 'new').length}</div><div class="s">items bumped since the cut-off</div></div>
-        <div class="kpi"><div class="l">Still short from earlier</div><div class="v">${rows.filter(r => r.section === 'earlier').length}</div><div class="s">items</div></div>
-        <div class="kpi"><div class="l">Ticked to send</div><div class="v">${send.length}</div><div class="s">${fmt(send.reduce((s, r) => s + pQty(r), 0))} cases</div></div>
-        <div class="kpi"><div class="l">In transit</div><div class="v">${rows.filter(r => r.in_transit).length}</div><div class="s">on a list sent in the last 24 h</div></div>
+        <div class="kpi"><div class="l">Items to send</div><div class="v">${t.items}</div><div class="s">${fmt(t.cases)} cases · ${rows.filter(r => r.in_transit).length} in transit</div></div>
+        ${palletKpis(t)}
+        <div class="kpi"><div class="l">Orders covered</div><div class="v">${(w.orders || 0) - (T.includeFar ? 0 : (w.far_orders || 0))}</div><div class="s">${w.far_orders ? (T.includeFar ? `incl. ${w.far_orders} beyond ${HORIZON} h` : `${w.far_orders} beyond ${HORIZON} h left off`) : `none beyond ${HORIZON} h`}</div></div>
       </div>
-      ${section('new', 'New this run', 'bumped off shipments created since the cut-off', rows.filter(r => r.section === 'new'), true)}
-      ${section('earlier', 'Still short from earlier', 'older bumps still open, and orders that couldn\'t ship at all', rows.filter(r => r.section === 'earlier'), true)}
-      <p class="muted" style="margin-top:10px">Suggested = bumped + ${T.extra}% extra. Ashenheim decides what it can send. Items on a list sent in the last 24 hours are in transit and left unticked.</p>`;
+      ${manualHtml(rows)}
+      ${section('Needed for open orders', `demand less stock at 71, + ${T.extra}% extra`, rows, true)}
+      ${addPanel()}
+      <p class="muted" style="margin-top:10px">Need = open qty on the orders less what is on hand at 71. Suggested = need + ${T.extra}% extra. Ashenheim decides what it can send. Items on a list sent but not yet received are in transit and left unticked.</p>`;
   }
 
-  function section(key, title, sub, rows, preview) {
+  function manualHtml() {
+    const rows = manualRows();
+    if (!rows.length) return '';
+    return `<div class="sec-h">Added by hand <span class="muted">${plural(rows.length, 'item')} · not on the computed list</span></div>
+      <div class="card"><table class="tlist"><thead><tr><th>Item</th><th>Description</th><th class="r hide-m">On hand 71</th><th class="r">Pallets</th><th class="r">Send</th><th class="noprint"></th></tr></thead><tbody>
+      ${rows.map(m => `<tr data-manual="${esc(m.inventory_id)}"><td class="num">${esc(m.inventory_id)}</td><td>${esc(m.description || '')}</td>
+        <td class="r num hide-m">${fmt(m.on_hand_71)}</td><td class="r num">${Number(m.cases_per_pallet) > 1 ? r1(m.qty / m.cases_per_pallet) : '—'}</td>
+        <td class="r"><input class="q" type="number" min="1" step="1" data-mqty value="${m.qty}" aria-label="Cases to send for ${esc(m.inventory_id)}"></td>
+        <td class="noprint"><button class="btn small" data-act="mremove" data-item="${esc(m.inventory_id)}">Remove</button></td></tr>`).join('')}
+      </tbody></table></div>`;
+  }
+
+  function addPanel(listId) {
+    const f = T.find;
+    return `<div class="sec-h noprint">Add an item that isn't on the list</div>
+      <div class="card noprint addbox">
+        <div class="tctl" style="margin:0"><input type="search" id="find" placeholder="Search by item number or name" value="${esc(f.q)}" autocomplete="off" style="flex:1;min-width:200px">
+          ${f.pick ? `<span><b>${esc(f.pick.inventory_id)}</b> ${esc(f.pick.description || '')}</span>
+            <label>Cases <input type="number" id="addqty" min="1" step="1" value="${f.pick.qty || ''}" style="width:80px"></label>
+            <button class="btn primary small" data-act="addgo" ${listId ? `data-list="${listId}"` : ''}>Add</button>
+            <button class="btn small" data-act="addcancel">Cancel</button>` : ''}</div>
+        <div id="findres" class="findres">${findResults()}</div>
+      </div>`;
+  }
+  function findResults() {
+    const f = T.find;
+    if (f.err) return `<div class="muted">${esc(f.err)}</div>`;
+    if (f.searching) return `<div class="muted">Searching…</div>`;
+    if (f.pick || !f.results.length) return f.q.trim().length >= 2 && !f.pick && !f.results.length ? '<div class="muted">No matching items</div>' : '';
+    return f.results.map(r => `<button class="btn small findrow" data-act="findpick" data-item="${esc(r.inventory_id)}">${esc(r.inventory_id)} · ${esc(r.description || '')}</button>`).join('');
+  }
+
+  function section(title, sub, rows, preview) {
     if (!rows.length) return `<div class="sec-h">${title} <span class="muted">none</span></div>`;
     return `<div class="sec-h">${title} <span class="muted">${plural(rows.length, 'item')} · ${sub}</span></div>
       <div class="card">${table(rows, preview)}</div>`;
@@ -144,20 +231,24 @@
 
   function table(rows, preview, editable) {
     return `<table class="tlist"><thead><tr><th class="noprint"></th><th>Item</th><th>Description</th>
-      <th class="r">Orders</th><th class="r">Bumped</th><th class="r hide-m">On hand 71</th><th class="r">Send</th></tr></thead>
+      <th class="r">Orders</th><th class="r hide-m">Demand</th><th class="r hide-m">On hand 71</th><th class="r">Need</th><th class="r">Pallets</th><th class="r">Send</th></tr></thead>
       <tbody>${rows.map(r => {
         const ticked = preview ? pTicked(r) : r.included;
         const q = preview ? pQty(r) : Number(r.send_qty);
         const canEdit = preview || editable;
+        const pal = Number(r.cases_per_pallet) > 1 ? r1(q / Number(r.cases_per_pallet)) : '—';
         return `<tr class="${ticked ? '' : 'skip'}" data-item="${esc(r.inventory_id)}">
           <td class="noprint"><input type="checkbox" data-send ${ticked ? 'checked' : ''} ${canEdit ? '' : 'disabled'} aria-label="Send ${esc(r.inventory_id)}"></td>
           <td class="num">${esc(r.inventory_id)}</td>
           <td>${esc(r.description || '')}
-            ${preview && r.in_transit ? ` <span class="tag" title="On a list sent in the last 24 hours">in transit · ${esc(r.in_transit)}</span>` : ''}
-            ${r.no_shipment ? ` <span class="tag old" title="Orders that got no shipment at all">${r.no_shipment} no shipment</span>` : ''}</td>
+            ${preview && r.in_transit ? ` <span class="tag" title="Sent, not yet received at 71">in transit · ${esc(r.in_transit)}</span>` : ''}
+            ${r.section === 'manual' ? ' <span class="tag">added by hand</span>' : ''}
+            ${Number(r.far_orders) > 0 ? ` <span class="tag old" title="Includes orders shipping more than ${HORIZON} hours out">${r.far_orders} far-dated</span>` : ''}</td>
           <td class="r num">${r.orders ?? ''}</td>
-          <td class="r num"><b>${fmt(r.bumped)}</b></td>
+          <td class="r num hide-m">${r.demand == null ? '' : fmt(r.demand)}</td>
           <td class="r num hide-m">${fmt(r.on_hand_71)}</td>
+          <td class="r num"><b>${fmt(r.bumped)}</b></td>
+          <td class="r num">${pal}</td>
           <td class="r">${canEdit ? `<input class="q ${(preview && T.edits.has(r.inventory_id)) || (!preview && Number(r.send_qty) !== Number(r.suggested)) ? 'edited' : ''}" type="number" min="0" step="1" data-qty value="${q}" aria-label="Cases to send for ${esc(r.inventory_id)}">` : `<b>${fmt(q)}</b>`}</td>
         </tr>`;
       }).join('')}</tbody></table>`;
@@ -166,39 +257,49 @@
   function listView(l) {
     const editable = l.status === 'draft';
     const send = T.lines.filter(x => x.included && Number(x.send_qty) > 0);
+    const t = totals(send.map(x => ({ qty: Number(x.send_qty), pallet: Number(x.cases_per_pallet) || 0 })));
+    const pill = l.status === 'draft' ? '<span class="pill warn">Draft</span>' : l.status === 'sent' ? '<span class="pill warn">Sent to Ashenheim · not yet received</span>' : '<span class="pill ok">Received at 71</span>';
+    const counted = T.listOrders.filter(o => o.counted), left = T.listOrders.filter(o => !o.counted);
+    const farIn = counted.filter(o => o.far_dated).length;
     return `
       <div class="print-head"><h2>Transfer request ${esc(l.list_nbr)} · Ashenheim → 71 Molynes</h2>
-        <div class="muted">${esc(fmtTime(l.built_at))} · ${esc(l.built_name || '')} · ${plural(send.length, 'item')}, ${fmt(send.reduce((s, x) => s + Number(x.send_qty), 0))} cases${l.note ? ' · ' + esc(l.note) : ''}</div></div>
+        <div class="muted">${esc(fmtTime(l.built_at))} · ${esc(l.built_name || '')} · ${plural(send.length, 'item')}, ${fmt(t.cases)} cases, ~${r1(t.pallets)} pallets${l.note ? ' · ' + esc(l.note) : ''}</div></div>
       <div class="listhead">
-        <div class="lhead"><div><span class="lnbr">${esc(l.list_nbr)}</span> ${editable ? '<span class="pill warn">Draft</span>' : '<span class="pill ok">Sent to Ashenheim</span>'}</div>
+        <div class="lhead"><div><span class="lnbr">${esc(l.list_nbr)}</span> ${pill}</div>
           <div class="lactions noprint" style="margin:0">
             ${editable ? `<button class="btn small danger" data-act="delete">Delete draft</button><button class="btn primary small" data-act="send">Mark sent to Ashenheim</button>` : ''}
+            ${l.status === 'sent' ? `<button class="btn primary small" data-act="receive">Mark received at 71</button>` : ''}
             <button class="btn small" data-act="csv">Export CSV</button><button class="btn small" data-act="print">Print</button>
           </div></div>
-        <div class="lstats"><span>Covers ${esc(fmtTime(l.cutoff_from))} → ${esc(fmtTime(l.cutoff_to))}</span><span>+${fmt(l.extra_pct)}% extra</span>
-          <span>built by ${esc(l.built_name || '')}, ${esc(fmtTime(l.built_at))}</span>${l.sent_at ? `<span>sent by ${esc(l.sent_name || '')}, ${esc(fmtTime(l.sent_at))}</span>` : ''}</div>
+        <div class="lstats"><span>Orders created ${esc(fmtTime(l.cutoff_from))} → ${esc(fmtTime(l.cutoff_to))} (${winLabel(l.window_hours)})</span><span>+${fmt(l.extra_pct)}% extra</span>
+          <span>built by ${esc(l.built_name || '')}, ${esc(fmtTime(l.built_at))}</span>${l.sent_at ? `<span>sent by ${esc(l.sent_name || '')}, ${esc(fmtTime(l.sent_at))}</span>` : ''}${l.received_at ? `<span>received by ${esc(l.received_name || '')}, ${esc(fmtTime(l.received_at))}</span>` : ''}</div>
         ${l.note ? `<div class="muted">${esc(l.note)}</div>` : ''}
       </div>
+      ${farIn ? `<div class="warnbox bad noprint"><b>This list includes ${plural(farIn, 'order')} shipping more than ${l.horizon_hours} hours out.</b></div>` : ''}
       <div class="kpis">
-        <div class="kpi"><div class="l">Items to send</div><div class="v">${send.length}</div><div class="s">${fmt(send.reduce((s, x) => s + Number(x.send_qty), 0))} cases</div></div>
-        <div class="kpi"><div class="l">New this run</div><div class="v">${T.lines.filter(x => x.section === 'new').length}</div><div class="s">items</div></div>
-        <div class="kpi"><div class="l">From earlier</div><div class="v">${T.lines.filter(x => x.section === 'earlier').length}</div><div class="s">items</div></div>
-        <div class="kpi"><div class="l">Left off</div><div class="v">${T.lines.filter(x => !x.included).length}</div><div class="s">unticked items</div></div>
+        <div class="kpi"><div class="l">Items to send</div><div class="v">${send.length}</div><div class="s">${fmt(t.cases)} cases</div></div>
+        ${palletKpis(t)}
+        <div class="kpi"><div class="l">Orders in this cycle</div><div class="v">${counted.length}</div><div class="s">${left.length ? `${left.length} beyond ${l.horizon_hours} h left off` : 'snapshot at the cut-off'}</div></div>
       </div>
-      ${['new', 'earlier'].map(k => {
-        const rows = T.lines.filter(x => x.section === k);
-        return rows.length ? `<div class="sec-h">${k === 'new' ? 'New this run' : 'Still short from earlier'} <span class="muted">${plural(rows.length, 'item')}</span></div>
-          <div class="card">${table(rows, false, editable)}</div>` : '';
-      }).join('')}`;
+      ${T.lines.length ? `<div class="sec-h">Items <span class="muted">${plural(T.lines.length, 'line')}${T.lines.filter(x => !x.included).length ? ` · ${T.lines.filter(x => !x.included).length} left off` : ''}</span></div>
+        <div class="card">${table(T.lines, false, editable)}</div>` : '<div class="card"><div class="empty">No items on this list.</div></div>'}
+      ${editable ? addPanel(l.id) : ''}
+      <details class="noprint" style="margin-top:14px"><summary class="sec-h" style="cursor:pointer">Orders in this cycle <span class="muted">${counted.length} counted${left.length ? ` · ${left.length} left off (far dated)` : ''}</span></summary>
+        <div class="card"><table class="tlist"><thead><tr><th>Order</th><th>Customer</th><th>Created</th><th>Ship on</th><th></th></tr></thead><tbody>
+          ${T.listOrders.map(o => `<tr class="${o.counted ? '' : 'skip'}"><td class="num">${esc(o.order_nbr)}</td><td>${esc(o.customer_name || '')}</td><td>${esc(fmtTime(o.created_on))}</td>
+            <td>${esc(fmtDay(o.sched_shipment))}</td><td>${o.far_dated ? `<span class="tag old">beyond ${l.horizon_hours} h${o.counted ? ' · included' : ' · left off'}</span>` : ''}</td></tr>`).join('')}
+        </tbody></table></div></details>`;
   }
 
   // ------------------------------------------------------------------
   function csv(l) {
-    const head = ['List', 'Item', 'Description', 'Section', 'Orders', 'Bumped', 'On hand 71', 'Send'];
+    const head = ['List', 'Item', 'Description', 'Section', 'Orders', 'Demand', 'On hand 71', 'Need', 'Cases per pallet', 'Send', 'Pallets'];
     const q = s => `"${String(s == null ? '' : s).replace(/"/g, '""')}"`;
     const rows = T.lines.filter(x => x.included && Number(x.send_qty) > 0);
-    const lines = [head.map(q).join(',')].concat(rows.map(x =>
-      [l.list_nbr, x.inventory_id, x.description, x.section, x.orders, x.bumped, x.on_hand_71, x.send_qty].map(q).join(',')));
+    const lines = [head.map(q).join(',')].concat(rows.map(x => {
+      const cp = Number(x.cases_per_pallet) || 0;
+      return [l.list_nbr, x.inventory_id, x.description, x.section, x.orders, x.demand, x.on_hand_71, x.bumped, cp > 1 ? cp : '', x.send_qty, cp > 1 ? r1(Number(x.send_qty) / cp) : ''].map(q).join(',');
+    }));
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([lines.join('\r\n')], { type: 'text/csv' }));
     a.download = `${l.list_nbr}-ashenheim-to-71.csv`;
@@ -214,45 +315,105 @@
     finally { T.busy = false; await refresh(); }
   }
 
+  let findTimer;
+  function paintFind() { const el = document.getElementById('findres'); if (el) el.innerHTML = findResults(); }
+  async function runFind() {
+    const asked = T.find.q;
+    if (asked.trim().length < 2) { T.find.results = []; T.find.searching = false; T.find.err = ''; paintFind(); return; }
+    try {
+      const r = await sb.rpc('sub_item_search', { p_q: asked });
+      if (asked !== T.find.q) return;
+      if (r.error) throw r.error;
+      T.find.results = r.data || []; T.find.err = '';
+    } catch (e) { T.find.results = []; T.find.err = errMsg(e); }
+    T.find.searching = false; paintFind();
+  }
+
   document.getElementById('app').addEventListener('click', e => {
     const v = e.target.closest('[data-view]');
     if (v) { T.view = v.dataset.view === 'next' ? 'next' : Number(v.dataset.view); refresh(); return; }
     const b = e.target.closest('[data-act]');
     if (!b) return;
     const l = T.lists.find(x => x.id === T.view);
-    if (b.dataset.act === 'refresh') { refresh(); return; }
-    if (b.dataset.act === 'print') { window.print(); return; }
-    if (b.dataset.act === 'csv') { csv(l); return; }
-    if (b.dataset.act === 'build') {
-      const cut = T.preview[0] && T.preview[0].cutoff_to;
-      const lines = T.preview.map(r => ({ inventory_id: r.inventory_id, send_qty: pQty(r), included: pTicked(r) }));
-      const n = lines.filter(x => x.included).length;
-      if (!confirm(`Build a transfer list with ${plural(n, 'item')}?\n\nIt covers shipments up to now; the next list starts from here.`)) return;
+    const a = b.dataset.act;
+    if (a === 'refresh') { refresh(); return; }
+    if (a === 'print') { window.print(); return; }
+    if (a === 'csv') { csv(l); return; }
+    if (a === 'findpick') {
+      const r = T.find.results.find(x => x.inventory_id === b.dataset.item);
+      T.find.pick = { inventory_id: r.inventory_id, description: r.description, qty: '' }; T.find.results = [];
+      render();
+      const q = document.getElementById('addqty'); if (q) q.focus();
+      return;
+    }
+    if (a === 'addcancel') { T.find = { q: '', results: [], pick: null, searching: false, err: '' }; render(); return; }
+    if (a === 'addgo') {
+      const qty = Math.round(Number(document.getElementById('addqty').value) || 0);
+      if (qty < 1) { toast('Enter the cases to send', true); return; }
+      const id = T.find.pick.inventory_id;
+      T.find = { q: '', results: [], pick: null, searching: false, err: '' };
+      if (T.view === 'next') {
+        act(async () => {
+          const { data, error } = await sb.rpc('dispatch_transfer_item_info', { p_inventory_id: id });
+          if (error) throw error;
+          const i = (data || [])[0];
+          if (!i) throw new Error('Item not found');
+          if (T.preview.some(r => r.inventory_id === id)) { T.edits.set(id, qty); T.skip.delete(id); T.tick.add(id); toast('That item is already on the list; quantity set'); }
+          else T.manual.set(id, { ...i, qty });
+        });
+      } else {
+        act(async () => { await rpc('dispatch_transfer_add_item', { p_list_id: T.view, p_inventory_id: id, p_qty: qty }); toast('Item added'); });
+      }
+      return;
+    }
+    if (a === 'mremove') { T.manual.delete(b.dataset.item); render(); return; }
+    if (a === 'build') {
+      const lines = T.preview.map(r => ({ inventory_id: r.inventory_id, send_qty: pQty(r), included: pTicked(r) }))
+        .concat(manualRows().map(m => ({ inventory_id: m.inventory_id, send_qty: m.qty, included: true, manual: true })));
+      const t = totals(previewSend());
+      if (!confirm(`Build a transfer list with ${plural(t.items, 'item')} (${fmt(t.cases)} cases, about ${r1(t.pallets)} pallets / ${r1(t.containers)} containers)?\n\n`
+        + `It covers ${plural((T.win.orders || 0) - (T.includeFar ? 0 : (T.win.far_orders || 0)), 'order')} created up to ${fmtTime(T.win.to)}. Orders that come in after that belong to the next cycle.`
+        + (T.includeFar && T.win.far_orders ? `\n\nIt INCLUDES ${plural(T.win.far_orders, 'order')} shipping more than ${HORIZON} hours out.` : ''))) return;
       act(async () => {
-        const id = await rpc('dispatch_transfer_build', { p_env: D.env, p_extra_pct: T.extra, p_cutoff_to: cut, p_lines: lines });
-        T.edits.clear(); T.skip.clear(); T.tick.clear();
+        const id = await rpc('dispatch_transfer_build', { p_env: D.env, p_extra_pct: T.extra, p_cutoff_to: T.win.to, p_lines: lines,
+          p_hours: T.hours, p_include_far: T.includeFar, p_horizon_hours: HORIZON });
+        T.edits.clear(); T.skip.clear(); T.tick.clear(); T.manual.clear();
         T.view = id;
         toast('Transfer list built');
       });
       return;
     }
-    if (b.dataset.act === 'send') {
+    if (a === 'send') {
       if (!confirm(`Mark ${l.list_nbr} as sent to Ashenheim? It can't be changed after that.`)) return;
       act(() => rpc('dispatch_transfer_action', { p_list_id: l.id, p_action: 'send' }));
       return;
     }
-    if (b.dataset.act === 'delete') {
+    if (a === 'receive') {
+      if (!confirm(`Confirm ${l.list_nbr} is up at 71 and released in Acumatica?\n\nThe late-night batcher can start batching after this.`)) return;
+      act(() => rpc('dispatch_transfer_action', { p_list_id: l.id, p_action: 'receive' }));
+      return;
+    }
+    if (a === 'delete') {
       if (!confirm(`Delete draft ${l.list_nbr}? Its items go back into the next list.`)) return;
       act(async () => { await rpc('dispatch_transfer_action', { p_list_id: l.id, p_action: 'delete' }); T.view = 'next'; });
     }
   });
 
+  document.getElementById('app').addEventListener('input', e => {
+    if (e.target.id !== 'find') return;
+    T.find.q = e.target.value; T.find.pick = null; T.find.searching = T.find.q.trim().length >= 2;
+    paintFind(); clearTimeout(findTimer); findTimer = setTimeout(runFind, 200);
+  });
+
   document.getElementById('app').addEventListener('change', e => {
     const t = e.target;
-    if (t.id === 'extra') {
-      T.extra = Math.max(0, Number(t.value) || 0);
-      try { localStorage.setItem('dispatch-transfer-opts', JSON.stringify({ extra: T.extra })); } catch (x) {}
-      T.edits.clear(); refresh(); return;
+    if (t.id === 'extra') { T.extra = Math.max(0, Number(t.value) || 0); saveOpts(); T.edits.clear(); refresh(); return; }
+    if (t.id === 'hours') { T.hours = Number(t.value) || 24; saveOpts(); T.edits.clear(); T.skip.clear(); T.tick.clear(); refresh(); return; }
+    if (t.id === 'far') { T.includeFar = t.checked; T.edits.clear(); T.skip.clear(); T.tick.clear(); refresh(); return; }
+    if (t.id === 'perc') { T.perContainer = Math.max(1, Number(t.value) || 20); saveOpts(); render(); return; }
+    if (t.dataset.mqty !== undefined) {
+      const m = T.manual.get(t.closest('tr').dataset.manual);
+      m.qty = Math.max(1, Math.round(Number(t.value) || 1)); render(); return;
     }
     const tr = t.closest('tr[data-item]');
     if (!tr) return;
@@ -283,10 +444,10 @@
 
   startPage({
     page: 'transfers', role: 'batcher', title: 'Transfer lists',
-    onEnvChange: () => { T.view = 'next'; T.edits.clear(); T.skip.clear(); T.tick.clear(); refresh(); },
+    onEnvChange: () => { T.view = 'next'; T.edits.clear(); T.skip.clear(); T.tick.clear(); T.manual.clear(); refresh(); },
     onReady: () => {
       refresh();
-      setInterval(() => { if (!editing() && !T.busy && T.view === 'next' && !T.edits.size) refresh(); }, 5 * 60 * 1000);
+      setInterval(() => { if (!editing() && !T.busy && T.view === 'next' && !T.edits.size && !T.manual.size && !T.find.pick) refresh(); }, 5 * 60 * 1000);
     },
   });
 </script>
