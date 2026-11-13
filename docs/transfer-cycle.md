@@ -13,7 +13,7 @@ picked. Cutoffs are rigid; reps and merchandisers submit orders before 2pm.
   ship dates) so it isn't overstated.
 - List is vetted and passed to the off-site warehouse (Ashenheim).
 - 2pm to 5pm: Ashenheim picks, packs and delivers the transfer to 71. Possibly about 2
-  containers, roughly 40 pallets.
+  containers, roughly 40 pallets (18 pallets per container).
 - 5pm onwards: 71 DC warehouse is cleaned and packed up; transfer boxes are offloaded and
   racked as best as possible (late shift crew).
 - **Late night (new):** batching for in-town and near-country orders, so pick lists are
@@ -53,7 +53,7 @@ cutoff, because that would use up transfer stock meant for the cutoff set.
 
 ## Built (2026-11-13)
 
-- Transfers page builds from open SOs (24 h window selector, 48 h ship-date horizon with include toggle and flags),
+- Transfers page builds from open SOs (window = since the previous list's cut-off, so Monday covers the weekend; fixed-hours selector, 48 h ship-date horizon with include toggle and flags),
   pallets and container estimate, manual add, Sent -> Received status.
 - Cycle snapshot (`transfer_list_orders`) and the batcher banner / gate / "not in cycle" tags in `batcher.html`.
 - Next: write the Acumatica Transfer Order (TR) from the sent list; read received from Acumatica.

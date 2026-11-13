@@ -73,11 +73,11 @@ A load cut off mid-write is set to `partial` by the next drain so it can be retr
 See `docs/transfer-cycle.md` for the daily cycle. Lists (`transfers.html`, coordinator role) are built from
 **open sales orders**, not shipments (`dispatch_transfer_preview`):
 
-- Orders created in the window (default last 24 h, selectable) with status Open / Back Order; items summed,
+- Orders created since the previous list's cut-off (no earlier list: last 24 h; a fixed number of hours can be chosen) with status Open / Back Order; items summed,
   less on hand at 71 = need. Suggested = need + extra %. Ashenheim decides what it can send.
 - Orders whose Ship On date is more than 48 h past the cut-off are left out unless "Include" is ticked, and are
   always flagged (on the page and in the saved snapshot).
-- Pallets from `item_pallet_sizes`; containers estimated from pallets (pallets per container is a page setting, default 20).
+- Pallets from `item_pallet_sizes`; containers estimated from pallets (pallets per container is a page setting, default 18).
 - Items can be added by hand (`dispatch_transfer_add_item`, or in the preview before Build).
 - **Build** saves a numbered draft (`transfer_lists` / `transfer_lines`) and a snapshot of the orders in the cycle
   (`transfer_list_orders`). **Mark sent** freezes it; **Mark received at 71** (transfer up and released in Acumatica)

@@ -12,7 +12,7 @@
   sales order cut-off, numbered TR-MMDD-NN. See docs/transfer-cycle.md.
 
     Next list (preview)  built from OPEN SALES ORDERS (no shipments): items on the open SOs created in the
-                         window (default last 24 hours, selectable), less what is on hand at 71. Orders whose
+                         window (default: since the previous list's cut-off; or a fixed number of hours), less what is on hand at 71. Orders whose
                          Ship On date is beyond 48 hours are left out unless ticked, and are always flagged.
                          Items that were never on the list can be added by hand. Nothing is saved until Build.
     Draft                saved and frozen at build time (with the snapshot of the orders in the cycle);
@@ -22,7 +22,7 @@
                          (batcher.html shows this list's orders and this status).
 
   Pallets come from item_pallet_sizes; containers are estimated from pallets (pallets per container is a
-  setting, default 20). Later: the Acumatica Transfer Order (TR) is written from the sent list, and
+  setting, default 18). Later: the Acumatica Transfer Order (TR) is written from the sent list, and
   received is read from the completed order.
 -->
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -68,17 +68,17 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3" integrity="sha384-dl/4LkSyQ4uEucc48NM6VDZLAjLLq9yMzZ5JLXumBq7Ld33XBof73hseOqPhO89+" crossorigin="anonymous"></script>
 <script src="common.js"></script>
 <script>
-  const WINDOWS = [[12, '12 hours'], [24, '24 hours'], [48, '48 hours'], [72, '3 days'], [168, '7 days']];
+  const WINDOWS = [[0, 'since the last list'], [12, 'the last 12 hours'], [24, 'the last 24 hours'], [48, 'the last 48 hours'], [72, 'the last 3 days'], [168, 'the last 7 days']];
   const HORIZON = 48;                      // hours: orders shipping later than this are "far dated"
-  const T = { lists: [], view: 'next', preview: [], lines: [], listOrders: [], win: null, hours: 24, includeFar: false, extra: 10, perContainer: 20,
+  const T = { lists: [], view: 'next', preview: [], lines: [], listOrders: [], win: null, hours: 0, includeFar: false, extra: 10, perContainer: 18,
               edits: new Map(), skip: new Set(), tick: new Set(), manual: new Map(), synced: null, busy: false, find: { q: '', results: [], pick: null, searching: false, err: '' } };
   try {
-    const s = JSON.parse(localStorage.getItem('dispatch-transfer-opts') || '{}');
+    const s = JSON.parse(localStorage.getItem('dispatch-transfer-opts2') || '{}');
     if (s.extra != null) T.extra = s.extra;
     if (s.hours != null) T.hours = s.hours;
     if (s.perContainer > 0) T.perContainer = s.perContainer;
   } catch (e) {}
-  const saveOpts = () => { try { localStorage.setItem('dispatch-transfer-opts', JSON.stringify({ extra: T.extra, hours: T.hours, perContainer: T.perContainer })); } catch (x) {} };
+  const saveOpts = () => { try { localStorage.setItem('dispatch-transfer-opts2', JSON.stringify({ extra: T.extra, hours: T.hours, perContainer: T.perContainer })); } catch (x) {} };
 
   async function loadAll() {
     const [lists, sync] = await Promise.all([
@@ -90,10 +90,10 @@
     T.synced = sync.data ? new Date(sync.data) : null;
     if (T.view !== 'next' && !T.lists.some(l => l.id === T.view)) T.view = 'next';
     if (T.view === 'next') {
-      const w = await sb.rpc('dispatch_transfer_window', { p_hours: T.hours, p_horizon_hours: HORIZON, p_include_far: T.includeFar });
+      const w = await sb.rpc('dispatch_transfer_window', { p_hours: T.hours || null, p_horizon_hours: HORIZON, p_include_far: T.includeFar, p_env: D.env });
       if (w.error) throw w.error;
       T.win = w.data;
-      const { data, error } = await sb.rpc('dispatch_transfer_preview', { p_env: D.env, p_extra_pct: T.extra, p_hours: T.hours,
+      const { data, error } = await sb.rpc('dispatch_transfer_preview', { p_env: D.env, p_extra_pct: T.extra, p_hours: T.hours || null,
         p_include_far: T.includeFar, p_horizon_hours: HORIZON, p_to: T.win.to });
       if (error) throw error;
       T.preview = data || [];
@@ -112,7 +112,7 @@
   const fmtTime = iso => iso ? new Date(iso).toLocaleString('en-GB', { weekday:'short', day:'numeric', month:'short', hour:'2-digit', minute:'2-digit' }) : '';
   const fmtDay = d => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-GB', { weekday:'short', day:'numeric', month:'short' }) : '';
   const r1 = n => (Math.round(n * 10) / 10).toLocaleString('en-US');
-  const winLabel = h => (WINDOWS.find(w => w[0] === h) || [h, h + ' hours'])[1];
+  const winLabel = h => (WINDOWS.find(w => w[0] === h) || [h, 'the last ' + h + ' hours'])[1];
 
   // Pallets and containers for a set of {qty, pallet}.
   function totals(rows) {
@@ -169,17 +169,17 @@
     const mins = T.synced ? Math.round((Date.now() - T.synced.getTime()) / 60000) : null;
     return `
       <div class="tctl">
-        <label>Orders created in the last <select id="hours">${WINDOWS.map(x => `<option value="${x[0]}" ${x[0] === T.hours ? 'selected' : ''}>${x[1]}</option>`).join('')}</select></label>
+        <label>Orders created <select id="hours">${WINDOWS.map(x => `<option value="${x[0]}" ${x[0] === T.hours ? 'selected' : ''}>${x[1]}</option>`).join('')}</select></label>
         <label><input type="checkbox" id="far" ${T.includeFar ? 'checked' : ''}> Include orders shipping beyond ${HORIZON} h</label>
         <label>Extra <input type="number" id="extra" min="0" max="100" step="5" value="${T.extra}">%</label>
         <span class="spacer"></span>
         <button class="btn small" data-act="refresh">Refresh</button>
         <button class="btn primary" data-act="build" ${t.items ? '' : 'disabled'}>Build transfer list</button>
       </div>
-      <div class="tctl"><span><b>Covers</b> ${plural(w.orders || 0, 'open order')} created ${esc(fmtTime(w.from))} → ${esc(fmtTime(w.to))}</span>
+      <div class="tctl"><span><b>Covers</b> ${plural(w.orders || 0, 'open order')} created ${esc(fmtTime(w.from))} → ${esc(fmtTime(w.to))}${w.since ? ` (since the cut-off of ${esc(w.since)})` : T.hours ? '' : ' (no earlier list: last 24 hours)'}</span>
         <span class="sync">${mins == null ? '' : `Orders and stock as of ${mins < 1 ? 'just now' : mins + ' min ago'}`}</span></div>
       ${farBox()}
-      ${T.hours > 24 ? `<div class="warnbox info noprint">The window is ${winLabel(T.hours)}, wider than the usual 24 hours.</div>` : ''}
+      ${T.hours ? `<div class="warnbox info noprint">Fixed window: orders from ${winLabel(T.hours)}. Normally leave this on "since the last list" so no orders are missed or counted twice.</div>` : ''}
       <div class="kpis">
         <div class="kpi"><div class="l">Items to send</div><div class="v">${t.items}</div><div class="s">${fmt(t.cases)} cases · ${rows.filter(r => r.in_transit).length} in transit</div></div>
         ${palletKpis(t)}
@@ -271,7 +271,7 @@
             ${l.status === 'sent' ? `<button class="btn primary small" data-act="receive">Mark received at 71</button>` : ''}
             <button class="btn small" data-act="csv">Export CSV</button><button class="btn small" data-act="print">Print</button>
           </div></div>
-        <div class="lstats"><span>Orders created ${esc(fmtTime(l.cutoff_from))} → ${esc(fmtTime(l.cutoff_to))} (${winLabel(l.window_hours)})</span><span>+${fmt(l.extra_pct)}% extra</span>
+        <div class="lstats"><span>Orders created ${esc(fmtTime(l.cutoff_from))} → ${esc(fmtTime(l.cutoff_to))}</span><span>+${fmt(l.extra_pct)}% extra</span>
           <span>built by ${esc(l.built_name || '')}, ${esc(fmtTime(l.built_at))}</span>${l.sent_at ? `<span>sent by ${esc(l.sent_name || '')}, ${esc(fmtTime(l.sent_at))}</span>` : ''}${l.received_at ? `<span>received by ${esc(l.received_name || '')}, ${esc(fmtTime(l.received_at))}</span>` : ''}</div>
         ${l.note ? `<div class="muted">${esc(l.note)}</div>` : ''}
       </div>
@@ -376,7 +376,7 @@
         + (T.includeFar && T.win.far_orders ? `\n\nIt INCLUDES ${plural(T.win.far_orders, 'order')} shipping more than ${HORIZON} hours out.` : ''))) return;
       act(async () => {
         const id = await rpc('dispatch_transfer_build', { p_env: D.env, p_extra_pct: T.extra, p_cutoff_to: T.win.to, p_lines: lines,
-          p_hours: T.hours, p_include_far: T.includeFar, p_horizon_hours: HORIZON });
+          p_hours: T.hours || null, p_include_far: T.includeFar, p_horizon_hours: HORIZON });
         T.edits.clear(); T.skip.clear(); T.tick.clear(); T.manual.clear();
         T.view = id;
         toast('Transfer list built');
@@ -408,9 +408,9 @@
   document.getElementById('app').addEventListener('change', e => {
     const t = e.target;
     if (t.id === 'extra') { T.extra = Math.max(0, Number(t.value) || 0); saveOpts(); T.edits.clear(); refresh(); return; }
-    if (t.id === 'hours') { T.hours = Number(t.value) || 24; saveOpts(); T.edits.clear(); T.skip.clear(); T.tick.clear(); refresh(); return; }
+    if (t.id === 'hours') { T.hours = Number(t.value) || 0; saveOpts(); T.edits.clear(); T.skip.clear(); T.tick.clear(); refresh(); return; }
     if (t.id === 'far') { T.includeFar = t.checked; T.edits.clear(); T.skip.clear(); T.tick.clear(); refresh(); return; }
-    if (t.id === 'perc') { T.perContainer = Math.max(1, Number(t.value) || 20); saveOpts(); render(); return; }
+    if (t.id === 'perc') { T.perContainer = Math.max(1, Number(t.value) || 18); saveOpts(); render(); return; }
     if (t.dataset.mqty !== undefined) {
       const m = T.manual.get(t.closest('tr').dataset.manual);
       m.qty = Math.max(1, Math.round(Number(t.value) || 1)); render(); return;
