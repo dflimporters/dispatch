@@ -9,7 +9,7 @@
 <title>Transfer Lists — Logistics Management System</title>
 <!--
   Transfer lists, Ashenheim -> 71 Molynes (the DC). Built by the Internal Logistics Coordinator at the 2pm
-  sales order cut-off, numbered TR-MMDD-NN. See docs/transfer-cycle.md.
+  sales order cut-off, numbered TR-DDMM-NN. See docs/transfer-cycle.md.
 
     Next list (preview)  built from OPEN SALES ORDERS (no shipments): items on the open SOs created in the
                          window (default: since the previous list's cut-off; or a fixed number of hours), less what is on hand at 71. Orders whose
@@ -159,6 +159,18 @@
       : `<div class="warnbox noprint"><b>${plural(w.far_orders, 'order')} ship more than ${HORIZON} hours out and are left off this list.</b> ${list}${more}</div>`;
   }
 
+  function lateBox() {
+    const w = T.win || {};
+    if (!w.late_orders) return '';
+    const list = (w.late_list || []).slice(0, 10).map(o => `${esc(o.order_nbr)} ${esc(o.customer || '')} (created ${esc(fmtTime(o.created_on))})`).join(' · ');
+    return `<div class="warnbox info noprint"><b>${plural(w.late_orders, 'late order')} included.</b> Created before the last cut-off but not on any earlier list (they synced after it was built). ${list}</div>`;
+  }
+  const staleMins = () => T.synced ? Math.round((Date.now() - T.synced.getTime()) / 60000) : null;
+  function staleBox() {
+    const m = staleMins();
+    return m != null && m > 15 ? `<div class="warnbox bad noprint"><b>Orders and stock are ${m} minutes old.</b> Refresh shipments on the Coordinator page (or wait for the next sync) before building, or orders just entered may be missing.</div>` : '';
+  }
+
   function nextView(d) {
     if (d) return `<div class="card"><div class="empty">Draft <b>${esc(d.list_nbr)}</b> is still open. Mark it sent to Ashenheim (or delete it) before building the next list.
       <div style="margin-top:10px"><button class="btn primary small" data-view="${d.id}">Open ${esc(d.list_nbr)}</button></div></div></div>`;
@@ -179,6 +191,8 @@
       <div class="tctl"><span><b>Covers</b> ${plural(w.orders || 0, 'open order')} created ${esc(fmtTime(w.from))} → ${esc(fmtTime(w.to))}${w.since ? ` (since the cut-off of ${esc(w.since)})` : T.hours ? '' : ' (no earlier list: last 24 hours)'}</span>
         <span class="sync">${mins == null ? '' : `Orders and stock as of ${mins < 1 ? 'just now' : mins + ' min ago'}`}</span></div>
       ${farBox()}
+      ${lateBox()}
+      ${staleBox()}
       ${T.hours ? `<div class="warnbox info noprint">Fixed window: orders from ${winLabel(T.hours)}. Normally leave this on "since the last list" so no orders are missed or counted twice.</div>` : ''}
       <div class="kpis">
         <div class="kpi"><div class="l">Items to send</div><div class="v">${t.items}</div><div class="s">${fmt(t.cases)} cases · ${rows.filter(r => r.in_transit).length} in transit</div></div>
@@ -275,6 +289,7 @@
           <span>built by ${esc(l.built_name || '')}, ${esc(fmtTime(l.built_at))}</span>${l.sent_at ? `<span>sent by ${esc(l.sent_name || '')}, ${esc(fmtTime(l.sent_at))}</span>` : ''}${l.received_at ? `<span>received by ${esc(l.received_name || '')}, ${esc(fmtTime(l.received_at))}</span>` : ''}</div>
         ${l.note ? `<div class="muted">${esc(l.note)}</div>` : ''}
       </div>
+      ${T.listOrders.some(o => o.late && o.counted) ? `<div class="warnbox info noprint">Includes ${plural(T.listOrders.filter(o => o.late && o.counted).length, 'late order')} (created before the previous cut-off, synced after it).</div>` : ''}
       ${farIn ? `<div class="warnbox bad noprint"><b>This list includes ${plural(farIn, 'order')} shipping more than ${l.horizon_hours} hours out.</b></div>` : ''}
       <div class="kpis">
         <div class="kpi"><div class="l">Items to send</div><div class="v">${send.length}</div><div class="s">${fmt(t.cases)} cases</div></div>
@@ -287,7 +302,7 @@
       <details class="noprint" style="margin-top:14px"><summary class="sec-h" style="cursor:pointer">Orders in this cycle <span class="muted">${counted.length} counted${left.length ? ` · ${left.length} left off (far dated)` : ''}</span></summary>
         <div class="card"><table class="tlist"><thead><tr><th>Order</th><th>Customer</th><th>Created</th><th>Ship on</th><th></th></tr></thead><tbody>
           ${T.listOrders.map(o => `<tr class="${o.counted ? '' : 'skip'}"><td class="num">${esc(o.order_nbr)}</td><td>${esc(o.customer_name || '')}</td><td>${esc(fmtTime(o.created_on))}</td>
-            <td>${esc(fmtDay(o.sched_shipment))}</td><td>${o.far_dated ? `<span class="tag old">beyond ${l.horizon_hours} h${o.counted ? ' · included' : ' · left off'}</span>` : ''}</td></tr>`).join('')}
+            <td>${esc(fmtDay(o.sched_shipment))}</td><td>${o.far_dated ? `<span class="tag old">beyond ${l.horizon_hours} h${o.counted ? ' · included' : ' · left off'}</span>` : ''}${o.late ? ' <span class="tag" title="Created before the previous cut-off but not on an earlier list">late</span>' : ''}</td></tr>`).join('')}
         </tbody></table></div></details>`;
   }
 
@@ -371,8 +386,10 @@
       const lines = T.preview.map(r => ({ inventory_id: r.inventory_id, send_qty: pQty(r), included: pTicked(r) }))
         .concat(manualRows().map(m => ({ inventory_id: m.inventory_id, send_qty: m.qty, included: true, manual: true })));
       const t = totals(previewSend());
-      if (!confirm(`Build a transfer list with ${plural(t.items, 'item')} (${fmt(t.cases)} cases, about ${r1(t.pallets)} pallets / ${r1(t.containers)} containers)?\n\n`
+      const m = staleMins();
+      if (!confirm((m != null && m > 15 ? `WARNING: orders and stock are ${m} minutes old, so recent orders may be missing.\n\n` : '') + `Build a transfer list with ${plural(t.items, 'item')} (${fmt(t.cases)} cases, about ${r1(t.pallets)} pallets / ${r1(t.containers)} containers)?\n\n`
         + `It covers ${plural((T.win.orders || 0) - (T.includeFar ? 0 : (T.win.far_orders || 0)), 'order')} created up to ${fmtTime(T.win.to)}. Orders that come in after that belong to the next cycle.`
+        + (T.win.late_orders ? `\n\nIt includes ${plural(T.win.late_orders, 'late order')} (created before the last cut-off, synced after it).` : '')
         + (T.includeFar && T.win.far_orders ? `\n\nIt INCLUDES ${plural(T.win.far_orders, 'order')} shipping more than ${HORIZON} hours out.` : ''))) return;
       act(async () => {
         const id = await rpc('dispatch_transfer_build', { p_env: D.env, p_extra_pct: T.extra, p_cutoff_to: T.win.to, p_lines: lines,

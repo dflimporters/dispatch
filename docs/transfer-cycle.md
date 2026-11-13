@@ -35,7 +35,7 @@ cutoff, because that would use up transfer stock meant for the cutoff set.
 
 1. **Snapshot at the button press.** When the transfer list is generated, the platform
    saves the set of SOs it was built from (order number, lines, ship date) against that
-   list (TR-MMDD-NN) as "this cycle's batch set".
+   list (TR-DDMM-NN) as "this cycle's batch set".
 2. **Batch view.** The batcher (late supervisor) sees that set: each SO is marked
    **in this cycle**. SOs that arrived after the cutoff, or whose ship date is beyond 48
    hours, are clearly marked **next cycle** and are not offered for batching.
