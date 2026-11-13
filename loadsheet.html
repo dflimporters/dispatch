@@ -101,13 +101,27 @@
       const one = await sb.from('loads').select('load_date,env').eq('id', L.autoPrint).maybeSingle();
       if (one.data) { L.date = one.data.load_date; if (one.data.env !== D.env) { setEnv(one.data.env); renderEnvBar(() => refresh()); } }
     }
-    L.days = [L.date, addDays(L.date, -1)];   // the chosen day and the day before
+    L.days = [addDays(L.date, 1), L.date, addDays(L.date, -1)];   // the day after, the chosen day, the day before
     const { data: loads, error } = await sb.from('loads')
       .select('id,load_nbr,load_date,wave,seq,truck_type,ship_via,contractor,status,check_status,sheet_stale_at')
       .eq('env', D.env).in('load_date', L.days).in('status', ['done', 'partial']).order('seq').order('wave');
     if (error) throw error;
     const all = loads || [];
     L.loads = all.filter(l => l.check_status === 'confirmed');
+    if (L.loads.length) {   // a load whose shipments were all added to another load is left empty: show it as cancelled
+      const has = await sb.from('load_shipments').select('load_id').in('load_id', L.loads.map(l => l.id));
+      if (has.error) throw has.error;
+      const withShip = new Set((has.data || []).map(r => r.load_id));
+      const empty = L.loads.filter(l => !withShip.has(l.id));
+      if (empty.length) {
+        const ev = await sb.from('load_events').select('load_id,detail,note,created_at').eq('kind', 'reassign')
+          .in('load_id', empty.map(l => l.id)).order('created_at', { ascending: false });
+        empty.forEach(l => {
+          const e = (ev.data || []).find(x => x.load_id === l.id && x.detail && x.detail.role === 'source');
+          l.cancelled = { to: e?.detail?.to_load || '', reason: e?.detail?.reason || '', at: e?.created_at || '' };
+        });
+      }
+    }
     L.pending = {};
     all.filter(l => l.check_status !== 'confirmed').forEach(l => { L.pending[l.load_date] = (L.pending[l.load_date] || 0) + 1; });
     L.lm = new Map();
@@ -132,6 +146,14 @@
   }
 
   function card(l) {
+    if (l.cancelled) {
+      return `<div class="lcard" data-load="${l.id}" style="opacity:.75;border-left:4px solid #b91c1c">
+        <div class="lhead"><div><span class="lnbr" style="text-decoration:line-through">${esc(l.load_nbr)}</span> ${waveTag(l.wave)} <span class="pill bad">Cancelled: not active</span></div>
+          <div class="lactions" style="margin:0"><a class="btn small" href="tower.html#load=${l.id}">Open in Control Tower</a></div></div>
+        <div class="lstats"><span>Added to <b>${esc(l.cancelled.to || 'another load')}</b>${l.cancelled.reason ? ' · Reason: ' + esc(l.cancelled.reason) : ''}</span>
+          <span class="muted">was ${esc(l.ship_via || '—')}. Don't send this sheet out.</span></div>
+      </div>`;
+    }
     const m = L.lm.get(l.id);
     const st = stateOf(l);
     return `<div class="lcard ${st.cls}" data-load="${l.id}">
@@ -176,7 +198,7 @@
     if (!l) return '';
     const opts = shipViaChoices().filter(c => c.ship_via !== l.ship_via)
       .map(c => `<option value="${esc(c.ship_via)}" ${R.via === c.ship_via ? 'selected' : ''}>${esc(c.ship_via)}${c.description ? ' — ' + esc(c.description) : ''}</option>`).join('');
-    const targets = R.via ? L.loads.filter(x => x.id !== l.id && x.ship_via === R.via && (!L.lm.get(x.id) || L.lm.get(x.id).status === 'ready')) : [];
+    const targets = R.via ? L.loads.filter(x => !x.cancelled && x.id !== l.id && x.ship_via === R.via && (!L.lm.get(x.id) || L.lm.get(x.id).status === 'ready')) : [];
     const rows = R.rows.map(s => `<tr>
         <td><input type="checkbox" data-rsel="${esc(s.shipment_nbr)}" ${R.sel.has(s.shipment_nbr) ? 'checked' : ''}></td>
         <td>${esc(s.customer_name || s.customer_id || '')}</td><td class="mono">${esc(s.shipment_nbr)}</td>
@@ -190,12 +212,15 @@
         <label><input type="radio" name="rmode" value="all" ${R.part ? '' : 'checked'}> Whole load</label>
         <label><input type="radio" name="rmode" value="part" ${R.part ? 'checked' : ''}> Only some invoices</label>
       </div>
+      ${!R.part && R.via ? `<div class="dctl" style="margin-top:8px"><label>Add to <select id="rtarget"><option value="">Keep it as its own load</option>
+          ${targets.map(x => `<option value="${x.id}" ${String(x.id) === R.target ? 'selected' : ''}>${esc(x.load_nbr)} (${esc(x.ship_via)})</option>`).join('')}</select></label>
+          ${R.target ? '<span class="muted">Every shipment of this load joins that load; this one is left empty.</span>' : ''}</div>` : ''}
       ${R.part ? `<table class="sheettbl" style="width:100%"><thead><tr><th></th><th>Customer</th><th>Shipment</th><th>Invoices that move with it</th></tr></thead><tbody>${rows}</tbody></table>
         <div class="dctl" style="margin-top:8px"><label>Move to <select id="rtarget"><option value="">${R.via ? 'Join a matching load, or create one' : 'Choose a trucker first'}</option>
           ${targets.map(x => `<option value="${x.id}" ${String(x.id) === R.target ? 'selected' : ''}>${esc(x.load_nbr)} (${esc(x.ship_via)})</option>`).join('')}</select></label>
           ${all ? '<span class="pill warn">That is every shipment: use "Whole load"</span>' : ''}</div>` : ''}
       <div class="dctl" style="margin-top:8px"><input type="text" id="rreason" placeholder="Why is the trucker changing? (required)" value="${esc(R.reason)}" style="min-width:320px">
-        <button class="btn small primary" data-act="rgo" ${R.via && R.reason.trim() && (!R.part || (n && !all)) ? '' : 'disabled'}>${R.part ? `Move ${plural(n, 'shipment')}` : 'Change whole load'}</button></div>
+        <button class="btn small primary" data-act="rgo" ${R.via && R.reason.trim() && (!R.part || (n && !all)) ? '' : 'disabled'}>${R.part ? `Move ${plural(n, 'shipment')}` : R.target ? 'Add whole load to it' : 'Change whole load'}</button></div>
       <div class="muted">Only before a driver has scanned the load. Reprint the sheet afterwards: the old paper still shows the old trucker or stops.</div>
     </div>`;
   }
@@ -207,6 +232,12 @@
       const { data, error } = await sb.rpc('lm_reassign_shipments', { p_shipments: [...R.sel], p_ship_via: R.via, p_reason: why, p_target_load: R.target ? Number(R.target) : null, p_invoices: [...R.isel] });
       if (error) throw error;
       toast(`${plural(R.sel.size, 'shipment')} now on ${data.target_load_nbr}${data.created ? ' (new load)' : ''}. Reprint both sheets.`);
+    } else if (R.target) {
+      const tl = L.loads.find(x => String(x.id) === R.target);
+      if (!confirm(`Add all of ${l.load_nbr} onto ${tl ? tl.load_nbr : 'that load'} (${R.via})?`)) return;
+      const { data, error } = await sb.rpc('lm_reassign_shipments', { p_shipments: R.rows.map(s => s.shipment_nbr), p_ship_via: R.via, p_reason: why, p_target_load: Number(R.target), p_invoices: null, p_whole: true });
+      if (error) throw error;
+      toast(`${l.load_nbr} is now on ${data.target_load_nbr}. Reprint that sheet.`);
     } else {
       if (!confirm(`Give all of ${l.load_nbr} to ${R.via}?`)) return;
       const { error } = await sb.rpc('lm_reassign_load', { p_load_id: l.id, p_ship_via: R.via, p_reason: why });
@@ -301,14 +332,16 @@
       ${L.days.map(daySection).join('')}`;
   }
 
-  // One collapsible section per day: the chosen day open, the day before closed (until opened).
+  // One collapsible section per day (tomorrow, today, yesterday): the chosen day open, the others closed (until opened).
   function daySection(day, i) {
     const loads = L.loads.filter(l => l.load_date === day);
-    const printed = loads.filter(l => L.lm.has(l.id)).length;
+    const printed = loads.filter(l => !l.cancelled && L.lm.has(l.id)).length;
+    const nCancel = loads.filter(l => l.cancelled).length;
     const pend = L.pending[day] || 0;
-    const open = day in L.open ? L.open[day] : i === 0;
+    const open = day in L.open ? L.open[day] : day === L.date;
+    const live = loads.length - nCancel;
     const sub = loads.length
-      ? `${plural(loads.length, 'load')} · ${printed} printed${loads.length - printed ? ` · <b>${loads.length - printed} to print</b>` : ''}`
+      ? `${plural(live, 'load')} · ${printed} printed${live - printed ? ` · <b>${live - printed} to print</b>` : ''}${nCancel ? ` · ${nCancel} cancelled` : ''}`
       : 'no loads';
     return `<details class="dayblk" data-day="${day}" ${open ? 'open' : ''} style="margin:10px 0">
       <summary style="cursor:pointer;font-weight:700;padding:8px 2px">${esc(niceDate(day))}${day === jmDate(0) ? ' · today' : ''}
@@ -347,7 +380,7 @@
       <div class="how"><b>Driver:</b> open the DFL Driver app and scan this QR code, or type the code above. Check the load number and your name on the screen before you take responsibility for the load.</div>
       <div class="how link"><b>Camera not working?</b> On your phone, open this link in the browser. It takes you to the same screen as the QR code.<span class="url">${esc(link)}</span></div>
       <table><thead><tr><th>#</th><th>Customer</th><th>Area</th><th>Invoices</th></tr></thead><tbody>
-        ${stops.map(x => `<tr><td class="n">${x.seq}</td><td>${esc(x.customer_name || x.customer_id)}</td><td>${esc(x.zone || x.city || '')}</td><td>${esc((x.shipments || []).join(', '))}</td></tr>`).join('')}
+        ${stops.map(x => `<tr><td class="n">${x.seq}</td><td>${esc(x.customer_name || x.customer_id)}</td><td>${esc(x.zone || x.city || '')}</td><td>${esc((x.invoices || []).filter(Boolean).join(', ') || 'not invoiced yet')}</td></tr>`).join('')}
       </tbody></table>
       <div class="foot"><span>Suggested order. The driver may change it in the app.</span><span>Printed ${esc(stamp(new Date().toISOString()))}</span></div>
     </div>`;
@@ -374,7 +407,7 @@
     return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: summary')}
       <table><thead><tr><th>#</th><th>Customer</th><th>Address</th><th>Area</th><th>Invoices</th><th class="r">Lines</th><th class="r">Units</th><th class="b">Loaded</th><th class="b">Delivered</th><th>Notes</th></tr></thead><tbody>
         ${stops.map(x => `<tr><td class="n">${x.seq}</td><td><b>${esc(x.customer_name || x.customer_id)}</b></td><td class="addr">${esc([x.address, x.city].filter(Boolean).join(', '))}</td><td>${esc(x.zone || x.city || '')}</td>
-          <td>${esc((x.shipments || []).map(i => i.invoice_nbr || i.shipment_nbr).join(', '))}</td><td class="r">${stopLines(x)}</td><td class="r">${qn(stopUnits(x))}</td>
+          <td>${esc((x.shipments || []).map(i => i.invoice_nbr || 'not invoiced').join(', '))}</td><td class="r">${stopLines(x)}</td><td class="r">${qn(stopUnits(x))}</td>
           <td class="b"><span class="box"></span></td><td class="b"><span class="box"></span></td><td class="nt"></td></tr>`).join('')}
         <tr class="tot"><td></td><td><b>Total</b></td><td></td><td></td><td></td><td>${plural(stops.reduce((t, x) => t + (x.shipments || []).length, 0), 'invoice')}</td><td class="r">${stops.reduce((t, x) => t + stopLines(x), 0)}</td><td class="r">${qn(stops.reduce((t, x) => t + stopUnits(x), 0))}</td><td></td><td></td><td></td></tr>
       </tbody></table>${checkFoot(s)}</div>`;
@@ -387,7 +420,7 @@
       if (!items.has(k)) items.set(k, { id: l.inventory_id, descr: l.description, uom: l.uom, total: 0, rows: [] });
       const it = items.get(k);
       it.total += Number(l.qty || 0);
-      it.rows.push({ seq: st.seq, cust: st.customer_name || st.customer_id, zone: st.zone, inv: i.invoice_nbr || i.shipment_nbr, qty: l.qty });
+      it.rows.push({ seq: st.seq, cust: st.customer_name || st.customer_id, zone: st.zone, inv: i.invoice_nbr || 'not invoiced', qty: l.qty });
     })));
     const list = [...items.values()].sort((x, y) => String(x.descr || x.id).localeCompare(String(y.descr || y.id), undefined, { numeric: true, sensitivity: 'base' }));
     return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: by item', true)}

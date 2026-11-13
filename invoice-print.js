@@ -36,9 +36,9 @@
   // page geometry in pt (Letter = 612 x 792). Every block has a fixed height so the body budget is exact.
   const LH = 11;                 // line height
   const ROW_GAP = 3;             // space under each invoice line
-  const ITEM_WRAP = 34;          // chars per line in the ITEM column
+  const ITEM_WRAP = 60;          // chars per line in the ITEM column
   const NOTE_WRAP = 70;          // chars per line for a line note
-  const TOP_USED = 326;          // everything above the first line row
+  const TOP_USED = 306;          // everything above the first line row
   const BOTTOM_MORE = 40;        // continued/page row + bottom margin, non-last pages
   const BOTTOM_LAST = 26 + 14 + 108 + 4;   // margin + page row + footer block + gap, last page
   const BODY_MORE = 792 - TOP_USED - BOTTOM_MORE;
@@ -70,7 +70,15 @@
       if (isTaxable(l.tax_cat)) tax += lineTaxCents(l.amount);
     });
     const near = (a, b) => Math.abs(a - b) <= TOL * 100 + 1e-6;
-    if (!near(tax, cents(inv.tax_total)))
+    // Acumatica taxes the base net of a document-level discount (spread pro rata over the lines), so accept that too.
+    let taxNet = tax;
+    const dd = cents(inv.discount_total);
+    if (dd > 0 && sum > 0) {
+      let base = 0;
+      lines.forEach(l => { if (isTaxable(l.tax_cat)) base += cents(l.amount); });
+      taxNet = Math.round((base - base * dd / sum) * 15 / 100);
+    }
+    if (!near(tax, cents(inv.tax_total)) && !near(taxNet, cents(inv.tax_total)))
       problems.push(`Tax does not reconcile: ${money(tax / 100)} at ${GCT * 100}% on lines tagged ${TAXABLE}, invoice says ${money(inv.tax_total)}`);
     // Line amounts may or may not already be net of line discounts, so accept either reading.
     if (!near(sum, cents(inv.sales_total)) && !near(sum - disc, cents(inv.sales_total)))
@@ -129,39 +137,42 @@
 
   // ---- CSS (injected once) ----
   const CSS = `
-.ip-sheet { position:relative; width:8.5in; height:11in; box-sizing:border-box; overflow:hidden; background:#fff; color:#000; font:9pt/${LH}pt 'Courier New',Courier,monospace; break-after:page; page-break-after:always; }
+.ip-sheet { position:relative; width:8.5in; height:11in; box-sizing:border-box; overflow:hidden; background:#fff; color:#000; font:8.5pt/${LH}pt 'Courier New',Courier,monospace; break-after:page; page-break-after:always; }
 .ip-sheet:last-child { break-after:auto; page-break-after:auto; }
 .ip-sheet * { box-sizing:border-box; }
-.ip-wm { position:absolute; left:-30%; top:-30%; width:160%; height:160%; transform:rotate(-28deg); display:flex; flex-wrap:wrap; align-content:flex-start; gap:46pt 54pt; opacity:.07; pointer-events:none; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-.ip-wm span { display:flex; align-items:center; gap:6pt; font:700 11pt/1 Arial,sans-serif; letter-spacing:2pt; }
-.ip-wm img { height:24pt; }
+.ip-wm { position:absolute; left:0; top:0; width:100%; height:100%; overflow:hidden; display:flex; flex-wrap:wrap; align-content:flex-start; gap:64pt 46pt; padding:20pt 14pt; opacity:.045; pointer-events:none; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+.ip-wm span { display:block; }
+.ip-wm img { height:40pt; display:block; }
 .ip-rwm { position:absolute; left:0; right:0; top:4.3in; text-align:center; transform:rotate(-30deg); font:700 96pt/1 Arial,sans-serif; color:rgba(0,0,0,.11); pointer-events:none; white-space:nowrap; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
 .ip-in { position:absolute; left:.4in; right:.4in; top:30pt; bottom:0; }
-.ip-head { display:flex; justify-content:space-between; height:112pt; }
+.ip-head { display:flex; justify-content:space-between; height:104pt; }
 .ip-co img { height:48pt; display:block; margin-bottom:4pt; }
-.ip-co div { font-weight:700; }
+.ip-co div { font-weight:400; }
 .ip-hr { width:3.5in; }
-.ip-title { border:1.2pt solid #000; text-align:center; padding:3pt 0; height:40pt; }
+.ip-title { border:1pt solid #000; text-align:center; padding:3pt 0; height:32pt; position:relative; }
 .ip-title b { display:block; font:700 13pt/15pt 'Courier New',Courier,monospace; }
-.ip-rp { display:inline-block; margin-top:1pt; padding:0 6pt; border:1.2pt solid #000; font-weight:700; }
-.ip-meta { margin-top:6pt; }
-.ip-meta div { display:flex; justify-content:space-between; height:13pt; line-height:13pt; }
-.ip-meta span:first-child { font-weight:700; }
+.ip-rp { position:absolute; right:4pt; top:3pt; padding:0 4pt; border:1.2pt solid #000; font-weight:700; }
+.ip-meta { margin-top:0; }
+.ip-meta div { display:flex; height:13pt; line-height:12pt; border:1pt solid #000; border-top:0; }
+.ip-meta span:first-child { flex:1; padding-left:4pt; }
+.ip-meta span:last-child { width:58%; border-left:1pt solid #000; padding-right:4pt; text-align:right; }
 .ip-addr { display:flex; gap:10pt; height:84pt; margin-top:6pt; }
 .ip-box { flex:1; border:1pt solid #000; padding:3pt 5pt; overflow:hidden; }
-.ip-box h6 { margin:0 0 2pt; font:700 9pt/${LH}pt 'Courier New',Courier,monospace; }
-.ip-ref { display:grid; height:30pt; margin-top:6pt; border:1pt solid #000; }
+.ip-box h6 { margin:0 0 2pt; font:400 8.5pt/${LH}pt 'Courier New',Courier,monospace; }
+.ip-ref { display:grid; height:24pt; margin-top:6pt; border:1pt solid #000; }
 .ip-ref.a { grid-template-columns:1.1fr 1.4fr 1.5fr; }
+.ip-sl .ip-ref.a { grid-template-columns:1fr 1fr; }
 .ip-ref.b { grid-template-columns:1fr 1.2fr 1.2fr 1.4fr; margin-top:4pt; }
-.ip-ref div { padding:2pt 5pt; border-left:1pt solid #000; overflow:hidden; white-space:nowrap; }
+.ip-ref div { padding:1pt 5pt; border-left:1pt solid #000; overflow:hidden; white-space:nowrap; }
 .ip-ref div:first-child { border-left:0; }
-.ip-ref i { display:block; font-style:normal; font-weight:700; font-size:8pt; }
-.ip-th, .ip-row { display:grid; grid-template-columns:4ch 38ch 11ch 7ch 15ch 6ch 1fr; }
-.ip-sl .ip-th, .ip-sl .ip-row { grid-template-columns:4ch 52ch 11ch 1fr; }
-.ip-th { margin-top:8pt; height:16pt; line-height:16pt; font-weight:700; border-top:1pt solid #000; border-bottom:1pt solid #000; }
+.ip-ref i { display:block; font-style:normal; font-weight:400; font-size:7pt; line-height:9pt; }
+.ip-th, .ip-row { display:grid; grid-template-columns:4ch 62ch 8ch 5ch 12ch 5ch 1fr; }
+.ip-sl .ip-th, .ip-sl .ip-row { grid-template-columns:4ch 1fr 8ch 8ch; }
+.ip-th { margin-top:8pt; height:16pt; line-height:14pt; font-weight:400; border:1pt solid #000; }
+.ip-th > div + div { border-left:1pt solid #000; }
+.ip-th > div, .ip-row > div { padding:0 2pt; }
 .ip-th .r, .ip-row .r { text-align:right; }
 .ip-th .c, .ip-row .c { text-align:center; }
-.ip-th .u, .ip-row .u { padding-left:2ch; }
 .ip-body { overflow:hidden; }
 .ip-row { white-space:pre; margin-bottom:${ROW_GAP}pt; }
 .ip-note { white-space:pre; padding-left:4ch; margin-bottom:0; }
@@ -170,10 +181,10 @@
 .ip-fl { flex:1; }
 .ip-fl p { margin:0 0 4pt; }
 .ip-sig { white-space:nowrap; }
-.ip-tot { width:2.6in; border:1pt solid #000; align-self:flex-start; }
-.ip-tot div { display:flex; justify-content:space-between; padding:0 6pt; height:17pt; line-height:17pt; border-top:1pt solid #000; }
+.ip-tot { width:2in; border:1pt solid #000; align-self:flex-start; }
+.ip-tot div { display:flex; justify-content:space-between; padding:0 6pt; height:15pt; line-height:15pt; border-top:1pt solid #000; }
 .ip-tot div:first-child { border-top:0; }
-.ip-tot div:last-child { font-weight:700; }
+
 @media print {
   @page { size:letter; margin:0; }
   body.printing { background:#fff; }
@@ -198,8 +209,8 @@
   const refCell = (label, val) => `<div><i>${label}</i>${esc(val)}</div>`;
 
   function watermark(logo) {
-    const one = `<span><img src="${esc(logo)}" alt="">IMPORTERS</span>`;
-    return `<div class="ip-wm">${one.repeat(60)}</div>`;
+    const one = `<span><img src="${esc(logo)}" alt=""></span>`;
+    return `<div class="ip-wm">${one.repeat(48)}</div>`;
   }
 
   function sheet(inv, rows, pg, npages, opts) {
@@ -215,13 +226,13 @@
         + (r.note.length ? `<div class="ip-row ip-note" style="display:block;margin-bottom:${ROW_GAP}pt">${r.note.map(esc).join('\n')}</div>` : '');
     }).join('');
     const foot = last ? `<div class="ip-foot"><div class="ip-fl"><p>${esc(DISCLAIMER)}</p><p>RECEIVED IN GOOD CONDITION BY:</p><div class="ip-sig">CUSTOMER NAME:_____________ SIGNATURE:_________________</div><div class="ip-sig" style="margin-top:4pt">TRUCKER NAME: ________________ SIGNATURE:____________________</div></div>`
-      + (slip ? '</div>' : `<div class="ip-tot"><div><span>Sales</span><span>${money(inv.sales_total)}</span></div><div><span>Discount:</span><span>${money(inv.discount_total)}</span></div><div><span>Tax Total:</span><span>${money(inv.tax_total)}</span></div><div><span>Total (${esc(cur)}):</span><span>${money(inv.total)}</span></div></div></div>`) : '';
+      + (slip ? '</div>' : `<div class="ip-tot"><div><span>Sales</span><span>${money(inv.sales_total)}</span></div><div><span>Discount:</span><span>${money(inv.discount_total)}</span></div><div><span>Tax Total:</span><span>${money(inv.tax_total)}</span></div><div><span>Total</span><span>${money(inv.total)}</span></div></div></div>`) : '';
     return `<div class="ip-sheet${slip ? ' ip-sl' : ''}">${watermark(opts.logo)}${rp ? `<div class="ip-rwm">REPRINT ${rp}</div>` : ''}<div class="ip-in">`
       + `<div class="ip-head"><div class="ip-co"><img src="${esc(opts.logo)}" alt="DFL">${COMPANY.map(t => `<div>${esc(t)}</div>`).join('')}</div>`
-      + `<div class="ip-hr"><div class="ip-title"><b>${slip ? 'DELIVERY SLIP' : 'TAX INVOICE'}</b>${slip ? '' : esc(GCT_REF)}${rp ? `<br><span class="ip-rp">REPRINT ${rp}</span>` : ''}</div>`
+      + `<div class="ip-hr"><div class="ip-title"><b>${slip ? 'DELIVERY SLIP' : 'TAX INVOICE'}</b>${slip ? '' : esc(GCT_REF)}${rp ? `<span class="ip-rp">REPRINT ${rp}</span>` : ''}</div>`
       + `<div class="ip-meta"><div><span>${slip ? 'Invoice Ref.:' : 'Invoice No.:'}</span><span>${esc(inv.ref)}</span></div><div><span>Date:</span><span>${esc(niceDate(inv.date))}</span></div>${slip ? '' : `<div><span>Due Date:</span><span>${esc(niceDate(inv.due_date))}</span></div>`}<div><span>Customer ID:</span><span>${esc(inv.customer_id)}</span></div><div><span>Currency:</span><span>${esc(cur)}</span></div></div></div></div>`
       + `<div class="ip-addr">${addrBox('BILL TO:', inv.bill)}${addrBox('SHIP TO:', inv.ship)}</div>`
-      + `<div class="ip-ref a">${refCell('CUSTOMER REF. NUMBER', inv.customer_ref)}${refCell('TERMS', inv.terms)}${refCell('CONTACT', inv.salesperson)}</div>`
+      + `<div class="ip-ref a">${refCell('CUSTOMER REF. NUMBER', inv.customer_ref)}${slip ? '' : refCell('TERMS', inv.terms)}${refCell('CONTACT', inv.salesperson)}</div>`
       + `<div class="ip-ref b">${refCell('SHIP VIA', inv.ship_via)}${refCell('SO NUMBER', inv.so_number)}${refCell('SHIPMENT NUMBER', inv.shipment_nbr)}${refCell('CUSTOMER P.O. NO.', inv.customer_po)}</div>`
       + `<div class="ip-th"><div>NO.</div><div>ITEM</div><div class="r">QTY.</div><div class="u">UOM</div>${slip ? '' : '<div class="r">UNIT PRICE</div><div class="c">TAX</div><div class="r">EXTENDED</div>'}</div>`
       + `<div class="ip-body" style="height:${last ? BODY_LAST : BODY_MORE}pt">${body}</div>`
@@ -232,6 +243,7 @@
   function pages(inv, opts) {
     opts = Object.assign({ logo: 'assets/dfl-logo-color.png' }, opts || {});
     injectCss();
+    try { new Image().src = opts.logo; } catch (e) {}
     const sets = paginate((inv.lines || []).map(prepLine));
     return sets.map((rows, i) => sheet(inv, rows, i, sets.length, opts));
   }
@@ -244,7 +256,17 @@
     document.body.classList.add('printing');
     const done = () => { document.body.classList.remove('printing'); w.innerHTML = ''; window.removeEventListener('afterprint', done); };
     window.addEventListener('afterprint', done);
-    window.print();
+    // Print only once the logo / watermark images have loaded (they are the same file, so this is quick). Printing
+    // straight away can send the sheets to the printer with no logo and no watermark. 5s cap so a missing image
+    // never blocks the print.
+    const waits = Array.from(new Set(Array.from(w.querySelectorAll('img')).map(i => i.src))).map(src => new Promise(res => {
+      const im = new Image();
+      im.onload = im.onerror = () => res();
+      im.src = src;
+      if (im.complete) res();
+    }));
+    const imgs = Array.from(w.querySelectorAll('img')).map(i => (i.decode ? i.decode().catch(() => {}) : null));
+    Promise.race([Promise.all(waits.concat(imgs)), new Promise(res => setTimeout(res, 5000))]).then(() => window.print());
   }
 
   window.InvoicePrint = { check, pages, show, niceDate };

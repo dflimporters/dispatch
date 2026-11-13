@@ -141,6 +141,12 @@ These are deployed by hand; the other edge functions and cron jobs exist only in
 - `dispatch-acu`: the pages' route into Acumatica.
 - `dispatch-test-seed`: test volume.
 - `acu-probe`: a read-only sandbox check. Call it with POST and header `x-test-token`.
+- `dispatch-sub`: item substitution from the Invoicing page. For each customer on a checker's substitution flag it makes a
+  separate SO, releases it from credit hold, creates the shipment, sets the load's Ship Via, confirms it, and puts it on
+  the same load (`substitutions` table, `_substitution_join_load`). Each step is recorded so a failure resumes where it
+  stopped. TEST works now; live stays refused until `DISPATCH_LIVE_WRITEBACK` and `DISPATCH_LIVE_SUBSTITUTION` are `on`.
+- `acu-sub-probe`: TEST-only probe used while building the above (`get` is read-only; `create_so`, `ship_so` and
+  `confirm_shipment` write to TEST). Delete it once substitutions are live.
 
 The load tables are read-only through RLS for anyone with a dispatch role; every change goes
 through a `security definer` function that checks the caller's role and the load's status.

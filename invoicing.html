@@ -79,7 +79,7 @@
   const V = { ships: [], loadOf: new Map(), inv: new Map(), sel: new Set(), date: '', busy: false, poll: null, was: false,
               pr: [], manual: [], marks: new Set(), showPrinted: false, prints: new Map(), hdr: new Map(), psel: new Set(), pbusy: false,
               pend: [], picks: new Map(), items: new Map(), checks: [], final: new Map(), notes: new Map(), openL: new Set(), wasConf: new Map(), odate: new Map(),
-              subs: [], subRes: new Map() };
+              subs: [], subRes: new Map(), subUi: new Map(), subRows: new Map() };
 
   // ------------------------------------------------------------------
   // Substitutions the checker flagged (check_items.sub_needed). The clerk sorts each one in Acumatica by hand
@@ -105,17 +105,94 @@
       V.subs = rows.map(x => { const p = picks.get(x.load_id + '|' + x.inventory_id) || {}, c = x.sub_context || {};
         return { ...x, load: x.loads, desc: p.description || c.description || x.inventory_id, uom: p.uom || c.uom || '',
           required: p.required != null ? Number(p.required) : (c.required != null ? Number(c.required) : null), ctxLines: Array.isArray(c.lines) ? c.lines : [] }; });
+      // What the API substitution has done so far for each customer line (needs migration 20261112120000_substitutions.sql).
+      V.subRows = new Map();
+      if (ids.length) {
+        const sr = await sb.from('substitutions').select('*').in('load_id', ids);
+        if (!sr.error) (sr.data || []).forEach(r => V.subRows.set(r.load_id + '|' + r.source_inventory_id + '|' + r.orig_shipment_nbr, r));
+      }
     } catch (e) { console.warn('[invoicing subs]', e); V.subs = []; }
+  }
+
+  // ------------------------------------------------------------------
+  // Substitute from here (dispatch-sub): search for the replacement item, say how many each customer gets. Per customer the
+  // function makes a separate SO, releases it from credit hold, creates and confirms the shipment, sets the load's
+  // Ship Via, and puts the shipment on the same load (so it is on the load sheet and the check-off sheet).
+  // ------------------------------------------------------------------
+  async function callSub(action, body) {
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) throw new Error('Signed out; reload and sign in again');
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/dispatch-sub`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: SUPABASE_PUBLISHABLE_KEY, Authorization: `Bearer ${session.access_token}` },
+      body: JSON.stringify({ action, env: D.env, ...(body || {}) }),
+    });
+    let json = null;
+    try { json = await res.json(); } catch (e) {}
+    if (!res.ok && !(json && 'ok' in json)) throw new Error(`dispatch-sub ${res.status}`);
+    return json;
+  }
+  const subKey = s => s.load_id + '|' + s.inventory_id;
+  const subRowOf = (s, z) => V.subRows.get(s.load_id + '|' + s.inventory_id + '|' + z.shipment);
+  const SUB_STEP = { none: 'Waiting', so: 'SO made', released: 'Released from credit hold', shipment: 'Shipment made', shipvia: 'Ship Via set', confirmed: 'Shipment confirmed', joined: 'On the load' };
+
+  function subResultsHtml(u) {
+    if (u.searching) return '<div class="muted">Searching…</div>';
+    if (u.err) return `<div style="color:var(--bad-text,#b42318)">${esc(u.err)}</div>`;
+    if (!u.results.length) return u.q && u.q.trim().length >= 2 ? '<div class="muted">No active items match.</div>' : '';
+    return u.results.map(i => `<div><button class="btn small" data-subpick="${esc(i.inventory_id)}">Use</button>
+      <b>${esc(i.description || i.inventory_id)}</b> <span class="muted num">${esc(i.inventory_id)}</span> · ${esc(i.uom || '')}</div>`).join('');
+  }
+  function paintSubResults(key) {
+    const u = V.subUi.get(key), el = [...document.querySelectorAll('[data-subresults]')].find(x => x.dataset.subresults === key);
+    if (u && el) el.innerHTML = subResultsHtml(u);
+  }
+
+  function subPanel(s) {
+    const key = subKey(s), u = V.subUi.get(key);
+    if (!u) return '';
+    const here = s.ctxLines.map(z => subRowOf(s, z)).filter(Boolean);
+    const locked = here.some(r => r.step !== 'none');          // the SO exists, so the item is fixed
+    const body = s.ctxLines.map(z => {
+      const r = subRowOf(s, z), done = r && r.state === 'done', fixed = r && r.step !== 'none';
+      const def = u.qty.has(z.shipment) ? u.qty.get(z.shipment) : (r ? Number(r.qty) : (s.ctxLines.length === 1 && s.required != null ? Math.max(0, Math.min(Number(z.qty), s.required - Number(s.checked_qty))) : ''));
+      const st = !r ? '' : done
+        ? `<span style="color:var(--ok-text,#067647)">Done</span> · SO ${esc(r.new_order_nbr || '')} · shipment ${esc(r.new_shipment_nbr || '')}${r.note ? `<div style="font-size:12px;color:var(--warn-text)"><b>Check:</b> ${esc(r.note)}</div>` : ''}`
+        : r.state === 'failed'
+          ? `<b style="color:var(--bad-text,#b42318)">Stopped after: ${esc(SUB_STEP[r.step] || r.step)}</b><div style="font-size:12px">${esc(r.error || '')}</div>`
+          : `${esc(SUB_STEP[r.step] || r.step)}…`;
+      return `<tr><td>${esc(z.customer || z.customer_id || '')}<div class="muted" style="font-size:12px">${esc(z.order_type || 'SO')} ${esc(z.order_nbr || '')} · shipment ${esc(z.shipment || '')} · needed ${fmt(z.qty)}</div></td>
+        <td class="r"><input type="number" min="0" max="${esc(z.qty)}" step="1" style="width:84px" data-subqty="${esc(key + '|' + z.shipment)}" value="${esc(def)}" ${fixed || V.busy ? 'disabled' : ''}></td>
+        <td>${st}</td></tr>`;
+    }).join('');
+    const canRun = u.pick && !V.busy;
+    return `<tr class="subpanel"><td colspan="5" style="background:var(--bg-soft,#f6f8fb)">
+      <div style="margin:6px 0 4px"><b>Substitute from here</b> <span class="muted">One SO and shipment per customer. Default price. It joins this load.</span></div>
+      ${locked && u.pick ? '' : `<div style="margin:6px 0"><input type="search" maxlength="40" placeholder="Search the substitute by name or item number" data-subq="${esc(key)}" value="${esc(u.q)}" style="width:100%;max-width:420px">
+        <div data-subresults="${esc(key)}" style="margin-top:4px;display:grid;gap:4px">${subResultsHtml(u)}</div></div>`}
+      ${u.pick ? `<div style="margin:6px 0">Substitute: <b>${esc(u.pick.description || u.pick.inventory_id)}</b> <span class="muted num">${esc(u.pick.inventory_id)}</span></div>` : ''}
+      <table class="inv"><thead><tr><th>Customer</th><th class="r">Qty</th><th>Progress</th></tr></thead><tbody>${body}</tbody></table>
+      <div style="margin:8px 0 4px;display:flex;gap:8px;align-items:center">
+        <button class="btn small primary" data-subrun="${esc(key)}" ${canRun ? '' : 'disabled'}>${here.some(r => r.state === 'failed') ? 'Run again' : 'Create substitutions'}</button>
+        <button class="btn small" data-subclose="${esc(key)}">Close</button>
+        ${u.msg ? `<span class="muted">${esc(u.msg)}</span>` : ''}
+      </div></td></tr>`;
   }
 
   function renderSubs() {
     const el = document.getElementById('invSubs');
     if (!el) return;
     if (!V.subs.length) { el.innerHTML = ''; return; }
+    // Once every customer line the API substituted is done, fill "What was done" so Mark complete is one click.
+    V.subs.forEach(s => {
+      const rs = s.ctxLines.map(z => subRowOf(s, z)).filter(Boolean), k = subKey(s);
+      if (rs.length && rs.every(r => r.state === 'done') && !V.subRes.get(k))
+        V.subRes.set(k, ('Substituted ' + rs[0].sub_inventory_id + ': ' + rs.map(r => (r.customer_name || r.customer_id) + ' SO ' + r.new_order_nbr).join('; ')).slice(0, 200));
+    });
     const byLoad = new Map();
     V.subs.forEach(s => { const k = s.load.load_nbr; if (!byLoad.has(k)) byLoad.set(k, { load: s.load, rows: [] }); byLoad.get(k).rows.push(s); });
     el.innerHTML = `<div class="section-h" style="font-size:14px;font-weight:700;color:var(--navy);margin:0 2px 8px">Substitutions to complete (${V.subs.length})</div>
-      <div class="muted" style="margin:-4px 2px 8px">The checker couldn't find these. Do the substitution in Acumatica, then mark it complete. Printing an invoice on the load warns until it is.</div>
+      <div class="muted" style="margin:-4px 2px 8px">The checker couldn't find these. Use Substitute to pick the replacement item and set each customer's quantity; it makes the order and shipment in Acumatica and puts the shipment on the load. Then mark it complete. Printing an invoice on the load warns until it is.</div>
       ${[...byLoad.entries()].map(([k, g]) => `<div class="grp"><div class="gh"><span class="lnbr">${esc(k)}</span>${waveTag(g.load.wave)} <b>${esc(g.load.truck_type || '')}</b> <span class="target">${esc(g.load.ship_via || '')}</span>
           <span class="muted">${plural(g.rows.length, 'item')}</span></div>
         <table class="inv"><thead><tr><th>Item</th><th class="r">Short</th><th>Checker's note</th><th>What was done</th><th></th></tr></thead><tbody>
@@ -125,7 +202,7 @@
             <td class="r num">${short != null ? `<b style="color:var(--warn-text)">${fmt(short)}</b>` : '—'}<div class="muted" style="font-size:11px">found ${fmt(s.checked_qty)}</div></td>
             <td>${s.sub_note ? esc(s.sub_note) : '<span class="muted">—</span>'}</td>
             <td><input type="text" maxlength="200" data-subres="${esc(key)}" value="${esc(V.subRes.get(key) || '')}" placeholder="e.g. SO 209696, or customer declined" style="width:100%;min-width:180px"></td>
-            <td class="r"><button class="btn small primary" data-subdone="${esc(key)}">Mark complete</button></td></tr>`; }).join('')}</tbody></table></div>`).join('')}`;
+            <td class="r"><button class="btn small" data-subopen="${esc(key)}">Substitute…</button> <button class="btn small primary" data-subdone="${esc(key)}">Mark complete</button></td></tr>${subPanel(s)}`; }).join('')}</tbody></table></div>`).join('')}`;
   }
 
   // ------------------------------------------------------------------
@@ -274,7 +351,7 @@
     return pLinesOf(l).map(x => { const k = pkey(x.nbr, x.line_nbr), fv = fin.get(k);
       return { shipment_nbr: x.nbr, line_nbr: x.line_nbr, final_qty: fv, note: fv < x.shipped ? (notes.get(k) || null) : null }; });
   }
-  const editingBoxes = () => { const a = document.activeElement; return !!(a && a.dataset && (a.dataset.lfinal !== undefined || a.dataset.lnote !== undefined || a.dataset.subres !== undefined)); };
+  const editingBoxes = () => { const a = document.activeElement; return !!(a && a.dataset && (a.dataset.lfinal !== undefined || a.dataset.lnote !== undefined || a.dataset.subres !== undefined || a.dataset.subq !== undefined || a.dataset.subqty !== undefined)); };
 
   async function loadAll() {
     await loadPending();
@@ -412,7 +489,9 @@
     // A load is finished with once every invoice on it has been printed here, or someone marked it printed
     // (printed from Acumatica). Those drop off the list; 'Show printed' brings them back.
     const isDone = g => g.rows.every(x => V.prints.has(x.nbr)) || (g.load && V.marks.has(g.load.id));
-    const all = [...groups.entries()].sort(([a], [b]) => (a === '—') - (b === '—') || a.localeCompare(b));
+    // Latest load first (by load date, then load number); loads not on a load go last.
+    const all = [...groups.entries()].sort(([a, ga], [b, gb]) => (a === '—') - (b === '—')
+      || String((gb.load && gb.load.load_date) || '').localeCompare(String((ga.load && ga.load.load_date) || '')) || b.localeCompare(a));
     const nDone = all.filter(([, g]) => isDone(g)).length;
     const order = V.showPrinted ? all : all.filter(([, g]) => !isDone(g));
     el.innerHTML = `<div class="section-h" style="font-size:14px;font-weight:700;color:var(--navy);margin:0 2px 8px">Prepared invoices to print (${order.reduce((n, [, g]) => n + g.rows.length, 0)})${nDone ? ` <button class="btn small" data-act="pshowprinted" style="margin-left:8px">${V.showPrinted ? 'Hide' : 'Show'} printed loads (${nDone})</button>` : ''}</div>
@@ -710,6 +789,46 @@
   }
 
   document.getElementById('app').addEventListener('click', e => {
+    const sOpen = e.target.closest('[data-subopen]');
+    if (sOpen) {
+      const k = sOpen.dataset.subopen;
+      if (V.subUi.has(k)) V.subUi.delete(k);
+      else {
+        const s = V.subs.find(x => subKey(x) === k), u = { q: '', results: [], pick: null, qty: new Map(), msg: '', searching: false, err: '' };
+        const started = s && s.ctxLines.map(z => subRowOf(s, z)).find(r => r && r.sub_inventory_id);
+        if (started) u.pick = { inventory_id: started.sub_inventory_id, description: started.sub_description };
+        V.subUi.set(k, u);
+      }
+      renderSubs(); return;
+    }
+    const sClose = e.target.closest('[data-subclose]');
+    if (sClose) { V.subUi.delete(sClose.dataset.subclose); renderSubs(); return; }
+    const sPick = e.target.closest('[data-subpick]');
+    if (sPick) {
+      const k = (sPick.closest('[data-subresults]') || {}).dataset?.subresults, u = V.subUi.get(k);
+      if (u) { u.pick = u.results.find(i => i.inventory_id === sPick.dataset.subpick) || null; u.results = []; u.q = ''; renderSubs(); }
+      return;
+    }
+    const sRun = e.target.closest('[data-subrun]');
+    if (sRun) {
+      const k = sRun.dataset.subrun, u = V.subUi.get(k), s = V.subs.find(x => subKey(x) === k);
+      if (!u || !s || !u.pick) return;
+      const lines = s.ctxLines.map(z => ({ shipment: z.shipment, qty: Number(u.qty.has(z.shipment) ? u.qty.get(z.shipment) : (subRowOf(s, z) ? subRowOf(s, z).qty : (s.ctxLines.length === 1 && s.required != null ? Math.min(Number(z.qty), s.required - Number(s.checked_qty)) : 0))) }))
+        .filter(x => x.qty > 0 && !(subRowOf(s, { shipment: x.shipment }) || {}).state?.startsWith('done'));
+      if (!lines.length) { toast('Enter a quantity for at least one customer', true); return; }
+      const where = D.env === 'test' ? 'Acumatica TEST' : 'live Acumatica';
+      if (!confirm(`Create ${plural(lines.length, 'order')} for ${u.pick.description || u.pick.inventory_id} in ${where}?\n\nEach customer gets its own sales order and shipment, confirmed and added to ${s.load.load_nbr}. This takes about 30 seconds per customer.`)) return;
+      act(async () => {
+        u.msg = 'Working… keep this page open.';
+        renderSubs();
+        const r = await callSub('run', { load_id: s.load_id, source_inventory_id: s.inventory_id, sub_inventory_id: u.pick.inventory_id, lines });
+        u.msg = '';
+        if (!r.ok) throw new Error(r.error || "Couldn't run the substitution");
+        const rows = r.rows || [], done = rows.filter(x => x.state === 'done').length;
+        toast(done === rows.length ? `Done: ${plural(done, 'substitute shipment')} on ${s.load.load_nbr}` : `${done} of ${rows.length} done. See the rows below for what stopped.`, done !== rows.length);
+      });
+      return;
+    }
     const lo = e.target.closest('[data-lopen]');
     if (lo) { const id = Number(lo.dataset.lopen); V.openL.has(id) ? V.openL.delete(id) : V.openL.add(id); renderPending(); return; }
     const cf = e.target.closest('[data-confirm]');
@@ -818,6 +937,27 @@
   document.getElementById('app').addEventListener('input', e => {
     const t = e.target;
     if (t.dataset.subres !== undefined) { V.subRes.set(t.dataset.subres, t.value); return; }
+    if (t.dataset.subqty !== undefined) {
+      const i = t.dataset.subqty.lastIndexOf('|'), u = V.subUi.get(t.dataset.subqty.slice(0, i));
+      if (u) u.qty.set(t.dataset.subqty.slice(i + 1), t.value === '' ? '' : Math.max(0, Math.round(Number(t.value)) || 0));
+      return;
+    }
+    if (t.dataset.subq !== undefined) {
+      const k = t.dataset.subq, u = V.subUi.get(k);
+      if (!u) return;
+      u.q = t.value; u.err = '';
+      clearTimeout(u.timer);
+      if (t.value.trim().length < 2) { u.results = []; u.searching = false; paintSubResults(k); return; }
+      u.searching = true; paintSubResults(k);
+      u.timer = setTimeout(async () => {
+        const asked = u.q;
+        // Searches the local item list (stock_items_raw): every word typed must be in the name or item number, in any order.
+        try { const r = await sb.rpc('sub_item_search', { p_q: asked }); if (asked !== u.q) return; if (r.error) throw r.error; u.results = r.data || []; u.err = ''; }
+        catch (err) { u.results = []; u.err = errMsg(err); }
+        u.searching = false; paintSubResults(k);
+      }, 200);
+      return;
+    }
     if (t.id !== 'fq' && !(t.dataset.f && t.tagName === 'INPUT')) return;
     if (t.id === 'fq') F.q = t.value; else F[t.dataset.f] = t.value;
     clearTimeout(fTimer); fTimer = setTimeout(render, 120);
