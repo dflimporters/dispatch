@@ -70,7 +70,15 @@
       if (isTaxable(l.tax_cat)) tax += lineTaxCents(l.amount);
     });
     const near = (a, b) => Math.abs(a - b) <= TOL * 100 + 1e-6;
-    if (!near(tax, cents(inv.tax_total)))
+    // Acumatica taxes the base net of a document-level discount (spread pro rata over the lines), so accept that too.
+    let taxNet = tax;
+    const dd = cents(inv.discount_total);
+    if (dd > 0 && sum > 0) {
+      let base = 0;
+      lines.forEach(l => { if (isTaxable(l.tax_cat)) base += cents(l.amount); });
+      taxNet = Math.round((base - base * dd / sum) * 15 / 100);
+    }
+    if (!near(tax, cents(inv.tax_total)) && !near(taxNet, cents(inv.tax_total)))
       problems.push(`Tax does not reconcile: ${money(tax / 100)} at ${GCT * 100}% on lines tagged ${TAXABLE}, invoice says ${money(inv.tax_total)}`);
     // Line amounts may or may not already be net of line discounts, so accept either reading.
     if (!near(sum, cents(inv.sales_total)) && !near(sum - disc, cents(inv.sales_total)))
