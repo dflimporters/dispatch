@@ -489,7 +489,9 @@
     // A load is finished with once every invoice on it has been printed here, or someone marked it printed
     // (printed from Acumatica). Those drop off the list; 'Show printed' brings them back.
     const isDone = g => g.rows.every(x => V.prints.has(x.nbr)) || (g.load && V.marks.has(g.load.id));
-    const all = [...groups.entries()].sort(([a], [b]) => (a === '—') - (b === '—') || a.localeCompare(b));
+    // Latest load first (by load date, then load number); loads not on a load go last.
+    const all = [...groups.entries()].sort(([a, ga], [b, gb]) => (a === '—') - (b === '—')
+      || String((gb.load && gb.load.load_date) || '').localeCompare(String((ga.load && ga.load.load_date) || '')) || b.localeCompare(a));
     const nDone = all.filter(([, g]) => isDone(g)).length;
     const order = V.showPrinted ? all : all.filter(([, g]) => !isDone(g));
     el.innerHTML = `<div class="section-h" style="font-size:14px;font-weight:700;color:var(--navy);margin:0 2px 8px">Prepared invoices to print (${order.reduce((n, [, g]) => n + g.rows.length, 0)})${nDone ? ` <button class="btn small" data-act="pshowprinted" style="margin-left:8px">${V.showPrinted ? 'Hide' : 'Show'} printed loads (${nDone})</button>` : ''}</div>
