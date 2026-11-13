@@ -108,6 +108,12 @@
     if (error) throw error;
     const all = loads || [];
     L.loads = all.filter(l => l.check_status === 'confirmed');
+    if (L.loads.length) {   // a load whose shipments were all added to another load is left empty: hide it
+      const has = await sb.from('load_shipments').select('load_id').in('load_id', L.loads.map(l => l.id));
+      if (has.error) throw has.error;
+      const withShip = new Set((has.data || []).map(r => r.load_id));
+      L.loads = L.loads.filter(l => withShip.has(l.id));
+    }
     L.pending = {};
     all.filter(l => l.check_status !== 'confirmed').forEach(l => { L.pending[l.load_date] = (L.pending[l.load_date] || 0) + 1; });
     L.lm = new Map();
@@ -190,12 +196,15 @@
         <label><input type="radio" name="rmode" value="all" ${R.part ? '' : 'checked'}> Whole load</label>
         <label><input type="radio" name="rmode" value="part" ${R.part ? 'checked' : ''}> Only some invoices</label>
       </div>
+      ${!R.part && R.via ? `<div class="dctl" style="margin-top:8px"><label>Add to <select id="rtarget"><option value="">Keep it as its own load</option>
+          ${targets.map(x => `<option value="${x.id}" ${String(x.id) === R.target ? 'selected' : ''}>${esc(x.load_nbr)} (${esc(x.ship_via)})</option>`).join('')}</select></label>
+          ${R.target ? '<span class="muted">Every shipment of this load joins that load; this one is left empty.</span>' : ''}</div>` : ''}
       ${R.part ? `<table class="sheettbl" style="width:100%"><thead><tr><th></th><th>Customer</th><th>Shipment</th><th>Invoices that move with it</th></tr></thead><tbody>${rows}</tbody></table>
         <div class="dctl" style="margin-top:8px"><label>Move to <select id="rtarget"><option value="">${R.via ? 'Join a matching load, or create one' : 'Choose a trucker first'}</option>
           ${targets.map(x => `<option value="${x.id}" ${String(x.id) === R.target ? 'selected' : ''}>${esc(x.load_nbr)} (${esc(x.ship_via)})</option>`).join('')}</select></label>
           ${all ? '<span class="pill warn">That is every shipment: use "Whole load"</span>' : ''}</div>` : ''}
       <div class="dctl" style="margin-top:8px"><input type="text" id="rreason" placeholder="Why is the trucker changing? (required)" value="${esc(R.reason)}" style="min-width:320px">
-        <button class="btn small primary" data-act="rgo" ${R.via && R.reason.trim() && (!R.part || (n && !all)) ? '' : 'disabled'}>${R.part ? `Move ${plural(n, 'shipment')}` : 'Change whole load'}</button></div>
+        <button class="btn small primary" data-act="rgo" ${R.via && R.reason.trim() && (!R.part || (n && !all)) ? '' : 'disabled'}>${R.part ? `Move ${plural(n, 'shipment')}` : R.target ? 'Add whole load to it' : 'Change whole load'}</button></div>
       <div class="muted">Only before a driver has scanned the load. Reprint the sheet afterwards: the old paper still shows the old trucker or stops.</div>
     </div>`;
   }
@@ -207,6 +216,12 @@
       const { data, error } = await sb.rpc('lm_reassign_shipments', { p_shipments: [...R.sel], p_ship_via: R.via, p_reason: why, p_target_load: R.target ? Number(R.target) : null, p_invoices: [...R.isel] });
       if (error) throw error;
       toast(`${plural(R.sel.size, 'shipment')} now on ${data.target_load_nbr}${data.created ? ' (new load)' : ''}. Reprint both sheets.`);
+    } else if (R.target) {
+      const tl = L.loads.find(x => String(x.id) === R.target);
+      if (!confirm(`Add all of ${l.load_nbr} onto ${tl ? tl.load_nbr : 'that load'} (${R.via})?`)) return;
+      const { data, error } = await sb.rpc('lm_reassign_shipments', { p_shipments: R.rows.map(s => s.shipment_nbr), p_ship_via: R.via, p_reason: why, p_target_load: Number(R.target), p_invoices: null, p_whole: true });
+      if (error) throw error;
+      toast(`${l.load_nbr} is now on ${data.target_load_nbr}. Reprint that sheet.`);
     } else {
       if (!confirm(`Give all of ${l.load_nbr} to ${R.via}?`)) return;
       const { error } = await sb.rpc('lm_reassign_load', { p_load_id: l.id, p_ship_via: R.via, p_reason: why });
