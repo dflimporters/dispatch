@@ -51,10 +51,17 @@ cutoff, because that would use up transfer stock meant for the cutoff set.
 - Ship-date window: 48 hours.
 - Only the cutoff set is batched against transfer stock.
 
+## Built (2026-11-13)
+
+- Transfers page builds from open SOs (24 h window selector, 48 h ship-date horizon with include toggle and flags),
+  pallets and container estimate, manual add, Sent -> Received status.
+- Cycle snapshot (`transfer_list_orders`) and the batcher banner / gate / "not in cycle" tags in `batcher.html`.
+- Next: write the Acumatica Transfer Order (TR) from the sent list; read received from Acumatica.
+
 ## Open questions
 
 - Who presses the 2pm button, and who vets the list? (not decided)
-- Do all five late supervisors have the coordinator (`batcher`) role?
+- Tevin, Teondray and Alecia need the coordinator (`batcher`) role (Admin page > Users).
 - Picking currently requires the trucker to be locked in on the load; on Day 2 truckers
   arrive 8:30am to 11:30am but picking starts 8am. How do night-batched loads become
   pickable?
