@@ -92,10 +92,10 @@
   const B = { date: jmDate(0), free: [], hasSv: [], loads: [], dates: [], sel: new Set(), sync: null, busy: false, wave: loadWaveFilter('batcher'), tab: loadKindTab(),
     ltab: new Map(),
     drafts: new Map(), returning: new Set(), was: new Map(), poll: null, open: new Set(), seen: new Set(),
-    cycle: null, cycMap: new Map(), cycleOnly: true };
+    cycle: null, cycMap: new Map(), cycleOnly: false };
 
   // Transfer cycle (transfers.html): the orders that were on the latest transfer list when it was built at the 2pm cut-off.
-  // Late-night batching only takes the shipments of those orders, once the transfer is received at 71.
+  // Flag only: shipments not on that list are tagged "not in cycle"; nothing is hidden or blocked (cycleOnly is an optional filter).
   function cycleState(r) {
     if (!B.cycle) return null;
     const orders = String(r.order_nbr || '').split(/,\s*/).filter(Boolean);
@@ -293,7 +293,7 @@
         if (r.shipment_date && r.shipment_date < B.date) tags.push(`<span class="tag old" title="Shipment date">${esc(niceDate(r.shipment_date))}</span>`);
         if (r.missing) tags.push('<span class="tag old">not found</span>');
         const cs = !r.missing && !results && cycleState(r);
-        if (cs === 'out') tags.push('<span class="tag old" title="Not on the transfer list\'s order snapshot: arrived after the cut-off, or older. Don\'t batch against the transfer stock.">not in cycle</span>');
+        if (cs === 'out') tags.push('<span class="tag old" title="Not on the latest transfer list\'s order snapshot: arrived after the cut-off, or older. Flag only; you can still batch it.">not in cycle</span>');
         if (cs === 'far') tags.push('<span class="tag old" title="Ship date beyond the transfer window">ships later</span>');
         if (!sv && r.ship_via && !isBatch(r.ship_via)) tags.push(`<span class="tag" title="Ship Via already set in Acumatica; locking in a load replaces it">Acumatica: ${esc(r.ship_via)}</span>`);
         const w = !r.missing && suggestWave(r, B.date);
@@ -318,8 +318,8 @@
     const counted = (c.orders || []).filter(o => o.counted).length;
     const waiting = B.free.filter(r => cycleState(r) === 'in').length, other = B.free.length - waiting;
     const toggle = other ? ` <button class="btn small" data-act="cycletoggle">${B.cycleOnly ? `Show all ${B.free.length} shipments` : 'Show cycle only'}</button>` : '';
-    if (c.status === 'sent') return `<div class="warnbox bad"><b>Don't batch yet.</b> Transfer ${esc(c.list_nbr)} was sent to Ashenheim at ${esc(t(c.sent_at))} and isn't received at 71 yet. A coordinator marks it received on the Transfers page once it's up and released in Acumatica.</div>`;
-    return `<div class="warnbox info"><b>${esc(c.list_nbr)}</b> released at 71 ${esc(t(c.received_at))}${c.received_name ? ' by ' + esc(c.received_name) : ''}. Batch only its ${plural(counted, 'order')} (cut-off ${esc(t(c.cutoff_to))}): ${plural(waiting, 'shipment')} waiting${other ? `, ${other} not in this cycle` : ''}.${toggle}</div>`;
+    if (c.status === 'sent') return `<div class="warnbox info"><b>Heads up:</b> transfer ${esc(c.list_nbr)} was sent to Ashenheim at ${esc(t(c.sent_at))} and isn't marked received at 71 yet, so its stock may not be there. Batching is not blocked. Cut-off ${esc(t(c.cutoff_to))}: ${plural(waiting, 'shipment')} on its ${plural(counted, 'order')}${other ? `, ${other} tagged "not in cycle"` : ''}.${toggle}</div>`;
+    return `<div class="warnbox info"><b>${esc(c.list_nbr)}</b> released at 71 ${esc(t(c.received_at))}${c.received_name ? ' by ' + esc(c.received_name) : ''}. Cut-off ${esc(t(c.cutoff_to))}: ${plural(waiting, 'shipment')} on its ${plural(counted, 'order')}${other ? `, ${other} tagged "not in cycle" (flag only, still batchable)` : ''}.${toggle}</div>`;
   }
 
   function renderPool(free) {
@@ -559,7 +559,6 @@
     const a = btn.dataset.act;
     if (a === 'clear') { B.sel.clear(); render(); return; }
     if (a === 'clear_filter') { B.q = ''; B.status = 'all'; render(); return; }
-    if (cycleGated() && (a === 'suggest' || a === 'move')) { toast("Transfer " + B.cycle.list_nbr + " isn't received at 71 yet. Batching waits for that.", true); return; }
     if (a === 'cycletoggle') { B.cycleOnly = !B.cycleOnly; B.sel.clear(); render(); return; }
     if (a === 'suggest') { suggest(); return; }
     if (a === 'sync_test') {
