@@ -163,9 +163,13 @@ Deno.serve(async (req) => {
         if (o) return { status: r.status, header: flat(o), first_line: flat(o.Details?.[0]), lines: o.Details?.length ?? 0 };
         // No TR exists yet: list the SalesOrder fields that matter, from the endpoint's schema.
         const sc = await acu('GET', `${SO}/$adHocSchema`);
-        const all: any[] = Array.isArray(sc.data) ? sc.data : (sc.data?.fields ?? []);
-        const names = all.map((x: any) => (typeof x === 'string' ? x : x?.fieldName ?? x?.name)).filter(Boolean);
-        return { status: r.status, empty: true, schema_status: sc.status, fields: names.filter((n: string) => /warehouse|extern|ref|hold|customerorder|ordertype/i.test(n)), total_fields: names.length };
+        // The schema comes back as an object keyed by field name (Details nested), or sometimes a list; read both.
+        const keys = (x: any): string[] => Array.isArray(x) ? x.map((y: any) => (typeof y === 'string' ? y : y?.fieldName ?? y?.name)).filter(Boolean)
+          : (x && typeof x === 'object' ? Object.keys(x) : []);
+        const top = keys(sc.data?.fields ?? sc.data), det = keys(sc.data?.Details?.fields ?? sc.data?.Details);
+        const hit = (n: string) => /warehouse|extern|ref|hold|customerorder|ordertype|status/i.test(n);
+        return { status: r.status, empty: true, schema_status: sc.status, fields: top.filter(hit), detail_fields: det.filter(hit),
+                 total_fields: top.length, total_detail_fields: det.length, raw_start: top.length ? undefined : JSON.stringify(sc.data).slice(0, 600) };
       })) });
       case 'create': return json(await create(Number(p.list_id), actor));
       default: return json({ ok: false, error: `unknown action ${p.action}` }, 400);
