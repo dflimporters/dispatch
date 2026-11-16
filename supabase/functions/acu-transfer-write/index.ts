@@ -1,8 +1,8 @@
 // acu-transfer-write: writes a SENT transfer list to Acumatica LIVE as a Sales Order of order type TR
-// (the Sales Orders screen, order type TR), ON HOLD. It does NOT use the Inventory Transfers screen.
+// (the Sales Orders screen, order type TR), created Open like one keyed by hand. It does NOT use the Inventory Transfers screen.
 //
-// The TR is a request for Ashenheim, like the one sales support keys by hand. It is created on hold and this
-// function never releases it, shows no shipment and moves no stock.
+// The TR is the request for Ashenheim, like the one sales support keys by hand. It is created Open (a TR goes
+// straight to Open on creation); this function creates no shipment and moves no stock.
 //
 // POST JSON { action, list_id? } with the signed-in user's token as Authorization: Bearer <token>
 // (checked here with auth.getUser; roles: batcher, supervisor or manager).
@@ -16,8 +16,7 @@
 //
 // Field names follow the SalesOrder create already used by dispatch-sub (OrderType, Details with
 // InventoryID / OrderQty / WarehouseID). The destination warehouse field (TO_WH_FIELD, default DestinationWarehouseID) is
-// UNVERIFIED: run `sample` and fix it before switching on. A wrong field makes Acumatica reject the whole
-// request; nothing is half-created.
+// verified against a real TR (TR210647): DestinationWarehouseID, ExternalRef, line InventoryID/OrderQty/UOM/WarehouseID.
 //
 // Secrets: ACU_LIVE_USERNAME / _PASSWORD / _TENANT (falling back to ACU_SHIPVIA_*); optional
 // ACU_TRANSFER_ORDER_TYPE (TR), ACU_TRANSFER_FROM_WH (ASHENHIEM), ACU_TRANSFER_TO_WH (71), ACU_TRANSFER_TO_WH_FIELD.
@@ -35,7 +34,7 @@ const ON = Deno.env.get('DISPATCH_LIVE_TRANSFER') === 'on';
 const ORDER_TYPE = Deno.env.get('ACU_TRANSFER_ORDER_TYPE') ?? 'TR';
 const FROM_WH = Deno.env.get('ACU_TRANSFER_FROM_WH') ?? 'ASHENHIEM';
 const TO_WH = Deno.env.get('ACU_TRANSFER_TO_WH') ?? '71';
-const TO_WH_FIELD = Deno.env.get('ACU_TRANSFER_TO_WH_FIELD') ?? 'DestinationWarehouseID';   // UNVERIFIED: the screen's "Destination Warehouse"
+const TO_WH_FIELD = Deno.env.get('ACU_TRANSFER_TO_WH_FIELD') ?? 'DestinationWarehouseID';   // verified against TR210647
 const GAP_MS = 1000;
 const ROLES = ['batcher', 'supervisor', 'manager'];
 
@@ -67,7 +66,6 @@ function payload(list: any, send: any[]) {
     OrderType: val(ORDER_TYPE),
     ExternalRef: val(list.list_nbr),   // the TR screen's External Reference (it has no Customer Order field)
     Description: val(`Portal transfer list ${list.list_nbr}`),
-    Hold: val(true),
     [TO_WH_FIELD]: val(TO_WH),
     Details: send.map(l => ({ InventoryID: val(l.inventory_id), OrderQty: val(Number(l.send_qty)), UOM: val('CASE'), WarehouseID: val(FROM_WH) })),
   };
@@ -153,7 +151,7 @@ Deno.serve(async (req) => {
   const actor = prof?.full_name ?? u.user.email ?? 'unknown';
   try {
     switch (p.action) {
-      case 'status': return json({ ok: true, enabled: ON, order_type: ORDER_TYPE, from: FROM_WH, to: TO_WH, to_field: TO_WH_FIELD, on_hold: true });
+      case 'status': return json({ ok: true, enabled: ON, order_type: ORDER_TYPE, from: FROM_WH, to: TO_WH, to_field: TO_WH_FIELD });
       case 'preview': { const { list, send } = await loadList(Number(p.list_id)); return json({ ok: true, enabled: ON, payload: payload(list, send) }); }
       case 'sample': return json({ ok: true, ...(await withSession('transfer sample', async () => {
         const f = encodeURIComponent(`OrderType eq '${ORDER_TYPE}'`);
