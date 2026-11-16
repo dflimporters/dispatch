@@ -11,11 +11,11 @@
 //   sample            -> read-only: the most recent TR order with all its fields and first line, to check the
 //                        field names (especially the destination warehouse) against a real one.
 //   create {list_id}  -> writes it. Refused unless DISPATCH_LIVE_TRANSFER = 'on', the list is live, sent (or
-//                        received) and not already written. Looks for an existing TR with the same Customer
-//                        Order ref (the list number) first, so a retry can't create a second one.
+//                        received) and not already written. Looks for an existing TR with the same External
+//                        Reference (the list number) first, so a retry can't create a second one.
 //
-// Field names follow the SalesOrder create already used by dispatch-sub (OrderType, CustomerOrder, Details with
-// InventoryID / OrderQty / WarehouseID). The destination warehouse field (TO_WH_FIELD, default ToWarehouseID) is
+// Field names follow the SalesOrder create already used by dispatch-sub (OrderType, Details with
+// InventoryID / OrderQty / WarehouseID). The destination warehouse field (TO_WH_FIELD, default DestinationWarehouseID) is
 // UNVERIFIED: run `sample` and fix it before switching on. A wrong field makes Acumatica reject the whole
 // request; nothing is half-created.
 //
@@ -35,7 +35,7 @@ const ON = Deno.env.get('DISPATCH_LIVE_TRANSFER') === 'on';
 const ORDER_TYPE = Deno.env.get('ACU_TRANSFER_ORDER_TYPE') ?? 'TR';
 const FROM_WH = Deno.env.get('ACU_TRANSFER_FROM_WH') ?? 'ASHENHIEM';
 const TO_WH = Deno.env.get('ACU_TRANSFER_TO_WH') ?? '71';
-const TO_WH_FIELD = Deno.env.get('ACU_TRANSFER_TO_WH_FIELD') ?? 'ToWarehouseID';   // UNVERIFIED
+const TO_WH_FIELD = Deno.env.get('ACU_TRANSFER_TO_WH_FIELD') ?? 'DestinationWarehouseID';   // UNVERIFIED: the screen's "Destination Warehouse"
 const GAP_MS = 1000;
 const ROLES = ['batcher', 'supervisor', 'manager'];
 
@@ -65,7 +65,7 @@ async function loadList(id: number) {
 function payload(list: any, send: any[]) {
   return {
     OrderType: val(ORDER_TYPE),
-    CustomerOrder: val(list.list_nbr),
+    ExternalRef: val(list.list_nbr),   // the TR screen's External Reference (it has no Customer Order field)
     Description: val(`Portal transfer list ${list.list_nbr}`),
     Hold: val(true),
     [TO_WH_FIELD]: val(TO_WH),
@@ -120,8 +120,8 @@ async function create(listId: number, actor: string) {
   if (!claimed?.length) return { ok: false, error: list.acu_ref ? `Already written as ${list.acu_ref}` : 'A write for this list is already in progress or done' };
   try {
     const ref = await withSession('transfer write', async () => {
-      // A retry must not create a second TR: look for one with this Customer Order ref.
-      const f = encodeURIComponent(`OrderType eq '${ORDER_TYPE}' and CustomerOrder eq '${list.list_nbr}'`);
+      // A retry must not create a second TR: look for one with this External Reference.
+      const f = encodeURIComponent(`OrderType eq '${ORDER_TYPE}' and ExternalRef eq '${list.list_nbr}'`);
       const ex = await acu('GET', `${SO}?$filter=${f}&$select=OrderNbr,Status&$top=1`);
       if (!ex.ok) throw new Error(`Could not look up order type ${ORDER_TYPE} (${ex.status}): ${errText(ex.data)}`);
       if (Array.isArray(ex.data) && ex.data[0]) return String(v(ex.data[0].OrderNbr) ?? 'existing');
@@ -160,7 +160,12 @@ Deno.serve(async (req) => {
         const r = await acu('GET', `${SO}?$filter=${f}&$top=1&$expand=Details`);
         if (!r.ok) return { status: r.status, error: errText(r.data) };
         const o = Array.isArray(r.data) ? r.data[0] : null;
-        return o ? { status: r.status, header: flat(o), first_line: flat(o.Details?.[0]), lines: o.Details?.length ?? 0 } : { status: r.status, empty: true };
+        if (o) return { status: r.status, header: flat(o), first_line: flat(o.Details?.[0]), lines: o.Details?.length ?? 0 };
+        // No TR exists yet: list the SalesOrder fields that matter, from the endpoint's schema.
+        const sc = await acu('GET', `${SO}/$adHocSchema`);
+        const all: any[] = Array.isArray(sc.data) ? sc.data : (sc.data?.fields ?? []);
+        const names = all.map((x: any) => (typeof x === 'string' ? x : x?.fieldName ?? x?.name)).filter(Boolean);
+        return { status: r.status, empty: true, schema_status: sc.status, fields: names.filter((n: string) => /warehouse|extern|ref|hold|customerorder|ordertype/i.test(n)), total_fields: names.length };
       })) });
       case 'create': return json(await create(Number(p.list_id), actor));
       default: return json({ ok: false, error: `unknown action ${p.action}` }, 400);
