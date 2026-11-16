@@ -69,8 +69,14 @@
 <script src="common.js"></script>
 <script>
   const WINDOWS = [[0, 'since the last list'], [12, 'the last 12 hours'], [24, 'the last 24 hours'], [48, 'the last 48 hours'], [72, 'the last 3 days'], [168, 'the last 7 days']];
+  // Cutover (go-live day): one-off list of every open / back-ordered SO created before today (Jamaica time), any age.
+  // Cut-off = today 00:00, so the next normal "since the last list" run starts with today's orders.
+  const CUT_HOURS = 24 * 400;
+  const cutoverTo = () => new Date(new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Jamaica' }).format(new Date()) + 'T00:00:00-05:00').toISOString();
+  const pHours = () => T.cutover ? CUT_HOURS : (T.hours || null);
+  const pTo = () => T.cutover ? cutoverTo() : null;
   const HORIZON = 48;                      // hours: orders shipping later than this are "far dated"
-  const T = { lists: [], view: 'next', preview: [], lines: [], listOrders: [], win: null, hours: 0, includeFar: false, extra: 10, perContainer: 18,
+  const T = { lists: [], view: 'next', preview: [], lines: [], listOrders: [], win: null, hours: 0, cutover: false, includeFar: false, extra: 10, perContainer: 18,
               edits: new Map(), skip: new Set(), tick: new Set(), manual: new Map(), synced: null, busy: false, find: { q: '', results: [], pick: null, searching: false, err: '' } };
   try {
     const s = JSON.parse(localStorage.getItem('dispatch-transfer-opts2') || '{}');
@@ -90,10 +96,10 @@
     T.synced = sync.data ? new Date(sync.data) : null;
     if (T.view !== 'next' && !T.lists.some(l => l.id === T.view)) T.view = 'next';
     if (T.view === 'next') {
-      const w = await sb.rpc('dispatch_transfer_window', { p_hours: T.hours || null, p_horizon_hours: HORIZON, p_include_far: T.includeFar, p_env: D.env });
+      const w = await sb.rpc('dispatch_transfer_window', { p_hours: pHours(), p_horizon_hours: HORIZON, p_include_far: T.includeFar, p_env: D.env, p_to: pTo() });
       if (w.error) throw w.error;
       T.win = w.data;
-      const { data, error } = await sb.rpc('dispatch_transfer_preview', { p_env: D.env, p_extra_pct: T.extra, p_hours: T.hours || null,
+      const { data, error } = await sb.rpc('dispatch_transfer_preview', { p_env: D.env, p_extra_pct: T.extra, p_hours: pHours(),
         p_include_far: T.includeFar, p_horizon_hours: HORIZON, p_to: T.win.to });
       if (error) throw error;
       T.preview = data || [];
@@ -181,19 +187,19 @@
     const mins = T.synced ? Math.round((Date.now() - T.synced.getTime()) / 60000) : null;
     return `
       <div class="tctl">
-        <label>Orders created <select id="hours">${WINDOWS.map(x => `<option value="${x[0]}" ${x[0] === T.hours ? 'selected' : ''}>${x[1]}</option>`).join('')}</select></label>
+        <label>Orders created <select id="hours">${WINDOWS.map(x => `<option value="${x[0]}" ${!T.cutover && x[0] === T.hours ? 'selected' : ''}>${x[1]}</option>`).join('')}<option value="cut" ${T.cutover ? 'selected' : ''}>CUTOVER: everything before today</option></select></label>
         <label><input type="checkbox" id="far" ${T.includeFar ? 'checked' : ''}> Include orders shipping beyond ${HORIZON} h</label>
         <label>Extra <input type="number" id="extra" min="0" max="100" step="5" value="${T.extra}">%</label>
         <span class="spacer"></span>
         <button class="btn small" data-act="refresh">Refresh</button>
         <button class="btn primary" data-act="build" ${t.items ? '' : 'disabled'}>Build transfer list</button>
       </div>
-      <div class="tctl"><span><b>Covers</b> ${plural(w.orders || 0, 'open order')} created ${esc(fmtTime(w.from))} → ${esc(fmtTime(w.to))}${w.since ? ` (since the cut-off of ${esc(w.since)})` : T.hours ? '' : ' (no earlier list: last 24 hours)'}</span>
+      <div class="tctl"><span><b>Covers</b> ${plural(w.orders || 0, 'open order')} created ${T.cutover ? 'before' : esc(fmtTime(w.from)) + ' →'} ${esc(fmtTime(w.to))}${w.since ? ` (since the cut-off of ${esc(w.since)})` : T.hours ? '' : ' (no earlier list: last 24 hours)'}</span>
         <span class="sync">${mins == null ? '' : `Orders and stock as of ${mins < 1 ? 'just now' : mins + ' min ago'}`}</span></div>
       ${farBox()}
       ${lateBox()}
       ${staleBox()}
-      ${T.hours ? `<div class="warnbox info noprint">Fixed window: orders from ${winLabel(T.hours)}. Normally leave this on "since the last list" so no orders are missed or counted twice.</div>` : ''}
+      ${T.cutover ? `<div class="warnbox info noprint"><b>Cutover list.</b> Every open and back-ordered SO created before today (any age) is counted. Cut-off is today 00:00, so the next list on "since the last list" starts with today's orders. Use once, on go-live day.</div>` : T.hours ? `<div class="warnbox info noprint">Fixed window: orders from ${winLabel(T.hours)}. Normally leave this on "since the last list" so no orders are missed or counted twice.</div>` : ''}
       <div class="kpis">
         <div class="kpi"><div class="l">Items to send</div><div class="v">${t.items}</div><div class="s">${fmt(t.cases)} cases · ${rows.filter(r => r.in_transit).length} in transit</div></div>
         ${palletKpis(t)}
@@ -393,7 +399,7 @@
         + (T.includeFar && T.win.far_orders ? `\n\nIt INCLUDES ${plural(T.win.far_orders, 'order')} shipping more than ${HORIZON} hours out.` : ''))) return;
       act(async () => {
         const id = await rpc('dispatch_transfer_build', { p_env: D.env, p_extra_pct: T.extra, p_cutoff_to: T.win.to, p_lines: lines,
-          p_hours: T.hours || null, p_include_far: T.includeFar, p_horizon_hours: HORIZON });
+          p_hours: pHours(), p_include_far: T.includeFar, p_horizon_hours: HORIZON });
         T.edits.clear(); T.skip.clear(); T.tick.clear(); T.manual.clear();
         T.view = id;
         toast('Transfer list built');
@@ -425,7 +431,7 @@
   document.getElementById('app').addEventListener('change', e => {
     const t = e.target;
     if (t.id === 'extra') { T.extra = Math.max(0, Number(t.value) || 0); saveOpts(); T.edits.clear(); refresh(); return; }
-    if (t.id === 'hours') { T.hours = Number(t.value) || 0; saveOpts(); T.edits.clear(); T.skip.clear(); T.tick.clear(); refresh(); return; }
+    if (t.id === 'hours') { T.cutover = t.value === 'cut'; if (!T.cutover) { T.hours = Number(t.value) || 0; saveOpts(); } T.edits.clear(); T.skip.clear(); T.tick.clear(); refresh(); return; }
     if (t.id === 'far') { T.includeFar = t.checked; T.edits.clear(); T.skip.clear(); T.tick.clear(); refresh(); return; }
     if (t.id === 'perc') { T.perContainer = Math.max(1, Number(t.value) || 18); saveOpts(); render(); return; }
     if (t.dataset.mqty !== undefined) {
