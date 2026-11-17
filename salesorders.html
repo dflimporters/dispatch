@@ -56,14 +56,15 @@
   const STATUSES = ['Open', 'Back Order', 'Shipping', 'Credit Hold', 'On Hold'];
   const CANT_SHIP = ['Credit Hold', 'On Hold'];
   // Shipping zone tabs: the groups used in Acumatica's Sales Orders tabs, with the smaller zones folded into them.
-  // Zones marked (?) are suggestions that Joel still has to confirm.
+  // Confirmed by Joel 2026-11-17: Spanish Town is its own tab; Portmorant is under St. Thomas.
   const ZONE_GROUPS = [
     ['Kingston', ['KINGSTON', 'STONYHILL']],
     ['Downtown', ['DOWNTOWN']],
-    ['Portmore', ['PORTMORE', 'SPANISHTOWN', 'PORTMORANT']],
+    ['Portmore', ['PORTMORE']],
+    ['Spanish Town', ['SPANISHTOWN']],
     ['Old Harbour', ['OLDHARBOUR']],
     ['Linstead', ['LINSTEAD', 'EWARTON']],
-    ['St. Thomas', ['MORANTBAY', 'YALLAHS', 'ALBION', 'SEAFORTH']],
+    ['St. Thomas', ['MORANTBAY', 'YALLAHS', 'ALBION', 'SEAFORTH', 'PORTMORANT']],
     ['Portland', ['PORTANTONIO', 'BUFFBAY']],
     ['St. Mary', ['ANNOTTOBAY', 'ORACABESSA', 'PORTMARIA', 'HIGHGATE']],
     ['St. Ann', ['OCHORIOS', 'STANNSBAY', 'RUNAWAYBAY']],
