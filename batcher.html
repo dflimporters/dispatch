@@ -92,7 +92,7 @@
   const B = { date: jmDate(0), free: [], hasSv: [], loads: [], dates: [], sel: new Set(), sync: null, busy: false, wave: loadWaveFilter('batcher'), tab: loadKindTab(),
     ltab: new Map(),
     drafts: new Map(), returning: new Set(), was: new Map(), poll: null, open: new Set(), seen: new Set(),
-    cycle: null, cycMap: new Map(), cycleOnly: false };
+    cycle: null, cycMap: new Map(), cycleOnly: false, ordAt: new Map(), focusOnly: false };
 
   // Transfer cycle (transfers.html): the orders that were on the latest transfer list when it was built at the 2pm cut-off.
   // Flag only: shipments not on that list are tagged "not in cycle"; nothing is hidden or blocked (cycleOnly is an optional filter).
@@ -107,11 +107,28 @@
   }
   const cycleGated = () => !!(B.cycle && B.cycle.status === 'sent');
 
+  // Batch focus (automatic): today's batching is every order placed before 2pm (Jamaica) on the previous working day
+  // (Monday looks back to Friday). Orders placed after that cut-off belong to the next cycle. Flag only: nothing is hidden or blocked.
+  function focusCut() {
+    const ymd = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Jamaica' }).format(new Date());
+    const d = new Date(ymd + 'T12:00:00Z');
+    do { d.setUTCDate(d.getUTCDate() - 1); } while (d.getUTCDay() === 0 || d.getUTCDay() === 6);
+    return new Date(d.toISOString().slice(0, 10) + 'T14:00:00-05:00');
+  }
+  function focusState(r) {
+    const cut = focusCut().getTime();
+    const orders = String(r.order_nbr || '').split(/,\s*/).filter(Boolean);
+    const at = orders.map(n => B.ordAt.get(n)).filter(Boolean);
+    if (!at.length) return null;
+    return at.every(t => t <= cut) ? 'now' : 'later';
+  }
+  const inFocusView = r => !B.focusOnly || focusState(r) === 'now';
+
   // The All / AM / PM filter: free shipments by suggested wave, loads by their wave.
   function inWave(r) { return B.wave === 'all' || suggestWave(r, B.date) === B.wave; }
   function loadInWave(l) { return B.wave === 'all' || l.wave === B.wave; }
   const inTab = r => (B.tab === 'special') === !!kindOf(r);
-  const inCycleView = r => !(B.cycle && B.cycleOnly) || cycleState(r) === 'in';
+  const inCycleView = inFocusView;
   function visFree() { return B.free.filter(inWave).filter(inTab).filter(inCycleView); }
   function visLoads() { return B.loads.filter(loadInWave).filter(l => (B.tab === 'special') === isSpecialLoad(l)); }
 
@@ -177,6 +194,16 @@
     } catch (e) { B.cycle = null; }
     B.cycMap = new Map(((B.cycle && B.cycle.orders) || []).map(o => [o.order_nbr, o]));
     const rows = pool.data || [];
+    try {   // when each order was placed, for the batch-focus tags
+      const nbrs = [...new Set(rows.flatMap(r => String(r.order_nbr || '').split(/,\s*/)).filter(Boolean))];
+      const m = new Map();
+      for (let i = 0; i < nbrs.length; i += 300) {
+        const { data, error } = await sb.rpc('dispatch_order_created', { p_nbrs: nbrs.slice(i, i + 300) });
+        if (error) throw error;
+        (data || []).forEach(x => m.set(x.order_nbr, new Date(x.created_on).getTime()));
+      }
+      B.ordAt = m;
+    } catch (e) { B.ordAt = new Map(); }
     // Which of these are already on a load (any date)?
     const taken = new Set();
     for (let i = 0; i < rows.length; i += 150) {
@@ -260,6 +287,7 @@
         <button class="btn primary" data-act="suggest" ${free.length ? '' : 'disabled'}>Suggest loads${B.sel.size && [...B.sel].every(freeByNbr) ? ' for selected' : B.wave !== 'all' ? ' (' + B.wave + ')' : ''}</button>
       </div>
       ${chips ? `<div class="controls">${chips}</div>` : ''}
+      ${focusBanner()}
       ${cycleBanner()}
       <div class="kpis">
         <div class="kpi ${free.length ? 'warn' : ''}"><div class="l">Not on a load</div><div class="v">${fmt(free.length)}</div><div class="s">${free.length ? fmt(fs_.vol) + ' vol · ' + money(fs_.value) : 'all loaded'}</div></div>
@@ -284,7 +312,8 @@
   }
 
   function shipTable_(rows, { cb = true, sv = false, zone = false, results = null, pickable = () => true } = {}) {
-    const sorted = rows.slice().sort((a, b) => (a.customer_name || '').localeCompare(b.customer_name || '') || vol(b) - vol(a));
+    const fr = x => (focusState(x) === 'now' ? 0 : 1);
+    const sorted = rows.slice().sort((a, b) => fr(a) - fr(b) || (a.customer_name || '').localeCompare(b.customer_name || '') || vol(b) - vol(a));
     const cols = (cb ? 1 : 0) + 5 + (zone ? 1 : 0) + (sv ? 1 : 0) + (results ? 1 : 0);
     return `<table class="ships"><thead><tr>${cb ? '<th class="cb"></th>' : ''}<th>Shipment</th><th>Customer</th>${zone ? '<th class="hide-m">Zone</th>' : ''}<th class="r">Qty</th><th class="r">Vol</th><th class="r">Value</th>${sv ? '<th>Ship via</th>' : ''}${results ? '<th>Acumatica</th>' : ''}</tr></thead>
       <tbody>${sorted.map(r => {
@@ -292,9 +321,9 @@
         const tags = [];
         if (r.shipment_date && r.shipment_date < B.date) tags.push(`<span class="tag old" title="Shipment date">${esc(niceDate(r.shipment_date))}</span>`);
         if (r.missing) tags.push('<span class="tag old">not found</span>');
-        const cs = !r.missing && !results && cycleState(r);
-        if (cs === 'out') tags.push('<span class="tag old" title="Not on the latest transfer list\'s order snapshot: arrived after the cut-off, or older. Flag only; you can still batch it.">not in cycle</span>');
-        if (cs === 'far') tags.push('<span class="tag old" title="Ship date beyond the transfer window">ships later</span>');
+        const fs = !r.missing && !results && focusState(r);
+        if (fs === 'now') tags.push('<span class="tag" style="color:var(--ok);border-color:var(--ok)" title="Order placed before the cut-off: batch today">batch today</span>');
+        if (fs === 'later') tags.push('<span class="tag old" title="Order placed after the cut-off: next cycle. Flag only; you can still batch it.">next cycle</span>');
         if (!sv && r.ship_via && !isBatch(r.ship_via)) tags.push(`<span class="tag" title="Ship Via already set in Acumatica; locking in a load replaces it">Acumatica: ${esc(r.ship_via)}</span>`);
         const w = !r.missing && suggestWave(r, B.date);
         return `<tr class="${sel ? 'sel' : ''}">
@@ -311,13 +340,22 @@
       }).join('')}</tbody></table>`;
   }
 
+  function focusBanner() {
+    if (!B.ordAt.size) return '';
+    const cut = focusCut();
+    const t = cut.toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'America/Jamaica' });
+    const now = B.free.filter(r => focusState(r) === 'now').length, later = B.free.filter(r => focusState(r) === 'later').length;
+    const toggle = later ? ` <button class="btn small" data-act="focustoggle">${B.focusOnly ? `Show all ${B.free.length} shipments` : 'Show batch-today only'}</button>` : '';
+    return `<div class="warnbox info"><b>Batch today:</b> every order placed before ${esc(t)}. ${plural(now, 'shipment')} to batch${later ? `, ${later} for orders placed after that (next cycle, flag only)` : ''}.${toggle}</div>`;
+  }
+
   function cycleBanner() {
     const c = B.cycle;
     if (!c) return '';
     const t = iso => iso ? new Date(iso).toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '';
     const counted = (c.orders || []).filter(o => o.counted).length;
     const waiting = B.free.filter(r => cycleState(r) === 'in').length, other = B.free.length - waiting;
-    const toggle = other ? ` <button class="btn small" data-act="cycletoggle">${B.cycleOnly ? `Show all ${B.free.length} shipments` : 'Show cycle only'}</button>` : '';
+    const toggle = '';
     if (c.status === 'sent') return `<div class="warnbox info"><b>Heads up:</b> transfer ${esc(c.list_nbr)} was sent to Ashenheim at ${esc(t(c.sent_at))} and isn't marked received at 71 yet, so its stock may not be there. Batching is not blocked. Cut-off ${esc(t(c.cutoff_to))}: ${plural(waiting, 'shipment')} on its ${plural(counted, 'order')}${other ? `, ${other} tagged "not in cycle"` : ''}.${toggle}</div>`;
     return `<div class="warnbox info"><b>${esc(c.list_nbr)}</b> released at 71 ${esc(t(c.received_at))}${c.received_name ? ' by ' + esc(c.received_name) : ''}. Cut-off ${esc(t(c.cutoff_to))}: ${plural(waiting, 'shipment')} on its ${plural(counted, 'order')}${other ? `, ${other} tagged "not in cycle" (flag only, still batchable)` : ''}.${toggle}</div>`;
   }
@@ -559,7 +597,7 @@
     const a = btn.dataset.act;
     if (a === 'clear') { B.sel.clear(); render(); return; }
     if (a === 'clear_filter') { B.q = ''; B.status = 'all'; render(); return; }
-    if (a === 'cycletoggle') { B.cycleOnly = !B.cycleOnly; B.sel.clear(); render(); return; }
+    if (a === 'focustoggle') { B.focusOnly = !B.focusOnly; B.sel.clear(); render(); return; }
     if (a === 'suggest') { suggest(); return; }
     if (a === 'sync_test') {
       btn.disabled = true; btn.textContent = 'Pulling from TEST…';

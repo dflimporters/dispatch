@@ -289,10 +289,12 @@
           <div class="lactions noprint" style="margin:0">
             ${editable ? `<button class="btn small danger" data-act="delete">Delete draft</button><button class="btn primary small" data-act="send">Mark sent to Ashenheim</button>` : ''}
             ${l.status === 'sent' ? `<button class="btn primary small" data-act="receive">Mark received at 71</button>` : ''}
+            ${l.env === 'live' && l.status !== 'draft' && l.acu_state !== 'created' ? `<button class="btn small" data-act="acutr" ${l.acu_state === 'creating' ? 'disabled' : ''}>${l.acu_state === 'failed' ? 'Retry' : 'Create'} TR order in Acumatica</button>` : ''}
             <button class="btn small" data-act="csv">Export CSV</button><button class="btn small" data-act="print">Print</button>
           </div></div>
         <div class="lstats"><span>Orders created ${esc(fmtTime(l.cutoff_from))} → ${esc(fmtTime(l.cutoff_to))}</span><span>+${fmt(l.extra_pct)}% extra</span>
-          <span>built by ${esc(l.built_name || '')}, ${esc(fmtTime(l.built_at))}</span>${l.sent_at ? `<span>sent by ${esc(l.sent_name || '')}, ${esc(fmtTime(l.sent_at))}</span>` : ''}${l.received_at ? `<span>received by ${esc(l.received_name || '')}, ${esc(fmtTime(l.received_at))}</span>` : ''}</div>
+          <span>built by ${esc(l.built_name || '')}, ${esc(fmtTime(l.built_at))}</span>${l.sent_at ? `<span>sent by ${esc(l.sent_name || '')}, ${esc(fmtTime(l.sent_at))}</span>` : ''}${l.received_at ? `<span>received by ${esc(l.received_name || '')}, ${esc(fmtTime(l.received_at))}</span>` : ''}
+          ${l.acu_state === 'created' ? `<span><b>Acumatica TR order ${esc(l.acu_ref || '')}</b> by ${esc(l.acu_name || '')}</span>` : l.acu_state === 'failed' ? `<span class="tag bad" title="${esc(l.acu_error || '')}">Acumatica write failed: ${esc((l.acu_error || '').slice(0, 120))}</span>` : l.acu_state === 'creating' ? '<span>Writing to Acumatica...</span>' : ''}</div>
         ${l.note ? `<div class="muted">${esc(l.note)}</div>` : ''}
       </div>
       ${T.listOrders.some(o => o.late && o.counted) ? `<div class="warnbox info noprint">Includes ${plural(T.listOrders.filter(o => o.late && o.counted).length, 'late order')} (created before the previous cut-off, synced after it).</div>` : ''}
@@ -409,6 +411,20 @@
     if (a === 'send') {
       if (!confirm(`Mark ${l.list_nbr} as sent to Ashenheim? It can't be changed after that.`)) return;
       act(() => rpc('dispatch_transfer_action', { p_list_id: l.id, p_action: 'send' }));
+      return;
+    }
+    if (a === 'acutr') {
+      if (!confirm(`Create a TR sales order in Acumatica for ${l.list_nbr}?\n\nIt is created Open as the request to Ashenheim: Ashenheim to 71, with the items and quantities on this list. You can add or change lines in Acumatica afterwards. It can only be created once.`)) return;
+      act(async () => {
+        const { data: { session } } = await sb.auth.getSession();
+        if (!session) throw new Error('Signed out; reload and sign in again');
+        const res = await fetch(`${SUPABASE_URL}/functions/v1/acu-transfer-write`, { method: 'POST',
+          headers: { 'Content-Type': 'application/json', apikey: SUPABASE_PUBLISHABLE_KEY, Authorization: `Bearer ${session.access_token}` },
+          body: JSON.stringify({ action: 'create', list_id: l.id }) });
+        let j = null; try { j = await res.json(); } catch (e) {}
+        if (!j || !j.ok) throw new Error((j && j.error) || `Acumatica write failed (${res.status})`);
+        toast('Created TR order ' + j.ref + ' in Acumatica');
+      });
       return;
     }
     if (a === 'receive') {
