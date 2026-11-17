@@ -72,6 +72,21 @@ function niceDate(iso) {
 function stamp(iso) {
   return iso ? new Date(iso).toLocaleString('en-GB', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit' }) : '';
 }
+// Batch focus: today's batching is every order placed before 2pm (Jamaica) on the previous working day
+// (Monday looks back to Friday). Returns 'now' (batch today), 'later' (next cycle) or null (time unknown).
+function batchFocusCut() {
+  const ymd = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Jamaica' }).format(new Date());
+  const d = new Date(ymd + 'T12:00:00Z');
+  do { d.setUTCDate(d.getUTCDate() - 1); } while (d.getUTCDay() === 0 || d.getUTCDay() === 6);
+  return new Date(d.toISOString().slice(0, 10) + 'T14:00:00-05:00');
+}
+function batchFocusOf(createdOn) {
+  if (!createdOn) return null;
+  return new Date(createdOn).getTime() <= batchFocusCut().getTime() ? 'now' : 'later';
+}
+function enteredAt(iso) {
+  return iso ? new Date(iso).toLocaleString('en-GB', { weekday:'short', day:'numeric', month:'short', hour:'2-digit', minute:'2-digit', timeZone:'America/Jamaica' }) : '';
+}
 function plural(n, word) { return `${n} ${word}${n === 1 ? '' : 's'}`; }
 // opts: { action: { label, fn }, ms }. Errors stay up longer; an action (Retry / Undo) longer still.
 function toast(msg, bad, opts) {
