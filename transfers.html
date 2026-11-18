@@ -45,6 +45,13 @@
   table.tlist td.r, table.tlist th.r { text-align:right; }
   table.tlist tr.part td { background:var(--warn-bg); }
   table.tlist tr.skip td { opacity:.45; }
+  table.tlist tr.oth td { background:#fffbeb; }
+  .tag.oth { background:#fde68a; color:#78350f; font-weight:700; }
+  table.tlist tr.na td { background:#fef2f2; }
+  table.tlist tr.na td:not(.noprint) { opacity:.8; }
+  table.tlist tr.na.skip td { opacity:.75; }
+  .tag.na { background:#b91c1c; color:#fff; font-weight:700; }
+  .tag.short { background:var(--warn-bg); color:#92400e; font-weight:600; }
   table.tlist input.q { width:80px; text-align:right; font:inherit; font-size:13px; padding:4px 6px; border:1px solid var(--border2); border-radius:6px; }
   table.tlist input.q.edited { border-color:var(--accent); background:var(--accent-bg); }
   .listhead { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px; margin-bottom:10px; }
@@ -77,7 +84,7 @@
   const pTo = () => T.cutover ? cutoverTo() : null;
   const HORIZON = 48;                      // hours: orders shipping later than this are "far dated"
   const T = { lists: [], view: 'next', preview: [], lines: [], listOrders: [], win: null, hours: 0, cutover: false, includeFar: false, extra: 10, perContainer: 18,
-              edits: new Map(), skip: new Set(), tick: new Set(), manual: new Map(), synced: null, busy: false, find: { q: '', results: [], pick: null, searching: false, err: '' } };
+              other: new Map(), edits: new Map(), skip: new Set(), tick: new Set(), manual: new Map(), synced: null, busy: false, find: { q: '', results: [], pick: null, searching: false, err: '' } };
   try {
     const s = JSON.parse(localStorage.getItem('dispatch-transfer-opts2') || '{}');
     if (s.extra != null) T.extra = s.extra;
@@ -114,6 +121,17 @@
       T.listOrders = od.data || [];
     }
   }
+  // Stock outside 71 and Ashenheim (total across warehouses less the two we sync). Best effort: the page works without it.
+  async function loadOther() {
+    const ids = [...new Set([...T.preview, ...T.lines, ...manualRows()].map(r => r.inventory_id))];
+    T.other = new Map();
+    if (!ids.length) return;
+    try {
+      const { data, error } = await sb.rpc('dispatch_transfer_stock_other', { p_ids: ids });
+      if (error) throw error;
+      (data || []).forEach(r => T.other.set(r.inventory_id, Number(r.on_hand_other)));
+    } catch (e) { console.warn('[transfers] other-warehouse stock unavailable', e); }
+  }
   const draft = () => T.lists.find(l => l.status === 'draft');
   const fmtTime = iso => iso ? new Date(iso).toLocaleString('en-GB', { weekday:'short', day:'numeric', month:'short', hour:'2-digit', minute:'2-digit' }) : '';
   const fmtDay = d => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-GB', { weekday:'short', day:'numeric', month:'short' }) : '';
@@ -139,8 +157,24 @@
     const k = r.inventory_id;
     if (T.skip.has(k)) return false;
     if (T.tick.has(k)) return true;
-    return !r.in_transit;
+    return !r.in_transit && !unavail(r);
   }
+  // Ashenheim is the only other warehouse: it is where the overflow stock lives. None there = we can't send it.
+  const unavail = r => Number(r.on_hand_ash) <= 0;
+  const otherQty = r => T.other.has(r.inventory_id) ? T.other.get(r.inventory_id) : null;   // null = not known
+  // 'ash' = Ashenheim has it, 'other' = none at Ashenheim but another warehouse has it, 'none' = none anywhere, 'ashnone' = other unknown
+  const availKind = r => Number(r.on_hand_ash) > 0 ? 'ash' : otherQty(r) == null ? 'ashnone' : otherQty(r) > 0 ? 'other' : 'none';
+  const ashCell = (r, q) => {
+    const a = Number(r.on_hand_ash) || 0, o = otherQty(r), k = availKind(r);
+    if (k === 'none') return '<span class="tag na" title="No stock at Ashenheim, 71 or any other warehouse">NONE ANYWHERE</span>';
+    if (k === 'other') return `<span class="tag oth" title="Nothing at Ashenheim. Another warehouse holds ${fmt(o)}: Ashenheim can't send it">Other warehouse · ${fmt(o)}</span>`;
+    if (k === 'ashnone') return '<span class="tag na" title="Nothing at Ashenheim (other warehouses unknown)">NONE at Ashenheim</span>';
+    return `<b>${fmt(a)}</b> <span class="muted">Ashenheim</span>${a < q ? ` <span class="tag short" title="Ashenheim has less than the quantity requested">short ${fmt(q - a)}</span>` : ''}${o > 0 ? ` <span class="muted" title="Also held in other warehouses">+${fmt(o)} elsewhere</span>` : ''}`;
+  };
+  const availTag = r => { const k = availKind(r);
+    return k === 'none' ? ' <span class="tag na" title="Out of stock in every warehouse">NOT AVAILABLE ANYWHERE</span>'
+      : k === 'other' ? ' <span class="tag oth" title="Not at Ashenheim; stock is in another warehouse">NOT AT ASHENHEIM · other warehouse</span>'
+      : k === 'ashnone' ? ' <span class="tag na" title="Ashenheim has none">NOT AVAILABLE</span>' : ''; };
   function pQty(r) { return T.edits.has(r.inventory_id) ? T.edits.get(r.inventory_id) : Number(r.suggested); }
   const manualRows = () => [...T.manual.values()];
   const previewSend = () => T.preview.filter(pTicked).map(r => ({ qty: pQty(r), pallet: Number(r.cases_per_pallet) || 0 }))
@@ -202,22 +236,23 @@
       ${T.cutover ? `<div class="warnbox info noprint"><b>Cutover list.</b> Every open and back-ordered SO created before today (any age) is counted. Cut-off is today 00:00, so the next list on "since the last list" starts with today's orders. Use once, on go-live day.</div>` : T.hours ? `<div class="warnbox info noprint">Fixed window: orders from ${winLabel(T.hours)}. Normally leave this on "since the last list" so no orders are missed or counted twice.</div>` : ''}
       <div class="kpis">
         <div class="kpi"><div class="l">Items to send</div><div class="v">${t.items}</div><div class="s">${fmt(t.cases)} cases · ${rows.filter(r => r.in_transit).length} in transit</div></div>
+        <div class="kpi"><div class="l">Not at Ashenheim</div><div class="v">${rows.filter(unavail).length}</div><div class="s">${rows.filter(r => availKind(r) === 'other').length} in another warehouse · ${rows.filter(r => ['none', 'ashnone'].includes(availKind(r))).length} ${T.other.size ? 'none anywhere' : 'none (others unknown)'} · unticked</div></div>
         ${palletKpis(t)}
         <div class="kpi"><div class="l">Orders covered</div><div class="v">${(w.orders || 0) - (T.includeFar ? 0 : (w.far_orders || 0))}</div><div class="s">${w.far_orders ? (T.includeFar ? `incl. ${w.far_orders} beyond ${HORIZON} h` : `${w.far_orders} beyond ${HORIZON} h left off`) : `none beyond ${HORIZON} h`}</div></div>
       </div>
       ${manualHtml(rows)}
       ${section('Needed for open orders', `demand less stock at 71, + ${T.extra}% extra`, rows, true)}
       ${addPanel()}
-      <p class="muted" style="margin-top:10px">Need = open qty on the orders less what is on hand at 71. Suggested = need + ${T.extra}% extra. Ashenheim decides what it can send. Items on a list sent but not yet received are in transit and left unticked.</p>`;
+      <p class="muted" style="margin-top:10px">Need = open qty on the orders less what is on hand at 71. Suggested = need + ${T.extra}% extra. Ashenheim decides what it can send. Items on a list sent but not yet received are in transit and left unticked. Items with none at Ashenheim are left unticked: amber = stock is in another warehouse (Ashenheim can't send it), red = none anywhere. Tick them to request anyway.</p>`;
   }
 
   function manualHtml() {
     const rows = manualRows();
     if (!rows.length) return '';
     return `<div class="sec-h">Added by hand <span class="muted">${plural(rows.length, 'item')} · not on the computed list</span></div>
-      <div class="card"><table class="tlist"><thead><tr><th>Item</th><th>Description</th><th class="r hide-m">On hand 71</th><th class="r">Pallets</th><th class="r">Send</th><th class="noprint"></th></tr></thead><tbody>
+      <div class="card"><table class="tlist"><thead><tr><th>Item</th><th>Description</th><th class="r hide-m">On hand 71</th><th class="r">Overflow stock</th><th class="r">Pallets</th><th class="r">Send</th><th class="noprint"></th></tr></thead><tbody>
       ${rows.map(m => `<tr data-manual="${esc(m.inventory_id)}"><td class="num">${esc(m.inventory_id)}</td><td>${esc(m.description || '')}</td>
-        <td class="r num hide-m">${fmt(m.on_hand_71)}</td><td class="r num">${Number(m.cases_per_pallet) > 1 ? r1(m.qty / m.cases_per_pallet) : '—'}</td>
+        <td class="r num hide-m">${fmt(m.on_hand_71)}</td><td class="r">${ashCell(m, m.qty)}</td><td class="r num">${Number(m.cases_per_pallet) > 1 ? r1(m.qty / m.cases_per_pallet) : '—'}</td>
         <td class="r"><input class="q" type="number" min="1" step="1" data-mqty value="${m.qty}" aria-label="Cases to send for ${esc(m.inventory_id)}"></td>
         <td class="noprint"><button class="btn small" data-act="mremove" data-item="${esc(m.inventory_id)}">Remove</button></td></tr>`).join('')}
       </tbody></table></div>`;
@@ -251,22 +286,24 @@
 
   function table(rows, preview, editable) {
     return `<table class="tlist"><thead><tr><th class="noprint"></th><th>Item</th><th>Description</th>
-      <th class="r">Orders</th><th class="r hide-m">Demand</th><th class="r hide-m">On hand 71</th><th class="r">Need</th><th class="r">Pallets</th><th class="r">Send</th></tr></thead>
+      <th class="r">Orders</th><th class="r hide-m">Demand</th><th class="r hide-m">On hand 71</th><th class="r">Overflow stock</th><th class="r">Need</th><th class="r">Pallets</th><th class="r">Send</th></tr></thead>
       <tbody>${rows.map(r => {
         const ticked = preview ? pTicked(r) : r.included;
         const q = preview ? pQty(r) : Number(r.send_qty);
         const canEdit = preview || editable;
         const pal = Number(r.cases_per_pallet) > 1 ? r1(q / Number(r.cases_per_pallet)) : '—';
-        return `<tr class="${ticked ? '' : 'skip'}" data-item="${esc(r.inventory_id)}">
+        return `<tr class="${ticked ? '' : 'skip'} ${availKind(r) === 'ash' ? '' : availKind(r) === 'other' ? 'oth' : 'na'}" data-item="${esc(r.inventory_id)}">
           <td class="noprint"><input type="checkbox" data-send ${ticked ? 'checked' : ''} ${canEdit ? '' : 'disabled'} aria-label="Send ${esc(r.inventory_id)}"></td>
           <td class="num">${esc(r.inventory_id)}</td>
           <td>${esc(r.description || '')}
+            ${availTag(r)}
             ${preview && r.in_transit ? ` <span class="tag" title="Sent, not yet received at 71">in transit · ${esc(r.in_transit)}</span>` : ''}
             ${r.section === 'manual' ? ' <span class="tag">added by hand</span>' : ''}
             ${Number(r.far_orders) > 0 ? ` <span class="tag old" title="Includes orders shipping more than ${HORIZON} hours out">${r.far_orders} far-dated</span>` : ''}</td>
           <td class="r num">${r.orders ?? ''}</td>
           <td class="r num hide-m">${r.demand == null ? '' : fmt(r.demand)}</td>
           <td class="r num hide-m">${fmt(r.on_hand_71)}</td>
+          <td class="r">${ashCell(r, q)}</td>
           <td class="r num"><b>${fmt(r.bumped)}</b></td>
           <td class="r num">${pal}</td>
           <td class="r">${canEdit ? `<input class="q ${(preview && T.edits.has(r.inventory_id)) || (!preview && Number(r.send_qty) !== Number(r.suggested)) ? 'edited' : ''}" type="number" min="0" step="1" data-qty value="${q}" aria-label="Cases to send for ${esc(r.inventory_id)}">` : `<b>${fmt(q)}</b>`}</td>
@@ -316,12 +353,12 @@
 
   // ------------------------------------------------------------------
   function csv(l) {
-    const head = ['List', 'Item', 'Description', 'Section', 'Orders', 'Demand', 'On hand 71', 'Need', 'Cases per pallet', 'Send', 'Pallets'];
+    const head = ['List', 'Item', 'Description', 'Section', 'Orders', 'Demand', 'On hand 71', 'At Ashenheim', 'Other warehouses', 'Need', 'Cases per pallet', 'Send', 'Pallets'];
     const q = s => `"${String(s == null ? '' : s).replace(/"/g, '""')}"`;
     const rows = T.lines.filter(x => x.included && Number(x.send_qty) > 0);
     const lines = [head.map(q).join(',')].concat(rows.map(x => {
       const cp = Number(x.cases_per_pallet) || 0;
-      return [l.list_nbr, x.inventory_id, x.description, x.section, x.orders, x.demand, x.on_hand_71, x.bumped, cp > 1 ? cp : '', x.send_qty, cp > 1 ? r1(Number(x.send_qty) / cp) : ''].map(q).join(',');
+      return [l.list_nbr, x.inventory_id, x.description, x.section, x.orders, x.demand, x.on_hand_71, x.on_hand_ash, otherQty(x) == null ? '' : otherQty(x), x.bumped, cp > 1 ? cp : '', x.send_qty, cp > 1 ? r1(Number(x.send_qty) / cp) : ''].map(q).join(',');
     }));
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([lines.join('\r\n')], { type: 'text/csv' }));
@@ -473,7 +510,7 @@
   });
 
   async function refresh() {
-    try { await loadAll(); render(); }
+    try { await loadAll(); await loadOther(); render(); }
     catch (e) { console.error('[transfers]', e); document.getElementById('main').innerHTML = errBox(e); }
   }
   function editing() {
