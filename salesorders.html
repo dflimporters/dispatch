@@ -25,11 +25,13 @@
 <link rel="stylesheet" href="common.css">
 <style>
   .so-ctl { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
-  .so-ctl input[type=search], .so-ctl select, .so-ctl input[type=date] { font:inherit; font-size:13px; padding:6px 10px; border:1px solid var(--border2); border-radius:8px; background:#fff; }
+  .so-ctl input[type=search], .so-ctl select, .so-ctl input[type=date] { font:inherit; font-size:13px; padding:6px 10px; border:1px solid var(--border2); border-radius:8px; background:var(--surface); color:var(--text); }
   .so-ctl input[type=search] { min-width:200px; flex:1; max-width:320px; }
   .so-chips { display:flex; gap:6px; flex-wrap:wrap; }
-  .so-chips button { font:inherit; font-size:12.5px; font-weight:600; padding:5px 11px; border-radius:999px; border:1px solid var(--border2); background:#fff; color:var(--text-muted); cursor:pointer; }
+  .so-chips button { font:inherit; font-size:12.5px; font-weight:600; padding:5px 11px; border-radius:999px; border:1px solid var(--border2); background:var(--surface); color:var(--text-muted); cursor:pointer; }
   .so-chips button.on { background:var(--navy); border-color:var(--navy); color:#fff; }
+  :root[data-theme=dark] .so-chips button:hover { background:#1b2740; color:var(--text); }
+  :root[data-theme=dark] .so-chips button.on { background:#2f5fc4; border-color:#2f5fc4; color:#fff; }
   .so-wrap { overflow-x:auto; }
   table.so { width:100%; border-collapse:collapse; font-size:13px; min-width:760px; }
   table.so th { text-align:left; font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:.3px; padding:8px; border-bottom:1px solid var(--border); background:#f8fafc; white-space:nowrap; }
