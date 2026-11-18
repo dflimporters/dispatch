@@ -1,7 +1,7 @@
 -- Add a WHOLE load onto an existing load of another trucker (Joel, 2026-11-12).
 -- lm_reassign_shipments gains p_whole: the source load may be emptied (all its shipments move to the
 -- target, which is then required). The emptied load stays as a record with no shipments; the Load
--- Sheets page hides loads that have none.
+-- Sheets page shows it as cancelled, with the target load and reason read from its 'reassign' load_events row.
 --
 -- Print fix: invoice_print_fetch now reports the CURRENT trucker, not the Ship Via Acumatica had when the
 -- invoice was synced: the Ship Via of the load the invoice's shipment is on now, else the DELIVERVIA

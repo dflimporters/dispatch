@@ -397,19 +397,21 @@
         <span><b>Date</b> ${esc(niceDate(s.load_date))}${s.wave && s.wave !== 'ACU' ? ' · ' + esc(s.wave) : ''}</span></div>`;
   }
   const stopUnits = st => (st.shipments || []).reduce((t, x) => t + (x.lines || []).reduce((u, l) => u + Number(l.qty || 0), 0), 0);
-  const stopLines = st => (st.shipments || []).reduce((t, x) => t + (x.lines || []).length, 0);
+  // Shipments the checker zeroed out have no lines left and are never invoiced: keep them (and stops that only had
+  // them) off the check-off sheets.
+  const shippingStops = s => (s.stops || []).map(st => ({ ...st, shipments: (st.shipments || []).filter(x => (x.lines || []).length) })).filter(st => st.shipments.length);
   function checkFoot(s) {
     return `<div class="csign"><span>Checker: ____________________</span><span>Trucker: ____________________</span><span>Loaded at: ________</span></div>
       <div class="foot"><span>${esc(s.check_status === 'confirmed' ? 'Quantities as confirmed by the checker.' : 'Not confirmed by the checker yet: quantities may change. Reprint after confirming.')}</span><span>Printed ${esc(stamp(new Date().toISOString()))}</span></div>`;
   }
   function checkSummaryHtml(s) {
-    const stops = s.stops || [];
+    const stops = shippingStops(s);
     return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: summary')}
-      <table><thead><tr><th>#</th><th>Customer</th><th>Address</th><th>Area</th><th>Invoices</th><th class="r">Lines</th><th class="r">Units</th><th class="b">Loaded</th><th class="b">Delivered</th><th>Notes</th></tr></thead><tbody>
+      <table><thead><tr><th>#</th><th>Customer</th><th>Address</th><th>Area</th><th>Invoices</th><th class="r">Units</th><th class="b">Loaded</th><th class="b">Delivered</th><th>Notes</th></tr></thead><tbody>
         ${stops.map(x => `<tr><td class="n">${x.seq}</td><td><b>${esc(x.customer_name || x.customer_id)}</b></td><td class="addr">${esc([x.address, x.city].filter(Boolean).join(', '))}</td><td>${esc(x.zone || x.city || '')}</td>
-          <td>${esc((x.shipments || []).map(i => i.invoice_nbr || 'not invoiced').join(', '))}</td><td class="r">${stopLines(x)}</td><td class="r">${qn(stopUnits(x))}</td>
+          <td>${esc((x.shipments || []).map(i => i.invoice_nbr || 'not invoiced').join(', '))}</td><td class="r">${qn(stopUnits(x))}</td>
           <td class="b"><span class="box"></span></td><td class="b"><span class="box"></span></td><td class="nt"></td></tr>`).join('')}
-        <tr class="tot"><td></td><td><b>Total</b></td><td></td><td></td><td></td><td>${plural(stops.reduce((t, x) => t + (x.shipments || []).length, 0), 'invoice')}</td><td class="r">${stops.reduce((t, x) => t + stopLines(x), 0)}</td><td class="r">${qn(stops.reduce((t, x) => t + stopUnits(x), 0))}</td><td></td><td></td><td></td></tr>
+        <tr class="tot"><td></td><td><b>Total</b></td><td></td><td></td><td>${plural(stops.reduce((t, x) => t + (x.shipments || []).length, 0), 'invoice')}</td><td class="r">${qn(stops.reduce((t, x) => t + stopUnits(x), 0))}</td><td></td><td></td><td></td></tr>
       </tbody></table>${checkFoot(s)}</div>`;
   }
   // Detailed: item first, then each customer taking it. The trucker loads one item for everyone at a time.
@@ -424,7 +426,7 @@
     })));
     const list = [...items.values()].sort((x, y) => String(x.descr || x.id).localeCompare(String(y.descr || y.id), undefined, { numeric: true, sensitivity: 'base' }));
     return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: by item', true)}
-      <div class="cmeta"><span><b>Items</b> ${list.length}</span><span><b>Stops</b> ${(s.stops || []).length}</span><span><b>Units</b> ${qn(list.reduce((t, x) => t + x.total, 0))}</span></div>
+      <div class="cmeta"><span><b>Items</b> ${list.length}</span><span><b>Stops</b> ${shippingStops(s).length}</span><span><b>Units</b> ${qn(list.reduce((t, x) => t + x.total, 0))}</span></div>
       ${list.map(it => `<div class="stop"><div class="stophd"><span class="mono"><b>${esc(it.id || '')}</b></span><span><b>${esc(it.descr || '')}</b></span><span class="sp"></span><span>${esc(it.uom || '')}</span><span class="z">Total ${qn(it.total)}</span></div>
         <table><thead><tr><th class="b">Loaded</th><th>#</th><th>Customer</th><th>Area</th><th>Invoice</th><th class="r">Qty</th><th class="b">Delivered</th></tr></thead><tbody>
           ${it.rows.map(r => `<tr><td class="b"><span class="box"></span></td><td class="n">${r.seq}</td><td class="cust">${esc(r.cust)}</td><td>${esc(r.zone || '')}</td><td class="mono">${esc(r.inv)}</td><td class="r"><b>${qn(r.qty)}</b></td><td class="b"><span class="box"></span></td></tr>`).join('')}
