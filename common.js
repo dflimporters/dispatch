@@ -545,7 +545,30 @@ function loadMatches(l, q) {
   return words.every(w => l._hay.includes(w));
 }
 function searchBox(q) {
-  return `<input type="search" id="q" class="searchbox" value="${esc(q)}" placeholder="Search ship via, zone or customer" aria-label="Search loads" autocomplete="off">`;
+  return `<input type="search" id="q" class="searchbox" value="${esc(q)}" placeholder="Search load number, ship via, zone or customer" aria-label="Search loads" autocomplete="off">`;
+}
+// A full load number typed in the search ("L-1118-...") belongs to a particular day: returns that day (YYYY-MM-DD), else null.
+// The year isn't in the number, so it is the latest year that doesn't put the date in the future.
+function loadNbrDay(q) {
+  const m = /^\s*l[-\s]?(\d{2})(\d{2})[-\s]/i.exec(String(q || ''));
+  if (!m) return null;
+  const dd = Number(m[1]), mm = Number(m[2]);
+  if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
+  const today = jmDate(0);
+  let y = Number(today.slice(0, 4));
+  const iso = yy => yy + '-' + m[2] + '-' + m[1];
+  if (iso(y) > today) y--;
+  const d = iso(y);
+  return new Date(d + 'T00:00:00Z').getUTCDate() === dd ? d : null;
+}
+// Who is getting an item on a load: small name chips under the item. list = [{name, qty}].
+function custChips(list) {
+  if (!list || !list.length) return '';
+  const many = list.length > 1;
+  return `<div class="custs" aria-label="Customers getting this item">${list.map(c => `<span class="cust">${esc(c.name)}${many ? ` <b>${fmt(c.qty)}</b>` : ''}</span>`).join('')}</div>`;
+}
+function custIndex(rows) {
+  return new Map((rows || []).map(r => [r.load_id + '|' + r.inventory_id, r.list]));
 }
 // Re-draws after a keystroke without losing the caret in the search box.
 function keepSearchFocus(draw) {
@@ -877,3 +900,54 @@ function itemSorter() {
     : (a, b) => c(a.inventory_id, b.inventory_id);
 }
 function sortButton() { return `<button class="btn small" id="sortBtn" title="Change the order of the lines">Sort: ${sortMode() === 'name' ? 'A–Z' : 'Item ID'}</button>`; }
+
+// ------------------------------------------------------------------
+// Search shared by Load sheets and Invoicing: load / shipment / order number, customer, invoice number or item,
+// over loads of the last 48 hours (dispatch_search). The panel sits above #main so page redraws leave it alone.
+// opts.onPick(row) runs when a result is clicked (null: the row just links to Control Tower).
+// ------------------------------------------------------------------
+function mountSearch(opts) {
+  const main = document.getElementById('main');
+  if (!main || document.getElementById('gsearch')) return;
+  const box = document.createElement('div');
+  box.id = 'gsearch';
+  box.className = 'card';
+  box.style.cssText = 'padding:12px 14px;margin-bottom:14px';
+  box.innerHTML = `<style>#gsearch .mono{font-family:ui-monospace,Consolas,monospace}#gsearch table{border-collapse:collapse}#gsearch th{text-align:left;font-size:12px;padding:4px 8px}#gsearch td{padding:5px 8px;border-top:1px solid rgba(128,128,128,.25);vertical-align:top}#gsearch .r{text-align:right;white-space:nowrap}</style><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <b>Search</b><input class="txt" id="gsq" type="search" autocomplete="off" style="flex:1;min-width:240px"
+        placeholder="Load, shipment or order number, customer, invoice number or item">
+      <span class="muted">Loads from the last 48 hours</span></div><div id="gsres"></div>`;
+  main.parentNode.insertBefore(box, main);
+  const input = box.querySelector('#gsq'), out = box.querySelector('#gsres');
+  let timer = null, seq = 0, rows = [];
+  const KIND = { load: 'Load', shipment: 'Shipment', order: 'Order', customer: 'Customer', invoice: 'Invoice', item: 'Item' };
+  const draw = (q, state) => {
+    if (state === 'busy') { out.innerHTML = '<div class="muted" style="margin-top:8px">Searching…</div>'; return; }
+    if (state === 'short') { out.innerHTML = ''; return; }
+    if (state === 'err') { out.innerHTML = '<div class="warnbox bad" style="margin-top:8px">Search failed. Try again.</div>'; return; }
+    if (!rows.length) { out.innerHTML = `<div class="muted" style="margin-top:8px">Nothing found for "${esc(q)}" on loads from the last 48 hours.</div>`; return; }
+    out.innerHTML = `<div class="muted" style="margin:8px 0 4px">${rows.length}${rows.length >= 200 ? '+' : ''} found${rows.length >= 200 ? ' (showing the first 200: narrow it down)' : ''}</div>
+      <div style="overflow-x:auto"><table style="width:100%"><thead><tr><th>Load</th><th>Shipment</th><th>Customer</th><th>Order</th><th>Invoice</th><th>Matched</th><th></th></tr></thead><tbody>
+      ${rows.map((r, i) => `<tr><td><b class="mono">${esc(r.load_nbr)}</b>${r.closed_at ? ' <span class="pill info">Closed</span>' : ''}<div class="muted" style="font-size:12px">${esc(niceDate(r.load_date))} · ${esc(r.ship_via || '—')}</div></td>
+        <td class="mono">${esc(r.shipment_nbr || '—')}</td><td>${esc(r.customer_name || r.customer_id || '')}</td><td class="mono">${esc(r.order_nbr || '')}</td>
+        <td class="mono">${esc((r.invoices || []).join(', '))}</td>
+        <td>${(r.matched || []).map(k => `<span class="pill info">${esc(KIND[k] || k)}</span>`).join(' ')}${r.item ? `<div class="muted" style="font-size:12px">${esc(r.item)}</div>` : ''}</td>
+        <td class="r"><button class="btn small" data-gs="${i}">Show</button> <a class="btn small" href="tower.html#load=${r.load_id}">Tower</a></td></tr>`).join('')}</tbody></table></div>`;
+  };
+  const run = async () => {
+    const q = input.value.trim(), my = ++seq;
+    if (q.length < 2) { rows = []; draw(q, 'short'); return; }
+    draw(q, 'busy');
+    const { data, error } = await sb.rpc('dispatch_search', { p_env: D.env, p_q: q });
+    if (my !== seq) return;                       // a newer search has started
+    if (error) { console.error('[search]', error); draw(q, 'err'); return; }
+    rows = data || [];
+    draw(q);
+  };
+  input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 300); });
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(timer); run(); } });
+  out.addEventListener('click', e => {
+    const b = e.target.closest('[data-gs]');
+    if (b && opts && opts.onPick) opts.onPick(rows[Number(b.dataset.gs)]);
+  });
+}

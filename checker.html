@@ -25,6 +25,9 @@
   .cload .sub { font-size:13px; color:var(--text-muted); margin-top:4px; }
   .back { font:inherit; font-size:14px; font-weight:600; background:none; border:0; color:var(--accent); cursor:pointer; padding:4px 0; margin-bottom:8px; }
   .item { display:grid; grid-template-columns:minmax(0,1fr) 70px auto; gap:8px 12px; align-items:center; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:8px 12px; margin-bottom:6px; }
+  .zchips { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:0 0 10px; }
+  .zchips .zl { font-size:13px; font-weight:700; color:var(--navy); }
+  .zchip { font-size:13px; font-weight:600; padding:3px 10px; border-radius:999px; background:var(--navy); color:#fff; }
   .fbar { display:flex; gap:8px; align-items:center; margin:0 0 8px; }
   @media (max-width:1100px) { .item { grid-template-columns:minmax(0,1fr) 70px; } .item .acts { grid-column:1 / -1; } }
   .item.ok { border-color:#34d399; border-left-width:6px; background:var(--ok-bg); }
@@ -84,6 +87,7 @@
     if (K.saving > 0 || (K.epoch || 0) !== e0) return false;
     K.loads = loads.sort((a, b) => isSpecialLoad(b) - isSpecialLoad(a) || (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)); // pickup / donation / promotion first, then in load-number (creation) order
     K.staged = r.data.staged || [];
+    K.cust = custIndex(r.data.customers);
     K.areaDone = r.data.done || [];
     K.picks = new Map(ids.map(id => [id, (r.data.picks || []).filter(x => x.load_id === id)]));
     K.items = new Map(ids.map(id => [id, new Map((r.data.items || []).filter(x => x.load_id === id).map(x => [x.inventory_id, x]))]));
@@ -190,7 +194,8 @@
     return `
       <div class="lhead" style="margin-bottom:6px"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${shipsTag(l)}${loadKindTags(l)}${waveTag(l.wave)} ${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b>
         <span class="target">${esc(l.ship_via || '')}</span> <span class="muted">${esc(l.contractor || '')}</span></div>${checkPill(l)}</div>
-      <div class="muted" style="margin-bottom:10px">${esc(l.zones.join(', '))} · ${plural(l.count, 'shipment')} · ${plural(all.length, 'item')}${s.areas ? ` · ${s.staged}/${s.areas} areas staged` : ''}${!finished && who ? ` · Checking: <b>${esc(who)}</b> <button class="back" data-whochange style="margin:0 0 0 6px">Change</button>` : ''}</div>
+      <div class="zchips"><span class="zl">Zones (${l.zones.length}):</span>${l.zones.map(z => `<span class="zchip">${esc(z)}</span>`).join('') || '<span class="muted">none</span>'}</div>
+      <div class="muted" style="margin-bottom:10px">${plural(l.count, 'shipment')} · ${plural(all.length, 'item')}${s.areas ? ` · ${s.staged}/${s.areas} areas staged` : ''}${!finished && who ? ` · Checking: <b>${esc(who)}</b> <button class="back" data-whochange style="margin:0 0 0 6px">Change</button>` : ''}</div>
       ${s.areas && s.staged < s.areas && !finished ? `<div class="warnbox info">${s.areas - s.staged} of ${s.areas} area(s) not staged yet.</div>` : ''}
       ${finished ? `<div class="warnbox info">${withAcumatica(l) ? 'Invoicing has this load in Acumatica now.' : 'Check finished. Invoicing confirms this load in Acumatica.'}</div>` : ''}
       ${!all.length ? '<div class="warnbox bad">No item lines for this load\'s shipments' + (D.env === 'live' ? ' (the live line sync may not be running yet).' : '; pull fresh TEST data.') + '</div>' : ''}
@@ -215,7 +220,7 @@
     const subBtn = short && !locked ? `<button class="btn small subbtn ${sub ? 'on' : ''}" data-sub="${esc(x.inventory_id)}">${sub ? 'Substitute needed ✎' : 'Needs substitute'}</button>` : '';
     return `<div class="item ${ok ? 'ok' : ''} ${sub ? 'sub' : ''}" data-item="${esc(x.inventory_id)}">
       <div class="ic"><div class="desc">${esc(x.description || x.inventory_id)}</div>
-        <div class="meta">${esc(x.inventory_id)} · ${esc(x.uom || '')} · ${areaName(x.area)} · ${x.picked_qty != null ? `picked ${fmt(x.picked_qty)}` : '<b style="color:var(--warn-text)">not picked</b>'}</div></div>
+        <div class="meta">${esc(x.inventory_id)} · ${esc(x.uom || '')} · ${areaName(x.area)} · ${x.picked_qty != null ? `picked ${fmt(x.picked_qty)}` : '<b style="color:var(--warn-text)">not picked</b>'}</div>${custChips((K.cust || new Map()).get(l.id + '|' + x.inventory_id))}</div>
       <div class="need">${fmt(x.required)}<small>on load</small></div>
       <div class="acts">
         <input type="number" inputmode="numeric" enterkeyhint="done" autocomplete="off" min="0" max="${Number(x.required)}" step="1" data-qty value="${qty != null ? qty : ''}" placeholder="Checked" aria-label="Checked quantity for ${esc(x.inventory_id)}" ${dis || (ok ? 'disabled' : '')}>
@@ -361,7 +366,12 @@
     if (b.dataset.act === 'reopen') act(async () => { const { error } = await sb.rpc('dispatch_check_reopen', { p_load_id: l.id }); if (error) throw error; });
   });
   document.getElementById('app').addEventListener('input', e => {
-    if (e.target.id === 'q') { K.q = e.target.value; keepSearchFocus(render); }
+    if (e.target.id === 'q') {
+      K.q = e.target.value;
+      const d = loadNbrDay(K.q);
+      if (d && d !== K.date) { K.date = d; K.sel = null; refresh(); return; }
+      keepSearchFocus(render);
+    }
   });
   document.getElementById('app').addEventListener('keydown', e => {
     if (e.key === 'Enter' && e.target.id === 'whoName') { e.preventDefault(); document.querySelector('[data-whogo]').click(); }
