@@ -97,6 +97,7 @@
       b = r.data;
     }
     P.staged = b.staged || [];
+    P.cust = custIndex(b.customers);
     P.done = b.done || [];
     P.lists = new Map(ids.map(id => [id, (b.picks || []).filter(x => x.load_id === id)]));
     AS.overlay();
@@ -175,7 +176,7 @@
     const dis = locked || doneArea ? 'disabled' : '';
     return `<div class="item ${got ? (short ? 'short' : 'ok') : ''}" data-item="${l.id}|${esc(x.inventory_id)}" data-load="${l.id}" data-inv="${esc(x.inventory_id)}">
       <div class="ic"><div class="desc">${esc(x.description || x.inventory_id)}</div>
-        <div class="meta">${esc(x.inventory_id)} · ${esc(x.uom || '')}${x.shipments > 1 ? ` · ${x.shipments} shipments` : ''}</div></div>
+        <div class="meta">${esc(x.inventory_id)} · ${esc(x.uom || '')}${x.shipments > 1 ? ` · ${x.shipments} shipments` : ''}</div>${custChips((P.cust || new Map()).get(l.id + '|' + x.inventory_id))}</div>
       <div class="need">${fmt(x.required)}<small>to pick</small></div>
       <div class="acts">
         <button class="btn ${got && !short ? 'primary' : ''}" data-all ${dis}>All ${fmt(x.required)}</button>
@@ -343,7 +344,12 @@
   // The box can't go above what the load needs: anything higher snaps back.
   document.getElementById('app').addEventListener('input', e => {
     const t = e.target;
-    if (t.id === 'q') { P.q = t.value; keepSearchFocus(render); return; }
+    if (t.id === 'q') {
+      P.q = t.value;
+      const d = loadNbrDay(P.q);
+      if (d && d !== P.date) { P.date = d; P.sel = null; refresh(); return; }
+      keepSearchFocus(render); return;
+    }
     if (!t.dataset || t.dataset.qty === undefined) return;
     const max = Number(t.max);
     if (t.value !== '' && Number(t.value) > max) {

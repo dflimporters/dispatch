@@ -98,6 +98,9 @@ select, .field input, .field textarea, input.txt {
 .pill.warn { background:var(--warn-bg); color:var(--warn-text); }
 .pill.bad { background:var(--bad-bg); color:var(--bad-text); }
 .pill.done { background:#f1f5f9; color:var(--text-muted); }
+.custs { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
+.cust { font-size:12px; line-height:1.3; padding:2px 8px; border-radius:999px; background:var(--accent-bg); color:var(--text); border:1px solid var(--border); }
+.cust b { font-weight:700; }
 .pill.info { background:var(--accent-bg); color:var(--accent); }
 .tag { display:inline-block; font-size:10.5px; font-weight:700; padding:1px 6px; border-radius:4px; background:#f1f5f9; color:var(--text-muted); vertical-align:1px; }
 .tag.am { background:#fef3c7; color:#92400e; }
