@@ -134,6 +134,7 @@ sandbox allows 1 and 50. `dispatch-acu` runs one job at a time per target (lease
 | `dispatch_roles` | Who is a `batcher` / `clerk`. Granted by hand in SQL. | — |
 | `loads`, `load_shipments`, `load_events` | Written only through the `dispatch_*` functions and `dispatch-acu` | — |
 | `pick_areas`, `pick_area_classes`, `pick_area_items` | Which warehouse area (1–4) picks an item: per-item override, else by item class (`pick_area_of()`). Class rules are a **placeholder** until the warehouse manager's mapping arrives. | by hand |
+| `load_gone_shipments`, `gone_pending` | Shipments that vanished from Acumatica after going on a recent live load. `_flag_gone_shipments()` (cron `dispatch-gone-shipments-1min`) snapshots what was on them; pickers, checkers, Invoicing and the check-off sheet show it, Confirm is blocked until a supervisor clears it (`dispatch_gone_ack`). Migration `20261123140000_shipment_gone_guard.sql`. | cron, 1 min |
 | `acu_leases` | One Acumatica job at a time per target (see API limits above) | by the edge functions |
 
 Schema and functions: `supabase/migrations/`. Edge function source: `supabase/functions/`.
@@ -145,6 +146,10 @@ These are deployed by hand; the other edge functions and cron jobs exist only in
   separate SO, releases it from credit hold, creates the shipment, sets the load's Ship Via, confirms it, and puts it on
   the same load (`substitutions` table, `_substitution_join_load`). Each step is recorded so a failure resumes where it
   stopped. TEST works now; live stays refused until `DISPATCH_LIVE_WRITEBACK` and `DISPATCH_LIVE_SUBSTITUTION` are `on`.
+- `dispatch-acu` `cancel_shipment`: Admin page → Load lookup → "Cancel shipment" (supervisor / admin only). Acumatica can't
+  cancel a shipment, so this deletes it there (On Hold / Open only, on a load that isn't confirmed), then records what was
+  on it (`_cancel_shipment_done`) so the pickers, checker and Invoicing see what to take back. Needs the function redeployed
+  after any edit: `supabase functions deploy dispatch-acu --no-verify-jwt`.
 - `acu-sub-probe`: TEST-only probe used while building the above (`get` is read-only; `create_so`, `ship_so` and
   `confirm_shipment` write to TEST). Delete it once substitutions are live.
 

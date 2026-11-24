@@ -80,7 +80,7 @@
     const e0 = K.epoch || 0;
     const loads = (await fetchLoadsView(K.date)).filter(l => ['done', 'partial'].includes(l.status) && !l.closed_at);
     const ids = loads.map(l => l.id);
-    const r = ids.length ? await sb.rpc('dispatch_pick_bundle', { p_load_ids: ids, p_with_checks: true }) : { data: { picks: [], done: [], staged: [], items: [] } };
+    const r = ids.length ? await sb.rpc('dispatch_pick_bundle', { p_load_ids: ids, p_with_checks: true }) : { data: { picks: [], done: [], staged: [], items: [], gone: [] } };
     if (r.error) throw r.error;
     await loadKinds();
     // A tick was made while this was being read: the answer may predate it, so drop it (the queue refreshes when it's empty).
@@ -88,6 +88,7 @@
     K.loads = loads.sort((a, b) => isSpecialLoad(b) - isSpecialLoad(a) || (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)); // pickup / donation / promotion first, then in load-number (creation) order
     K.staged = r.data.staged || [];
     K.cust = custIndex(r.data.customers);
+    K.gone = r.data.gone || [];
     K.areaDone = r.data.done || [];
     K.picks = new Map(ids.map(id => [id, (r.data.picks || []).filter(x => x.load_id === id)]));
     K.items = new Map(ids.map(id => [id, new Map((r.data.items || []).filter(x => x.load_id === id).map(x => [x.inventory_id, x]))]));
@@ -163,7 +164,7 @@
     const btn = l => {
       const s = checkState(l);
       const st = l.checker_done_at || (s.total && s.ticked === s.total) ? 'ok' : s.ticked ? 'part' : '';
-      return `<button class="rl ${cur && cur.id === l.id ? 'on' : ''}" data-open="${l.id}"><span class="dot ${st}"></span><span class="rb"><span class="lnbr">${esc(l.load_nbr)}</span>${loadKindTags(l)}<span class="sub">${esc(l.ship_via || '')} · ${l.checker_done_at ? 'checked' : `${s.ticked}/${s.total}`}${s.short ? ` · <b style="color:var(--warn-text)">${s.short} short</b>` : ''}${s.subs ? ` · <b style="color:var(--warn-text)">${s.subs} sub</b>` : ''}</span></span></button>`;
+      return `<button class="rl ${cur && cur.id === l.id ? 'on' : ''}" data-open="${l.id}"><span class="dot ${st}"></span><span class="rb"><span class="lnbr">${esc(l.load_nbr)}</span>${loadKindTags(l)}<span class="sub">${esc(l.ship_via || '')} · ${l.checker_done_at ? 'checked' : `${s.ticked}/${s.total}`}${(K.gone || []).some(g => g.load_id === l.id) ? ' · <b style="color:var(--bad-text)">shipment deleted</b>' : ''}${s.short ? ` · <b style="color:var(--warn-text)">${s.short} short</b>` : ''}${s.subs ? ` · <b style="color:var(--warn-text)">${s.subs} sub</b>` : ''}</span></span></button>`;
     };
     return `<nav class="rail" aria-label="Loads">${todo.map(btn).join('')}${done.length ? `<div class="rh">Checked</div>${done.map(btn).join('')}` : ''}</nav>`;
   }
@@ -196,6 +197,7 @@
         <span class="target">${esc(l.ship_via || '')}</span> <span class="muted">${esc(l.contractor || '')}</span></div>${checkPill(l)}</div>
       <div class="zchips"><span class="zl">Zones (${l.zones.length}):</span>${l.zones.map(z => `<span class="zchip">${esc(z)}</span>`).join('') || '<span class="muted">none</span>'}</div>
       <div class="muted" style="margin-bottom:10px">${plural(l.count, 'shipment')} · ${plural(all.length, 'item')}${s.areas ? ` · ${s.staged}/${s.areas} areas staged` : ''}${!finished && who ? ` · Checking: <b>${esc(who)}</b> <button class="back" data-whochange style="margin:0 0 0 6px">Change</button>` : ''}</div>
+      ${goneBanner((K.gone || []).filter(g => g.load_id === l.id))}
       ${s.areas && s.staged < s.areas && !finished ? `<div class="warnbox info">${s.areas - s.staged} of ${s.areas} area(s) not staged yet.</div>` : ''}
       ${finished ? `<div class="warnbox info">${withAcumatica(l) ? 'Invoicing has this load in Acumatica now.' : 'Check finished. Invoicing confirms this load in Acumatica.'}</div>` : ''}
       ${!all.length ? '<div class="warnbox bad">No item lines for this load\'s shipments' + (D.env === 'live' ? ' (the live line sync may not be running yet).' : '; pull fresh TEST data.') + '</div>' : ''}

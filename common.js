@@ -555,6 +555,35 @@ function custChips(list) {
 function custIndex(rows) {
   return new Map((rows || []).map(r => [r.load_id + '|' + r.inventory_id, r.list]));
 }
+// A shipment that was deleted in Acumatica after it went on a load (migration 20261123140000_shipment_gone_guard.sql).
+// list = [{load_id, shipment_nbr, order_nbr, customer_name, touched, lines: [{inventory_id, description, uom, qty}]}].
+// opts.ack adds the supervisor's "Goods dealt with" button (handled by goneAckClick).
+function goneBanner(list, opts) {
+  if (!list || !list.length) return '';
+  return list.map(g => `<div class="warnbox bad" role="alert" style="font-size:14px;padding:10px 12px">
+    <b>Shipment ${esc(g.shipment_nbr)} was deleted in Acumatica</b>${g.order_nbr ? ` · SO ${esc(g.order_nbr)}` : ''}${g.customer_name ? ` · ${esc(g.customer_name)}` : ''}
+    <div style="margin:4px 0">${g.touched ? '<b>Some of it may already be picked or on the truck. Take these back off and return them to stock:</b>' : 'Nothing had been picked for it. Don\'t pick these:'}</div>
+    <ul style="margin:0 0 6px 18px;padding:0">${(g.lines || []).map(x => `<li><b>${fmt(x.qty)}</b> × ${esc(x.description || x.inventory_id)} <span class="muted">${esc(x.inventory_id)}${x.uom ? ' · ' + esc(x.uom) : ''}</span></li>`).join('')}</ul>
+    ${opts && opts.ack ? `<button class="btn small" data-gone-ack="${esc(g.load_id)}|${esc(g.shipment_nbr)}">Goods dealt with…</button> <span class="muted">Confirm stays blocked until you clear this.</span>`
+                       : '<span class="muted">Tell a supervisor. Confirm in Acumatica is blocked until they clear it.</span>'}
+  </div>`).join('');
+}
+// Click handler for the button above. Returns true if it handled the click. then() runs after a successful clear.
+async function goneAckClick(target, then) {
+  const b = target.closest && target.closest('[data-gone-ack]');
+  if (!b) return false;
+  const [loadId, nbr] = b.dataset.goneAck.split('|');
+  const why = prompt(`Shipment ${nbr} was deleted in Acumatica.\n\nWhat happened to the goods (returned to stock, taken off the truck, re-shipped...)? This takes the shipment off the load.`);
+  if (why == null) return true;
+  if (why.trim().length < 3) { toast('Say what happened to the goods', true); return true; }
+  try {
+    const { error } = await sb.rpc('dispatch_gone_ack', { p_load_id: Number(loadId), p_shipment_nbr: nbr, p_note: why.trim() });
+    if (error) throw error;
+    toast(`Shipment ${nbr} taken off the load`);
+    if (then) await then();
+  } catch (e) { toast(errMsg(e), true); }
+  return true;
+}
 // Re-draws after a keystroke without losing the caret in the search box.
 function keepSearchFocus(draw) {
   const had = document.activeElement && document.activeElement.id === 'q';
@@ -870,7 +899,8 @@ function eventList(evs, key) {
   const label = e => ({ create:'Created', edit:'Edited', move:'Shipments', send:'Sent to liaison', pull_back:'Pulled back', return:'Sent back to coordinator',
     call: e.outcome || 'Call', confirm:'Trucker confirmed', unconfirm:'Confirmation undone', writeback:'Acumatica', unstick:'Marked stuck', delete:'Deleted',
     pick_done:'Picked', pick_reopen:'Pick reopened', check_save:'Split saved', check_done:'Check finished', check_reopen:'Check reopened', check_confirm:'Confirmed in Acumatica',
-    sub_flag:'Substitute needed', sub_unflag:'Substitute flag removed', sub_resolve:'Substitution complete', sub_reopen:'Substitution reopened', sub_override:'Printed past substitution warning' }[e.kind] || e.kind);
+    sub_flag:'Substitute needed', sub_unflag:'Substitute flag removed', sub_resolve:'Substitution complete', sub_reopen:'Substitution reopened', sub_override:'Printed past substitution warning',
+    shipment_gone:'Shipment deleted in Acumatica', shipment_cancel:'Shipment cancelled', gone_ack:'Deleted shipment cleared' }[e.kind] || e.kind);
   return `<details ${key ? keep(key) : ''}><summary>History (${evs.length})</summary><ul class="evs">${evs.map(e => `<li><b>${esc(label(e))}</b>${e.ship_via ? ' · ' + esc(e.ship_via) : ''}${e.contractor ? ' · ' + esc(e.contractor) : ''}${e.note ? ' — ' + esc(e.note) : ''}
     <span style="float:right">${esc(e.actor_name || '')}, ${esc(stamp(e.created_at))}</span></li>`).join('')}</ul></details>`;
 }

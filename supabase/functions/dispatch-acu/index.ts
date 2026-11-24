@@ -28,6 +28,9 @@
 //                             (so the portal can read them for printing; Balanced ones aren't returned by
 //                             the REST Invoice feed). A failed release leaves the invoice prepared and is
 //                             noted on the shipment_invoicing row. Live also needs DISPATCH_LIVE_INVOICE = 'on'.
+//   cancel_shipment { env, shipment_nbr, reason } -> supervisor or admin only. Deletes one On Hold / Open shipment that
+//                             is on a load (Acumatica has no cancel), then records what was on it so the pickers,
+//                             checker and Invoicing are told what to take back (see cancelShipment).
 //   deliverv_write         -> clerk/supervisor/manager. Writes the invoice UDF DELIVERVIA for loads reassigned
 //                             after invoicing (see migration 20261026120000). Live, switched off by default.
 //   drain                  -> cron (Vault token) every minute: work through anything queued.
@@ -1122,6 +1125,36 @@ async function writeDeliverVia() {
   return { written, failed };
 }
 
+// cancel_shipment: Acumatica can't cancel a shipment, only delete it. Deletes one shipment that sits on a load, from the
+// portal (supervisor / admin), and records what was on it so the warehouse is told what to take back
+// (migration 20261123150000_cancel_shipment.sql). Nothing is written to our tables until Acumatica has deleted it.
+async function cancelShipment(env: string, nbr: string, reason: string, actorName: string) {
+  const t = targetFor(env);
+  const { error: cErr } = await admin.rpc('_cancel_shipment_check', { p_env: env, p_nbr: nbr });
+  if (cErr) throw new Error(cErr.message);
+  const acu = new Acu(t, 'cancel_shipment');
+  try {
+    await acu.login();
+    await acu.lease();
+    let sh: any = null;
+    try { sh = await acu.getShipment(nbr, false); }
+    catch (e: any) {
+      // Already gone (deleted by hand a moment ago): carry on and record it.
+      if (!(e?.status === 404 || /No entity satisfies/i.test(String(e?.message ?? '')))) throw e;
+    }
+    if (sh) {
+      if (!EDITABLE.includes(sh.status)) throw new Error(`Shipment ${nbr} is ${sh.status} in Acumatica. Only On Hold or Open shipments can be deleted.`);
+      const del = await acu.call('DELETE', `/Shipment/${sh.id ? encodeURIComponent(sh.id) : encodeURIComponent(nbr)}`);
+      if (!del.ok && del.status !== 404) throw new Error(`Acumatica wouldn't delete ${nbr}: ${del.status} ${acuError(del.data)}`);
+    }
+  } finally {
+    await acu.logout();
+  }
+  const { data, error } = await admin.rpc('_cancel_shipment_done', { p_env: env, p_nbr: nbr, p_reason: reason, p_actor: actorName });
+  if (error) throw new Error(`Deleted in Acumatica, but recording it failed (${error.message}). The load will be flagged within a few minutes.`);
+  return data;
+}
+
 Deno.serve(async (req) => {
   const headers = { ...cors(req), 'Content-Type': 'application/json' };
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers });
@@ -1184,6 +1217,14 @@ Deno.serve(async (req) => {
         const id = Number(p.load_id);
         if (!id) return json({ ok: false, error: 'load_id is required' }, 400);
         return json(await requestJob('check', id, actorName));
+      }
+      case 'cancel_shipment': {
+        if (!roles.some(r => ['supervisor', 'admin'].includes(r))) return json({ ok: false, error: 'Only a supervisor or admin can cancel a shipment' }, 403);
+        const env = p.env === 'live' ? 'live' : 'test';
+        const nbr = String(p.shipment_nbr ?? '').trim(), reason = String(p.reason ?? '').trim().slice(0, 300);
+        if (!/^[A-Za-z0-9-]{1,20}$/.test(nbr)) return json({ ok: false, error: 'shipment_nbr is required' }, 400);
+        if (reason.length < 3) return json({ ok: false, error: 'Say why the shipment is being cancelled' }, 400);
+        return json({ ok: true, ...(await cancelShipment(env, nbr, reason, actorName)) });
       }
       case 'invoice_request': {
         if (!roles.some(r => ['supervisor', 'invoicer'].includes(r))) return json({ ok: false, error: 'Only a supervisor or invoicing clerk can invoice shipments' }, 403);

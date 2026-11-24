@@ -213,7 +213,7 @@
   // ------------------------------------------------------------------
   async function loadPending() {
     const r = await sb.from('loads').select('*').eq('env', D.env).not('checker_done_at', 'is', null)
-      .or('check_status.is.null,check_status.neq.confirmed').order('load_date').order('seq').order('wave');
+      .is('closed_at', null).or('check_status.is.null,check_status.neq.confirmed').order('load_date').order('seq').order('wave');
     if (r.error) throw r.error;
     const loads = r.data || [], ids = loads.map(l => l.id);
     let ls = [], bundle = { picks: [], items: [], checks: [] };
@@ -241,6 +241,7 @@
       if (!od.error) (od.data || []).forEach(o => V.odate.set(o.order_nbr, o.order_date));
     }
     V.pend = loads.map(l => ({ ...l, ships: ls.filter(x => x.load_id === l.id).map(x => ({ ...x, row: byNbr.get(x.shipment_nbr) || null })) }));
+    V.gone = bundle.gone || [];
     V.picks = new Map(ids.map(id => [id, (bundle.picks || []).filter(x => x.load_id === id)]));
     V.items = new Map(ids.map(id => [id, new Map((bundle.items || []).filter(x => x.load_id === id).map(x => [x.inventory_id, x]))]));
     V.checks = bundle.checks || [];
@@ -292,7 +293,8 @@
       return { item, xs, onShip, out, checked, short: checked != null ? checked < onShip : out < onShip, desc: xs[0].desc };
     });
   }
-  const pMismatch = l => pItems(l).filter(i => i.short && i.checked != null && i.out !== i.checked);
+  const goneOf = l => (V.gone || []).filter(g => g.load_id === l.id);
+  const pMismatch = l =>pItems(l).filter(i => i.short && i.checked != null && i.out !== i.checked);
 
   function renderPending() {
     const el = document.getElementById('invConfirm');
@@ -317,7 +319,8 @@
         <button class="btn small" data-lopen="${l.id}" aria-expanded="${open}">${open ? 'Hide' : 'Open'}</button>
         <span class="lnbr">${esc(l.load_nbr)}</span>${waveTag(l.wave)} <b>${esc(l.truck_type || '')}</b> <span class="target">${esc(l.ship_via || '')}</span>
         <span class="muted">${plural(l.ships.length, 'shipment')} · ${shorts.length ? `<b style="color:var(--warn-text)">${plural(shorts.length, 'short item')}</b>` : 'nothing short'}</span>
-        ${pendPill(l)}<span class="gval">${locked ? '' : `<button class="btn primary small" data-confirm="${l.id}">${l.check_status === 'partial' ? 'Retry confirm' : 'Confirm in Acumatica'}</button>`}</span></div>
+        ${pendPill(l)}<span class="gval">${locked ? '' : `${D.me && D.me.roles.includes('admin') ? `<button class="btn small" data-closeout="${l.id}" title="The goods can't ship: take this load off the list without confirming it">Close out</button> ` : ''}<button class="btn primary small" data-confirm="${l.id}">${l.check_status === 'partial' ? 'Retry confirm' : 'Confirm in Acumatica'}</button>`}</span></div>
+      ${goneOf(l).length ? `<div style="padding:0 14px">${goneBanner(goneOf(l), { ack: true })}</div>` : ''}
       ${open ? `<div style="padding:10px 14px">
         ${queued ? progressBox('Queued for Acumatica', 0, l.ships.length, 'Starts as soon as the load ahead of it is done.') : ''}
         ${confirming ? progressBox('Confirming in Acumatica', res.filter(s => s.check_result).length, l.ships.length, 'Lowering lines and confirming, shipment by shipment. You can leave this page.') : ''}
@@ -828,6 +831,7 @@
   }
 
   document.getElementById('app').addEventListener('click', e => {
+    if (e.target.closest('[data-gone-ack]')) { goneAckClick(e.target, refresh); return; }
     const sOpen = e.target.closest('[data-subopen]');
     if (sOpen) {
       const k = sOpen.dataset.subopen;
@@ -870,10 +874,27 @@
     }
     const lo = e.target.closest('[data-lopen]');
     if (lo) { const id = Number(lo.dataset.lopen); V.openL.has(id) ? V.openL.delete(id) : V.openL.add(id); renderPending(); return; }
+    const co = e.target.closest('[data-closeout]');
+    if (co && D.me && D.me.roles.includes('admin')) {
+      const l = V.pend.find(x => x.id === Number(co.dataset.closeout));
+      if (!l) return;
+      const done = l.ships.filter(s => s.check_result === 'applied').length;
+      const why = prompt(`Close out ${l.load_nbr}? It can't ship.\n\nIt leaves this list and nothing more is written to Acumatica.${done ? `\n${plural(done, 'shipment')} already confirmed in Acumatica stay confirmed.` : ''}\nThe other shipments stay as they are in Acumatica.\n\nWhy can't it ship?`);
+      if (why == null) return;
+      if (why.trim().length < 3) { toast("Say why the load can't ship", true); return; }
+      act(async () => {
+        const { error } = await sb.rpc('dispatch_close_unshipped', { p_load_id: l.id, p_reason: why.trim() });
+        if (error) throw error;
+        V.openL.delete(l.id); V.final.delete(l.id); V.notes.delete(l.id);
+        toast(`${l.load_nbr} closed out`);
+      });
+      return;
+    }
     const cf = e.target.closest('[data-confirm]');
     if (cf) {
       const l = V.pend.find(x => x.id === Number(cf.dataset.confirm));
       if (!l) return;
+      if (goneOf(l).length) { V.openL.add(l.id); renderPending(); toast('A shipment on this load was deleted in Acumatica. Clear it first (see the red box).', true); return; }
       const bad = pMismatch(l);
       if (bad.length) { V.openL.add(l.id); renderPending(); toast("Going out has to add up to the checker's count: " + bad.map(i => i.desc || i.item).join(', '), true); return; }
       const lines = pLinesOf(l), fin = finalOf(l);
@@ -1008,6 +1029,13 @@
     if (V.poll || !V.was) return;
     V.poll = setTimeout(async () => { V.poll = null; if (!V.busy) await refresh(); else poll(); }, 3000);
   }
+  // A search result: a load still waiting to be confirmed opens its card here; any other load opens on Load sheets.
+  function pickFound(r) {
+    const go = (sel) => { const el = document.querySelector(sel); if (el) { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); el.animate([{ outline: '3px solid #f59e0b' }, { outline: '3px solid transparent' }], { duration: 2500 }); return true; } return false; };
+    if (V.pend.some(x => x.id === r.load_id)) { V.openL.add(r.load_id); renderPending(); if (go(`[data-lopen="${r.load_id}"]`)) return; }
+    if (r.shipment_nbr && go(`[data-pship="${CSS.escape(r.shipment_nbr)}"]`)) return;
+    location.href = `loadsheet.html?load=${r.load_id}`;
+  }
   async function refresh() {
     try { await loadAll(); render(); poll(); }
     catch (e) { console.error('[invoicing]', e); document.getElementById('main').innerHTML = errBox(e); }
@@ -1016,7 +1044,7 @@
   startPage({
     page: 'supervisor', role: ['supervisor', 'invoicer'], title: 'Invoicing',
     onEnvChange: () => { V.sel.clear(); V.psel.clear(); refresh(); },
-    onReady: () => { refresh(); keepFresh(refresh, () => V.busy || editingBoxes(), ['loads', 'check_items']); },
+    onReady: () => { mountSearch({ onPick: pickFound }); refresh(); keepFresh(refresh, () => V.busy || editingBoxes(), ['loads', 'check_items']); },
   });
 </script>
 </body>
