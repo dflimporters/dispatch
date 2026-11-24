@@ -615,16 +615,17 @@ async function invoiceShipments(env: string, rows: any[], acu: Acu) {
   // Release what was just prepared. Best effort: the invoice stays prepared (and printable from Acumatica)
   // if anything here fails, and the reason is written on the shipment_invoicing row.
   if (!prepared.length) return;
-  const note = (nbr: string, text: string) => admin.from('shipment_invoicing')
-    .update({ detail: text.slice(0, 400), updated_at: new Date().toISOString() }).eq('env', env).eq('shipment_nbr', nbr);
+  // invoice_nbr: the invoice Acumatica made from this shipment, so the sheets don't have to guess via the sales order.
+  const note = (nbr: string, text: string, invoice_nbr?: string) => admin.from('shipment_invoicing')
+    .update({ detail: text.slice(0, 400), updated_at: new Date().toISOString(), ...(invoice_nbr ? { invoice_nbr } : {}) }).eq('env', env).eq('shipment_nbr', nbr);
   let refs = new Map<string, string>();
   try { await acu.lease(); refs = await acu.invoiceRefsByShipment(); }
   catch (e: any) { for (const n of prepared) await note(n, `Prepared; couldn't look up the invoice to release it: ${String(e?.message ?? e)}`); return; }
   for (const nbr of prepared) {
     const ref = refs.get(nbr);
     if (!ref) { await note(nbr, 'Prepared; invoice not found yet, so not released'); continue; }
-    try { await acu.lease(); await acu.releaseInvoice(ref); await note(nbr, `Invoice ${ref} released`); }
-    catch (e: any) { await note(nbr, `Prepared; invoice ${ref} not released: ${String(e?.message ?? e)}`); }
+    try { await acu.lease(); await acu.releaseInvoice(ref); await note(nbr, `Invoice ${ref} released`, ref); }
+    catch (e: any) { await note(nbr, `Prepared; invoice ${ref} not released: ${String(e?.message ?? e)}`, ref); }
   }
 }
 
