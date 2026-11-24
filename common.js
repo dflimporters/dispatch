@@ -472,9 +472,15 @@ const _addrs = { map: new Map(), at: 0 };
 async function loadAddrs() {
   if (Date.now() - _addrs.at < 10 * 60e3) return;
   try {
-    const { data, error } = await sb.rpc('dispatch_customer_addresses');
-    if (error) throw error;
-    _addrs.map = new Map((data || []).map(r => [r.customer_id, [r.address, r.city].filter(Boolean).join(', ')]));
+    // The API returns at most 1000 rows per call and there are ~10k customers, so page through them.
+    const data = [];
+    for (let from = 0; ; from += 1000) {
+      const { data: page, error } = await sb.rpc('dispatch_customer_addresses').order('customer_id').range(from, from + 999);
+      if (error) throw error;
+      data.push(...(page || []));
+      if (!page || page.length < 1000) break;
+    }
+    _addrs.map = new Map(data.map(r => [r.customer_id, [r.address, r.city].filter(Boolean).join(', ')]));
     _addrs.at = Date.now();
   } catch (e) { console.warn('[addrs]', e); _addrs.at = Date.now() - 9 * 60e3; }
 }
