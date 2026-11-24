@@ -267,6 +267,10 @@
   }
   const resultPillA = (r, d) => !r ? '<span class="muted">—</span>' :
     `<span class="pill ${{ applied: 'ok', confirmed: 'ok', refused: 'warn', failed: 'bad', skipped: 'done' }[r] || 'info'}" title="${esc(d || '')}">${esc(r)}</span>`;
+  // Cancel shipment: admin or supervisor only; only On Hold / Open shipments (Acumatica won't delete a confirmed one) on a
+  // load that isn't confirmed or being confirmed. The server (dispatch-acu cancel_shipment) checks all of this again.
+  const canCancelShip = (l, s) => D.me && (D.me.roles.includes('admin') || D.me.roles.includes('supervisor'))
+    && ['On Hold', 'Open'].includes(s.status) && l.check_status !== 'confirmed' && l.check_status !== 'confirming' && !l.confirm_requested_at;
   function loadDetailHtml(d) {
     const l = d.load, p = d.pick, c = d.check, claim = d.claim;
     const pct = p.required ? Math.min(100, Math.round(100 * p.picked / p.required)) : 0;
@@ -314,7 +318,7 @@
           </div></div>
       </div>
       <div class="card panel"><h3>Shipments</h3>
-        <div class="wrap"><table class="ships"><thead><tr><th>Shipment</th><th>Order</th><th>Customer</th><th>ShipVia</th><th>Status</th><th>Invoice</th><th>Trucker write</th><th>Confirm</th></tr></thead><tbody>
+        <div class="wrap"><table class="ships"><thead><tr><th>Shipment</th><th>Order</th><th>Customer</th><th>ShipVia</th><th>Status</th><th>Invoice</th><th>Trucker write</th><th>Confirm</th><th></th></tr></thead><tbody>
           ${d.shipments.map(s => `<tr>
             <td class="mono">${esc(s.shipment_nbr)}</td><td class="mono">${esc(s.order_nbr || '')}</td>
             <td class="cust">${esc(s.customer_name || '')} <span class="muted">${esc(s.customer_id || '')}</span></td>
@@ -323,7 +327,8 @@
             <td>${(s.invoices || []).map(i => `<div class="mono">${esc(i.nbr)} <span class="tag">${esc(i.status || '')}</span>${i.deliver_via ? ` <span class="tag" title="${esc(i.deliver_detail || '')}">DELIVERVIA ${esc(i.deliver_via)} · ${esc(i.deliver_state)}</span>` : ''}</div>`).join('') || '<span class="muted">—</span>'}
               ${s.invoicing ? `<div>${resultPillA(s.invoicing.state, s.invoicing.detail)} <span class="muted">prepare invoice</span></div>` : ''}</td>
             <td>${resultPillA(s.write_result, s.write_detail)}${s.write_detail ? `<div class="muted">${esc(s.write_detail)}</div>` : ''}</td>
-            <td>${resultPillA(s.check_result, s.check_detail)}${s.check_detail ? `<div class="muted">${esc(s.check_detail)}</div>` : ''}</td></tr>`).join('')}
+            <td>${resultPillA(s.check_result, s.check_detail)}${s.check_detail ? `<div class="muted">${esc(s.check_detail)}</div>` : ''}</td>
+            <td>${canCancelShip(l, s) ? `<button class="btn small danger" data-cancel-ship="${esc(s.shipment_nbr)}" title="Acumatica can't cancel a shipment, so this deletes it there and tells the warehouse what to take back">Cancel shipment</button>` : ''}</td></tr>`).join('')}
         </tbody></table></div></div>
       <div class="card panel"><h3>ShipVia history</h3>
         ${vias.length ? `<div class="wrap"><table class="ships"><thead><tr><th>When</th><th>Who</th><th>What</th><th>Detail</th></tr></thead><tbody>
@@ -356,6 +361,22 @@
     m.querySelector('#lq-go').onclick = go;
     m.querySelector('#lq').onkeydown = e => { if (e.key === 'Enter') go(); };
     m.querySelectorAll('[data-open]').forEach(b => b.onclick = () => { location.hash = 'load=' + b.dataset.open; });
+    m.querySelectorAll('[data-cancel-ship]').forEach(b => b.onclick = async () => {
+      const nbr = b.dataset.cancelShip, l = A.load.load, s = (A.load.shipments || []).find(x => x.shipment_nbr === nbr) || {};
+      const who = `${nbr}${s.customer_name ? ' (' + s.customer_name + ')' : ''}${s.order_nbr ? ', SO ' + s.order_nbr : ''}`;
+      const why = prompt(`Cancel shipment ${who} on ${l.load_nbr}?\n\nThis DELETES the shipment in ${l.env === 'live' ? 'live Acumatica' : 'Acumatica TEST'} (Acumatica can't cancel one). It can't be undone, and the sales order goes back to unshipped.\nIf it was already picked, the warehouse is told what to take back.\n\nWhy is it being cancelled?`);
+      if (why == null) return;
+      if (why.trim().length < 3) { toast('Say why the shipment is being cancelled', true); return; }
+      b.disabled = true;
+      try {
+        const r = await callAcu('cancel_shipment', { env: l.env, shipment_nbr: nbr, reason: why.trim() });
+        if (!r || !r.ok) throw new Error((r && r.error) || "Couldn't cancel the shipment");
+        toast(`Shipment ${nbr} cancelled`);
+        if (r.touched) alert(`Shipment ${nbr} is deleted.\n\nSome of it was already picked or checked. Take these back off and return them to stock:\n\n${(r.lines || []).map(x => `${x.qty} x ${x.description || x.inventory_id}`).join('\n')}\n\nThe pickers, checker and Invoicing now see this on ${l.load_nbr} until a supervisor clears it.`);
+        await openLoad(l.id);
+      } catch (e) { toast(errMsg(e), true); b.disabled = false; }
+      draw();
+    });
     const rel = m.querySelector('#release-load');
     if (rel) rel.onclick = async () => {
       const l = A.load.load;

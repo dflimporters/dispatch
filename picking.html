@@ -98,6 +98,7 @@
     }
     P.staged = b.staged || [];
     P.cust = custIndex(b.customers);
+    P.gone = b.gone || [];
     P.done = b.done || [];
     P.lists = new Map(ids.map(id => [id, (b.picks || []).filter(x => x.load_id === id)]));
     AS.overlay();
@@ -140,7 +141,7 @@
         <div class="kpi ${allLines.some(x => x.picked_qty != null && Number(x.picked_qty) < Number(x.required)) ? 'warn' : ''}"><div class="l">Short</div><div class="v">${allLines.filter(x => x.picked_qty != null && Number(x.picked_qty) < Number(x.required)).length}</div><div class="s">lines picked short</div></div>
         <div class="kpi"><div class="l">Cases</div><div class="v">${fmt(allLines.reduce((s, x) => s + Number(x.required), 0))}</div><div class="s">to pick</div></div>
       </div>
-      ${mine.length ? `<div class="pk">${rail(mine, cur)}<div class="pkmain">${groups.length ? groups.map(groupHTML).join('') : '<div class="card"><div class="empty">Nothing to pick in this area on this load.</div></div>'}</div></div>` : empty}`);
+      ${mine.length ? `<div class="pk">${rail(mine, cur)}<div class="pkmain">${cur ? goneBanner((P.gone || []).filter(g => g.load_id === cur.id)) : ''}${groups.length ? groups.map(groupHTML).join('') : '<div class="card"><div class="empty">Nothing to pick in this area on this load.</div></div>'}</div></div>` : empty}`);
   }
 
   // Left rail: one button per load, with a dot for how far along its picking is (in the area chosen above).

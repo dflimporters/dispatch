@@ -93,6 +93,15 @@
 <script>
   const L = { date: jmDate(0), loads: [], pending: {}, open: {}, days: [], lm: new Map(), busy: false, autoPrint: null };
   try { const p = Number(new URLSearchParams(location.search).get('print')); if (p) L.autoPrint = p; } catch (e) {}
+  try { const f = Number(new URLSearchParams(location.search).get('load')); if (f) L.focus = f; } catch (e) {}
+  // Jump to a load: its day, opened, card scrolled into view. From a search result, or ?load=ID.
+  async function showLoad(id, date) {
+    if (date) { L.date = date; L.open[date] = true; }
+    await refresh();
+    const c = document.querySelector(`[data-load="${id}"]`);
+    if (c) { c.scrollIntoView({ block: 'center', behavior: 'smooth' }); c.animate([{ outline: '3px solid #f59e0b' }, { outline: '3px solid transparent' }], { duration: 2500 }); }
+    else toast('That load has no sheet yet: the checker has not confirmed it.', true);
+  }
   const LM_COLS = 'load_id,status,claimed_name,claimed_phone,aborted_at';
 
   async function loadAll() {
@@ -401,7 +410,8 @@
   // them) off the check-off sheets.
   const shippingStops = s => (s.stops || []).map(st => ({ ...st, shipments: (st.shipments || []).filter(x => (x.lines || []).length) })).filter(st => st.shipments.length);
   function checkFoot(s) {
-    return `<div class="csign"><span>Checker: ____________________</span><span>Trucker: ____________________</span><span>Loaded at: ________</span></div>
+    const rc = (s.recon || []).length ? `<div class="foot"><span><b>Differs from the checker's count:</b> ${s.recon.map(r => `${esc(r.description || r.inventory_id)} (sheet ${qn(r.sheet)}, counted ${qn(r.counted)})`).join('; ')}</span></div>` : '';
+    return `${rc}<div class="csign"><span>Checker: ____________________</span><span>Trucker: ____________________</span><span>Loaded at: ________</span></div>
       <div class="foot"><span>${esc(s.check_status === 'confirmed' ? 'Quantities as confirmed by the checker.' : 'Not confirmed by the checker yet: quantities may change. Reprint after confirming.')}</span><span>Printed ${esc(stamp(new Date().toISOString()))}</span></div>`;
   }
   function checkSummaryHtml(s) {
@@ -436,6 +446,18 @@
   async function printCheck(id, detail) {
     const { data, error } = await sb.rpc('lm_check_sheet', { p_load_id: id });
     if (error) throw error;
+    // A shipment deleted in Acumatica after picking: the goods may still be on the truck, so no paper until it's cleared.
+    if ((data.gone || []).length) {
+      toast(`Can't print: shipment ${data.gone.map(g => g.shipment_nbr).join(', ')} was deleted in Acumatica and still needs clearing (Invoicing page).`, true);
+      return;
+    }
+    // The sheet's total for an item isn't what the checker counted: ask before it goes to the trucker.
+    const rc = data.recon || [];
+    if (rc.length && !confirm(`This sheet doesn't match the checker's count:\n\n${rc.map(r => `${r.description || r.inventory_id}: sheet ${qn(r.sheet)}, checker counted ${qn(r.counted)}`).join('\n')}\n\nPrint it anyway?`)) return;
+    // Invoices are still being created / have not reached the portal yet: printing now would put "not invoiced" on the
+    // sheet. Wait a minute and print again; only an invoiced-nothing sheet (e.g. not confirmed yet) prints without asking.
+    const missing = shippingStops(data).flatMap(st => st.shipments.filter(x => !x.invoice_nbr).map(x => x.shipment_nbr));
+    if (missing.length && data.check_status === 'confirmed' && !confirm(`${plural(missing.length, 'shipment')} not showing an invoice number yet (${missing.slice(0, 6).join(', ')}${missing.length > 6 ? '…' : ''}).\n\nThe invoices may still be being created. Wait a minute and print again, or press OK to print with "not invoiced" on those lines.`)) return;
     document.getElementById('sheetwrap').innerHTML = detail ? checkDetailHtml(data) : checkSummaryHtml(data);
     await new Promise(r => setTimeout(r, 150));
     window.print();
@@ -541,7 +563,12 @@
     page: 'loadsheet', role: ['supervisor', 'manager', 'invoicer', 'checker'], title: 'Load sheets',
     onEnvChange: () => { L.autoPrint = null; refresh(); },
     onReady: async () => {
-      await refresh();
+      mountSearch({ onPick: r => showLoad(r.load_id, r.load_date) });
+      if (L.focus && !L.autoPrint) {
+        const id = L.focus; L.focus = null; history.replaceState(null, '', location.pathname);
+        const one = await sb.from('loads').select('load_date').eq('id', id).maybeSingle();
+        await showLoad(id, one.data && one.data.load_date);
+      } else await refresh();
       if (L.autoPrint) {                           // opened from Control Tower: print that load now
         const id = L.autoPrint; L.autoPrint = null;
         history.replaceState(null, '', location.pathname);
