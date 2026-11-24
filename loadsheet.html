@@ -57,6 +57,10 @@
   .sheet .farthest { border:3px solid #000; padding:6px 12px; margin-bottom:12px; font-size:15px; display:flex; align-items:baseline; gap:12px; }
   .sheet .farthest b.l { font-size:11px; letter-spacing:.8px; text-transform:uppercase; }
   .sheet .farthest .v { font-size:30px; font-weight:800; text-transform:uppercase; }
+  .sheet .chg { border:3px solid #000; padding:6px 12px; margin-bottom:12px; font-size:14px; font-weight:700; }
+  .sheet .chg > b { display:block; font-size:12px; letter-spacing:1px; text-transform:uppercase; background:#000; color:#fff; margin:-6px -12px 5px; padding:3px 12px; }
+  .sheet .chg .w { font-weight:400; font-size:12px; color:#333; }
+  .sheet .mvd { display:block; font-size:10.5px; font-weight:700; border:1.5px solid #000; border-radius:3px; padding:0 4px; margin-top:2px; width:fit-content; }
   .sheet.cs td.addr { font-size:10.5px; }
   .sheet.cs th.r,.sheet.cs td.r { text-align:right; }
   .sheet.cs th.b, .sheet.cs td.b { width:19mm; text-align:center; }
@@ -371,11 +375,46 @@
     for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) rects += `<rect x="${c * cell}" y="${r * cell}" width="${cell}" height="${cell}"/>`;
     return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-8 -8 ${size + 16} ${size + 16}" shape-rendering="crispEdges"><rect x="-8" y="-8" width="${size + 16}" height="${size + 16}" fill="#fff"/><g fill="#000">${rects}</g></svg>`;
   }
-  function sheetHtml(s) {
+  // Trucker changes on a load, for the printed documents (Joel, 2026-11-24). Read from the 'reassign' load_events:
+  // the whole load changed, shipments moved off this load, or shipments received from another load. The reason
+  // stays internal. `moved` maps a shipment number to where it came from, so its customer can be marked.
+  async function changeInfo(loadId, loadNbr) {
+    const [mine, recv] = await Promise.all([
+      sb.from('load_events').select('created_at,actor_name,detail').eq('kind', 'reassign').eq('env', D.env).eq('load_id', loadId),
+      sb.from('load_events').select('created_at,actor_name,load_nbr,detail').eq('kind', 'reassign').eq('env', D.env).eq('detail->>to_load', loadNbr),
+    ]);
+    if (mine.error) throw mine.error;
+    if (recv.error) throw recv.error;
+    const ev = [], moved = new Map();
+    (mine.data || []).forEach(e => {
+      const d = e.detail || {};
+      if (d.mode === 'full') ev.push({ at: e.created_at, who: e.actor_name, txt: `${d.from_via || '—'} → ${d.to_via || '—'}` });
+      else if (d.role === 'source') ev.push({ at: e.created_at, who: e.actor_name, txt: `${plural((d.shipments || []).length, 'shipment')} moved off this load to ${d.to_load || 'another load'} (${d.to_via || '—'})` });
+    });
+    (recv.data || []).forEach(e => {
+      const d = e.detail || {};
+      ev.push({ at: e.created_at, who: e.actor_name, txt: `Received ${plural((d.shipments || []).length, 'shipment')} from ${e.load_nbr} (was ${d.from_via || '—'})` });
+      (d.shipments || []).forEach(n => moved.set(String(n), { load: e.load_nbr, via: d.from_via }));
+    });
+    ev.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+    return { ev, moved };
+  }
+  function changeBanner(c) {
+    if (!c || !c.ev.length) return '';
+    return `<div class="chg"><b>Trucker changed</b>${c.ev.map(e => `<div>${esc(e.txt)} <span class="w">· ${esc(stamp(e.at))}${e.who ? ' · ' + esc(e.who) : ''}</span></div>`).join('')}</div>`;
+  }
+  // Tag for a customer whose shipment came from another trucker's load.
+  function movedTag(c, nbrs) {
+    const m = c && (nbrs || []).map(n => c.moved.get(String(n && n.shipment_nbr || n))).find(Boolean);
+    return m ? `<span class="mvd">Changed trucker: was ${esc(m.via || '—')} (${esc(m.load)})</span>` : '';
+  }
+
+  function sheetHtml(s, chg) {
     const link = new URL('driver/?c=' + s.code, location.href).href;
     const stops = s.stops || [];
     return `<div class="sheet">
       <div class="sh"><img src="assets/dfl-logo-color.png" alt="DFL Importers"><div class="t">Load sheet<b>${esc(s.load_nbr)}</b></div></div>
+      ${changeBanner(chg)}
       <div class="top">
         <div class="qr">${qrSvg(link)}</div>
         <div class="big">
@@ -389,7 +428,7 @@
       <div class="how"><b>Driver:</b> open the DFL Driver app and scan this QR code, or type the code above. Check the load number and your name on the screen before you take responsibility for the load.</div>
       <div class="how link"><b>Camera not working?</b> On your phone, open this link in the browser. It takes you to the same screen as the QR code.<span class="url">${esc(link)}</span></div>
       <table><thead><tr><th>#</th><th>Customer</th><th>Area</th><th>Invoices</th></tr></thead><tbody>
-        ${stops.map(x => `<tr><td class="n">${x.seq}</td><td>${esc(x.customer_name || x.customer_id)}</td><td>${esc(x.zone || x.city || '')}</td><td>${esc((x.invoices || []).filter(Boolean).join(', ') || 'not invoiced yet')}</td></tr>`).join('')}
+        ${stops.map(x => `<tr><td class="n">${x.seq}</td><td>${esc(x.customer_name || x.customer_id)}${movedTag(chg, x.shipments)}</td><td>${esc(x.zone || x.city || '')}</td><td>${esc((x.invoices || []).filter(Boolean).join(', ') || 'not invoiced yet')}</td></tr>`).join('')}
       </tbody></table>
       <div class="foot"><span>Suggested order. The driver may change it in the app.</span><span>Printed ${esc(stamp(new Date().toISOString()))}</span></div>
     </div>`;
@@ -399,10 +438,10 @@
   // detailed = every item line under each customer's invoice. Quantities are what is going out (the checker's final
   // qty), from lm_check_sheet. Works at any stage of the load.
   const qn = n => Number(n || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
-  function checkHead(s, title, big) {
+  function checkHead(s, title, big, chg) {
     const far = big && s.farthest ? `<div class="farthest"><b class="l">Furthest stop</b><span class="v">${esc(s.farthest.label || s.farthest.zone)}</span></div>` : '';
     return `<div class="sh"><img src="assets/dfl-logo-color.png" alt="DFL Importers"><div class="t">${title}<b>${esc(s.load_nbr)}</b></div></div>
-      ${far}<div class="cmeta${big ? ' big' : ''}"><span><b>Trucker</b> ${esc(s.trucker || s.ship_via || '')}</span><span><b>Ship via</b> ${esc(s.ship_via || '')}${s.truck_type ? ' · ' + esc(s.truck_type) : ''}</span>
+      ${changeBanner(chg)}${far}<div class="cmeta${big ? ' big' : ''}"><span><b>Trucker</b> ${esc(s.trucker || s.ship_via || '')}</span><span><b>Ship via</b> ${esc(s.ship_via || '')}${s.truck_type ? ' · ' + esc(s.truck_type) : ''}</span>
         <span><b>Date</b> ${esc(niceDate(s.load_date))}${s.wave && s.wave !== 'ACU' ? ' · ' + esc(s.wave) : ''}</span></div>`;
   }
   const stopUnits = st => (st.shipments || []).reduce((t, x) => t + (x.lines || []).reduce((u, l) => u + Number(l.qty || 0), 0), 0);
@@ -414,32 +453,32 @@
     return `${rc}<div class="csign"><span>Checker: ____________________</span><span>Trucker: ____________________</span><span>Loaded at: ________</span></div>
       <div class="foot"><span>${esc(s.check_status === 'confirmed' ? 'Quantities as confirmed by the checker.' : 'Not confirmed by the checker yet: quantities may change. Reprint after confirming.')}</span><span>Printed ${esc(stamp(new Date().toISOString()))}</span></div>`;
   }
-  function checkSummaryHtml(s) {
+  function checkSummaryHtml(s, chg) {
     const stops = shippingStops(s);
-    return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: summary')}
+    return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: summary', false, chg)}
       <table><thead><tr><th>#</th><th>Customer</th><th>Address</th><th>Area</th><th>Invoices</th><th class="r">Units</th><th class="b">Loaded</th><th class="b">Delivered</th><th>Notes</th></tr></thead><tbody>
-        ${stops.map(x => `<tr><td class="n">${x.seq}</td><td><b>${esc(x.customer_name || x.customer_id)}</b></td><td class="addr">${esc([x.address, x.city].filter(Boolean).join(', '))}</td><td>${esc(x.zone || x.city || '')}</td>
+        ${stops.map(x => `<tr><td class="n">${x.seq}</td><td><b>${esc(x.customer_name || x.customer_id)}</b>${movedTag(chg, x.shipments)}</td><td class="addr">${esc([x.address, x.city].filter(Boolean).join(', '))}</td><td>${esc(x.zone || x.city || '')}</td>
           <td>${esc((x.shipments || []).map(i => i.invoice_nbr || 'not invoiced').join(', '))}</td><td class="r">${qn(stopUnits(x))}</td>
           <td class="b"><span class="box"></span></td><td class="b"><span class="box"></span></td><td class="nt"></td></tr>`).join('')}
         <tr class="tot"><td></td><td><b>Total</b></td><td></td><td></td><td>${plural(stops.reduce((t, x) => t + (x.shipments || []).length, 0), 'invoice')}</td><td class="r">${qn(stops.reduce((t, x) => t + stopUnits(x), 0))}</td><td></td><td></td><td></td></tr>
       </tbody></table>${checkFoot(s)}</div>`;
   }
   // Detailed: item first, then each customer taking it. The trucker loads one item for everyone at a time.
-  function checkDetailHtml(s) {
+  function checkDetailHtml(s, chg) {
     const items = new Map();
     (s.stops || []).forEach(st => (st.shipments || []).forEach(i => (i.lines || []).forEach(l => {
       const k = (l.inventory_id || '') + '|' + (l.uom || '');
       if (!items.has(k)) items.set(k, { id: l.inventory_id, descr: l.description, uom: l.uom, total: 0, rows: [] });
       const it = items.get(k);
       it.total += Number(l.qty || 0);
-      it.rows.push({ seq: st.seq, cust: st.customer_name || st.customer_id, zone: st.zone, inv: i.invoice_nbr || 'not invoiced', qty: l.qty });
+      it.rows.push({ seq: st.seq, cust: st.customer_name || st.customer_id, zone: st.zone, inv: i.invoice_nbr || 'not invoiced', qty: l.qty, mv: movedTag(chg, [i.shipment_nbr]) });
     })));
     const list = [...items.values()].sort((x, y) => String(x.descr || x.id).localeCompare(String(y.descr || y.id), undefined, { numeric: true, sensitivity: 'base' }));
-    return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: by item', true)}
+    return `<div class="sheet cs">${checkHead(s, 'Trucker check-off: by item', true, chg)}
       <div class="cmeta"><span><b>Items</b> ${list.length}</span><span><b>Stops</b> ${shippingStops(s).length}</span><span><b>Units</b> ${qn(list.reduce((t, x) => t + x.total, 0))}</span></div>
       ${list.map(it => `<div class="stop"><div class="stophd"><span class="mono"><b>${esc(it.id || '')}</b></span><span><b>${esc(it.descr || '')}</b></span><span class="sp"></span><span>${esc(it.uom || '')}</span><span class="z">Total ${qn(it.total)}</span></div>
         <table><thead><tr><th class="b">Loaded</th><th>#</th><th>Customer</th><th>Area</th><th>Invoice</th><th class="r">Qty</th><th class="b">Delivered</th></tr></thead><tbody>
-          ${it.rows.map(r => `<tr><td class="b"><span class="box"></span></td><td class="n">${r.seq}</td><td class="cust">${esc(r.cust)}</td><td>${esc(r.zone || '')}</td><td class="mono">${esc(r.inv)}</td><td class="r"><b>${qn(r.qty)}</b></td><td class="b"><span class="box"></span></td></tr>`).join('')}
+          ${it.rows.map(r => `<tr><td class="b"><span class="box"></span></td><td class="n">${r.seq}</td><td class="cust">${esc(r.cust)}${r.mv}</td><td>${esc(r.zone || '')}</td><td class="mono">${esc(r.inv)}</td><td class="r"><b>${qn(r.qty)}</b></td><td class="b"><span class="box"></span></td></tr>`).join('')}
         </tbody></table></div>`).join('')}
       ${checkFoot(s)}</div>`;
   }
@@ -458,7 +497,8 @@
     // sheet. Wait a minute and print again; only an invoiced-nothing sheet (e.g. not confirmed yet) prints without asking.
     const missing = shippingStops(data).flatMap(st => st.shipments.filter(x => !x.invoice_nbr).map(x => x.shipment_nbr));
     if (missing.length && data.check_status === 'confirmed' && !confirm(`${plural(missing.length, 'shipment')} not showing an invoice number yet (${missing.slice(0, 6).join(', ')}${missing.length > 6 ? '…' : ''}).\n\nThe invoices may still be being created. Wait a minute and print again, or press OK to print with "not invoiced" on those lines.`)) return;
-    document.getElementById('sheetwrap').innerHTML = detail ? checkDetailHtml(data) : checkSummaryHtml(data);
+    const chg = await changeInfo(id, data.load_nbr);
+    document.getElementById('sheetwrap').innerHTML = detail ? checkDetailHtml(data, chg) : checkSummaryHtml(data, chg);
     await new Promise(r => setTimeout(r, 150));
     window.print();
   }
@@ -466,7 +506,8 @@
   async function printSheet(id) {
     const { data, error } = await sb.rpc('lm_sheet', { p_load_id: id });
     if (error) throw error;
-    document.getElementById('sheetwrap').innerHTML = sheetHtml(data);
+    const chg = await changeInfo(id, data.load_nbr);
+    document.getElementById('sheetwrap').innerHTML = sheetHtml(data, chg);
     await new Promise(r => setTimeout(r, 150));
     window.print();
   }
