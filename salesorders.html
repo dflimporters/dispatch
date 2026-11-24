@@ -43,6 +43,7 @@
   table.so tr.sel td { background:var(--accent-bg); }
   table.so td.nbr { font-weight:600; white-space:nowrap; }
   table.so .cust { max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  table.so td.addr-cell { max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-muted); }
   .so-bar { position:sticky; bottom:0; display:flex; gap:12px; flex-wrap:wrap; align-items:center; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:10px 14px; margin-top:12px; box-shadow:0 -2px 8px rgba(15,32,68,.06); }
   .so-bar .spacer { flex:1; }
   .so-bar label { display:flex; align-items:center; gap:6px; font-size:13px; color:var(--text-muted); font-weight:500; }
@@ -56,7 +57,34 @@
 <script>
   const STATUSES = ['Open', 'Back Order', 'Shipping', 'Credit Hold', 'On Hold'];
   const CANT_SHIP = ['Credit Hold', 'On Hold'];
-  const S = { rows: [], statuses: ['Open', 'Back Order'], q: '', zone: 'all', sel: new Set(), date: jmDate(0), synced: null, results: null, busy: false, poBusy: null, sort: { key: 'order_date', dir: -1 }, tab: loadSoTab() };
+  // Shipping zone tabs: the groups used in Acumatica's Sales Orders tabs, with the smaller zones folded into them.
+  // Confirmed by Joel 2026-11-17: Spanish Town is its own tab; Portmorant is under St. Thomas.
+  const ZONE_GROUPS = [
+    ['Kingston', ['KINGSTON', 'STONYHILL']],
+    ['Downtown', ['DOWNTOWN']],
+    ['Portmore', ['PORTMORE']],
+    ['Spanish Town', ['SPANISHTOWN']],
+    ['Old Harbour', ['OLDHARBOUR']],
+    ['Linstead', ['LINSTEAD', 'EWARTON']],
+    ['St. Thomas', ['MORANTBAY', 'YALLAHS', 'ALBION', 'SEAFORTH', 'PORTMORANT', 'STTHOMAS']],
+    ['Portland', ['PORTANTONIO', 'ANNOTTOBAY', 'BUFFBAY']],
+    ['St. Mary', ['ORACABESSA', 'PORTMARIA', 'HIGHGATE', 'GAYLE', 'STMARY']],
+    ['St. Ann', ['OCHORIOS', 'STANNSBAY', 'RUNAWAYBAY', 'DISCOVERYBAY', 'MONEAGUE', 'CLAREMONT', 'TOWER ISLE']],
+    ['Browns Town', ['BROWNSTOWN', 'STEER TOWN', 'ALEXANDRIA']],
+    ['Mobay', ['MOBAY', 'MOBAYHOUSE', 'FALMOUTH', 'TRELAWNY', 'ANCHOVY', 'BETHEL TOWN']],
+    ['Lucea', ['LUCEA', 'HOPEWELL', 'GREEN ISLAND', 'SANDY BAY']],
+    ['SAV', ['SAV', 'SAVANNALAMAR', 'LITTLE LONDON', 'WHITEHOUSE', 'WHITEHOUSEDARL', 'GRANGEHILL', 'NEGRIL', 'ORANGE BAY', 'PETERSIELD', 'PETERSFIELD', 'SHEFFIELD']],
+    ['Black River', ['BLACKRIVER']],
+    ['Junction', ['JUNCTION', 'SOUTHFIELD', 'TREASURE BEACH', 'ALLIGATOR POND', 'NAIN']],
+    ['Santa Cruz', ['SANTACRUZ', 'LACOVIA', 'BALACLAVA', 'MAGOTTY', 'BRAES RIVER', 'BRAESRIVER']],
+    ['Mandeville', ['MANDEVILLE']],
+    ['Christiana', ['CHRISTIANA', 'SPALDING']],
+    ['May Pen', ['MAYPEN', 'LIONELTOWN', 'CHAPLETON', 'FRANKFIELD', 'KELLITS']],
+    ['Darliston', ['DARLISTAN', 'NEWMARKET']],
+  ];
+  const ZONE_OF = new Map(ZONE_GROUPS.flatMap(([g, zs]) => zs.map(z => [z, g])));
+  const zoneGroup = z => !z || z === 'NONE' ? 'Unrouted' : (ZONE_OF.get(String(z).toUpperCase()) || 'Other');
+  const S = { rows: [], statuses: ['Open', 'Back Order'], q: '', zone: 'all', sel: new Set(), date: jmDate(0), synced: null, results: null, busy: false, poBusy: null, sort: { key: 'created_on', dir: -1 }, tab: loadSoTab(), openOrd: new Set(), oLines: new Map() };
 
   async function callOrders(action, body) {
     const { data: { session } } = await sb.auth.getSession();
@@ -112,7 +140,11 @@
     const q = S.q.trim().toLowerCase();
     const k = S.sort.key, d = S.sort.dir;
     const num = ['open_qty', 'open_volume', 'order_total'].includes(k);
+<<<<<<< HEAD
     return S.rows.filter(r => (S.tab === 'all' || (kindOf(r) || 'delivery') === S.tab) && (S.zone === 'all' || r.shipping_zone === S.zone)
+=======
+    return S.rows.filter(r => (kindOf(r) || 'delivery') === S.tab && (S.zone === 'all' || zoneGroup(r.shipping_zone) === S.zone)
+>>>>>>> origin/main
       && (!q || [r.order_nbr, r.customer_name, r.customer_id, addrOf(r.customer_id)].some(v => String(v || '').toLowerCase().includes(q))))
       .sort((a, b) => d * (num ? (a[k] - b[k])
         : String(a[k] || '').localeCompare(String(b[k] || ''), undefined, { numeric: true, sensitivity: 'base' }))
@@ -127,9 +159,45 @@
     return `<span class="pill ${cls}">${esc(s)}</span>`;
   }
 
+  // Item detail under an order (same idea as a shipment's items on the coordinator screen).
+  function ordLinesRow(nbr, colspan) {
+    if (!S.openOrd.has(nbr)) return '';
+    const lines = S.oLines.get(nbr);
+    const body = !lines ? '<div class="muted">Loading items…</div>'
+      : !lines.length ? '<div class="muted">No item lines synced for this order.</div>'
+      : `<table class="items"><thead><tr><th>Item</th><th>Description</th><th class="r">Ordered</th><th class="r">Open</th><th class="r">At 71</th><th class="r hide-m">Ashenheim</th></tr></thead>
+        <tbody>${lines.map(l => {
+          const open = Number(l.open_qty) || 0, oh = Number(l.qty_on_hand_71) || 0, short = open > oh;
+          return `<tr class="${short ? 'short' : ''}"><td class="num">${esc(l.inventory_id || '')}</td><td>${esc(l.line_description || '')}</td>
+            <td class="r num">${fmt(l.order_qty)}</td><td class="r num">${fmt(open)}</td>
+            <td class="r num">${fmt(oh)}${short && open > 0 ? ` <span class="tag old" title="Open qty is more than on hand at 71">short ${fmt(open - oh)}</span>` : ''}</td>
+            <td class="r num hide-m">${l.qty_on_hand_ash == null ? '' : fmt(l.qty_on_hand_ash)}</td></tr>`;
+        }).join('')}</tbody></table>`;
+    return `<tr class="lines-row"><td colspan="${colspan}">${body}</td></tr>`;
+  }
+  async function loadOrdLines(nbr) {
+    const { data, error } = await sb.from('so_ordered_items')
+      .select('line_nbr,inventory_id,line_description,order_qty,open_qty,qty_on_hand_71,qty_on_hand_ash')
+      .eq('order_type', 'SO').eq('order_nbr', nbr).order('line_nbr').range(0, 999);
+    if (error) throw error;
+    S.oLines.set(nbr, data || []);
+  }
+
+  // Zone tabs with counts for the current order type and search, busiest first; Unrouted and Other last.
+  function zoneChips() {
+    const q = S.q.trim().toLowerCase();
+    const base = S.rows.filter(r => (kindOf(r) || 'delivery') === S.tab
+      && (!q || [r.order_nbr, r.customer_name, r.customer_id, addrOf(r.customer_id)].some(v => String(v || '').toLowerCase().includes(q))));
+    const cnt = new Map();
+    base.forEach(r => { const g = zoneGroup(r.shipping_zone); cnt.set(g, (cnt.get(g) || 0) + 1); });
+    const named = [...cnt.entries()].filter(([g]) => !['Unrouted', 'Other'].includes(g)).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const tail = ['Unrouted', 'Other'].filter(g => cnt.has(g)).map(g => [g, cnt.get(g)]);
+    const chip = (g, n, label) => `<button data-zone="${esc(g)}" class="${S.zone === g ? 'on' : ''}">${esc(label || g)} <span style="opacity:.7;font-weight:500">${n}</span></button>`;
+    return chip('all', base.length, 'All zones') + [...named, ...tail].map(([g, n]) => chip(g, n)).join('');
+  }
+
   function render() {
     const rows = visible();
-    const zones = [...new Set(S.rows.map(r => r.shipping_zone).filter(Boolean))].sort();
     const counts = {};
     S.rows.forEach(r => { const k = kindOf(r); if (k) counts[k] = (counts[k] || 0) + 1; });
     counts.all = S.rows.length;
@@ -147,33 +215,36 @@
           ${STATUSES.map(s => `<button data-st="${esc(s)}" class="${S.statuses.includes(s) ? 'on' : ''}">${esc(s)}</button>`).join('')}
         </div>
         <input type="search" id="q" placeholder="Search order or customer" value="${esc(S.q)}" aria-label="Search orders">
-        <select id="zone" aria-label="Shipping zone">
-          <option value="all">All zones</option>
-          ${zones.map(z => `<option ${S.zone === z ? 'selected' : ''}>${esc(z)}</option>`).join('')}
-        </select>
         ${S.synced ? syncText(S.synced) : ''}
       </div>
+      <div class="so-chips" id="zoneChips" role="group" aria-label="Shipping zone" style="margin-bottom:10px">${zoneChips()}</div>
       <div class="kpis">
         <div class="kpi"><div class="l">Orders</div><div class="v">${rows.length}</div><div class="s">${plural(ready.length, 'order')} can ship</div></div>
         <div class="kpi"><div class="l">Open qty</div><div class="v">${fmt(rows.reduce((t, r) => t + r.open_qty, 0))}</div><div class="s">cases to ship</div></div>
         <div class="kpi"><div class="l">Volume</div><div class="v">${fmt(rows.reduce((t, r) => t + r.open_volume, 0))}</div><div class="s">open volume</div></div>
         <div class="kpi"><div class="l">Value</div><div class="v">${money(rows.reduce((t, r) => t + r.order_total, 0))}</div><div class="s">order totals</div></div>
       </div>
+      <div class="warnbox info" style="margin-bottom:8px"><b>Batch today:</b> orders entered before ${esc(enteredAt(batchFocusCut().toISOString()))}: ${plural(rows.filter(r => batchFocusOf(r.created_on) === 'now').length, 'order')} here; ${rows.filter(r => batchFocusOf(r.created_on) === 'later').length} entered after that are next cycle (flag only).</div>
       <div class="card"><div class="so-wrap">
         ${rows.length ? `<table class="so"><thead><tr>
           <th><input type="checkbox" id="all" aria-label="Select all orders that can ship" ${ready.length && ready.every(r => S.sel.has(r.order_nbr)) ? 'checked' : ''} ${ready.length ? '' : 'disabled'}></th>
-          ${sortTh('Order', 'order_nbr')}${sortTh('Customer', 'customer_name')}${sortTh('Zone', 'shipping_zone')}${sortTh('Status', 'status')}${sortTh('Ordered', 'order_date')}${sortTh('Ship on', 'sched_shipment')}${sortTh('Open qty', 'open_qty', 'r')}${sortTh('Volume', 'open_volume', 'r')}${sortTh('Value', 'order_total', 'r')}<th>Notes</th></tr></thead>
+          ${sortTh('Order', 'order_nbr')}${sortTh('Customer', 'customer_name')}<th>Address</th>${sortTh('Zone', 'shipping_zone')}${sortTh('Status', 'status')}${sortTh('Entered', 'created_on')}${sortTh('Ship on', 'sched_shipment')}${sortTh('Open qty', 'open_qty', 'r')}${sortTh('Volume', 'open_volume', 'r')}${sortTh('Value', 'order_total', 'r')}<th>Notes</th></tr></thead>
           <tbody>${rows.map(r => `<tr class="${canShip(r) ? '' : 'blocked'} ${S.sel.has(r.order_nbr) ? 'sel' : ''}">
             <td><input type="checkbox" data-pick="${esc(r.order_nbr)}" aria-label="Select order ${esc(r.order_nbr)}" ${S.sel.has(r.order_nbr) ? 'checked' : ''} ${canShip(r) ? '' : 'disabled'}></td>
-            <td class="nbr">${esc(r.order_nbr)}</td>
-            <td class="cust" title="${esc(r.customer_name || '')}">${kindTag(kindOf(r))}${esc(r.customer_name || r.customer_id || '')}${addrHtml(r.customer_id)}</td>
+            <td class="nbr"><button class="stog ${S.openOrd.has(r.order_nbr) ? 'open' : ''}" data-order-toggle="${esc(r.order_nbr)}" title="${S.openOrd.has(r.order_nbr) ? 'Hide' : 'Show'} items" aria-expanded="${S.openOrd.has(r.order_nbr)}">${ICON.chev}</button>${esc(r.order_nbr)}</td>
+            <td class="cust" title="${esc(r.customer_name || '')}">${kindTag(kindOf(r))}${esc(r.customer_name || r.customer_id || '')}</td>
+            <td class="addr-cell" title="${esc(addrOf(r.customer_id))}">${esc(addrOf(r.customer_id))}</td>
             <td>${esc(r.shipping_zone || '')}</td>
             <td>${statusPill(r.status)}</td>
-            <td>${esc(r.order_date ? niceDate(r.order_date) + ' ' + r.order_date.slice(0, 4) : '')}</td>
+            <td title="${esc(r.created_on ? 'Entered ' + enteredAt(r.created_on) + ' (Jamaica time)' : '')}">${esc(r.created_on ? enteredAt(r.created_on) : (r.order_date ? niceDate(r.order_date) + ' ' + r.order_date.slice(0, 4) : ''))}${batchFocusOf(r.created_on) === 'now' ? ' <span class="tag" style="color:var(--ok);border-color:var(--ok)" title="Placed before the cut-off: batch today">batch today</span>' : batchFocusOf(r.created_on) === 'later' ? ' <span class="tag old" title="Placed after the cut-off: next cycle">next cycle</span>' : ''}</td>
             <td>${esc(r.sched_shipment ? niceDate(r.sched_shipment) + ' ' + r.sched_shipment.slice(0, 4) : '')}</td>
             <td class="r">${fmt(r.open_qty)}</td><td class="r">${fmt(r.open_volume)}</td><td class="r">${money(r.order_total)}</td>
             <td><button class="btn small" data-po="${esc(r.order_nbr)}" ${S.poBusy ? 'disabled' : ''} title="Print the customer's purchase order attached to this sales order">${S.poBusy === r.order_nbr ? 'Opening…' : 'PO'}</button> ${notDue(r) ?`<span class="tag old" title="Selectable now: the shipment will be dated ${esc(niceDate(r.sched_shipment))}, its Ship On date.">Ship on ${esc(niceDate(r.sched_shipment))}</span>` : ''}${r.open_shipments ? `<span class="tag" title="Already on an open shipment">On shipment${r.open_shipments > 1 ? ' ×' + r.open_shipments : ''}</span> ` : ''}${r.short_lines ? `<span class="tag old" title="Open qty is more than on hand at 71 on these lines">Short ${r.short_lines}</span>` : ''}${CANT_SHIP.includes(r.status) ? '<span class="tag old">Can\'t ship</span>' : ''}</td>
+<<<<<<< HEAD
           </tr>`).join('')}</tbody></table>` : `<div class="empty">No ${S.tab === 'all' ? '' : esc(KINDS[S.tab]) + ' '}${esc(S.statuses.join(' / '))} orders${S.q || S.zone !== 'all' ? ' match that search' : ''}.</div>`}
+=======
+          </tr>${ordLinesRow(r.order_nbr, 12)}`).join('')}</tbody></table>` : `<div class="empty">No ${S.tab === 'delivery' ? '' : esc(KINDS[S.tab]) + ' '}${esc(S.statuses.join(' / '))} orders${S.q || S.zone !== 'all' ? ' match that search' : ''}.</div>`}
+>>>>>>> origin/main
       </div></div>
       <div class="so-bar">
         <span><b>${plural(picked.length, 'order')}</b> selected · volume ${fmt(picked.reduce((t, r) => t + r.open_volume, 0))} · ${money(picked.reduce((t, r) => t + r.order_total, 0))}</span>
@@ -279,6 +350,19 @@
   }
 
   document.getElementById('app').addEventListener('click', async e => {
+    const ot = e.target.closest('[data-order-toggle]');
+    if (ot) {
+      const nbr = ot.dataset.orderToggle;
+      S.openOrd.has(nbr) ? S.openOrd.delete(nbr) : S.openOrd.add(nbr);
+      render();
+      if (S.openOrd.has(nbr) && !S.oLines.has(nbr)) {
+        try { await loadOrdLines(nbr); } catch (err) { S.oLines.set(nbr, []); toast(errMsg(err), true); }
+        render();
+      }
+      return;
+    }
+    const zt = e.target.closest('[data-zone]');
+    if (zt) { S.zone = zt.dataset.zone; render(); return; }
     const po = e.target.closest('[data-po]');
     if (po) { openPo(po.dataset.po); return; }
     if (e.target.closest('[data-create]')) { createShipments(); return; }
@@ -287,7 +371,7 @@
     const th = e.target.closest('th[data-sort]');
     if (th) {
       const k = th.dataset.sort;
-      S.sort = S.sort.key === k ? { key: k, dir: -S.sort.dir } : { key: k, dir: ['open_qty', 'open_volume', 'order_total', 'order_date'].includes(k) ? -1 : 1 };
+      S.sort = S.sort.key === k ? { key: k, dir: -S.sort.dir } : { key: k, dir: ['open_qty', 'open_volume', 'order_total', 'order_date', 'created_on'].includes(k) ? -1 : 1 };
       render(); return;
     }
     const kt = e.target.closest('[data-ktab]');
@@ -302,7 +386,6 @@
   });
   document.getElementById('app').addEventListener('change', e => {
     const t = e.target;
-    if (t.id === 'zone') { S.zone = t.value; render(); return; }
     if (t.id === 'shipDate') { S.date = t.value || jmDate(0); S.sel = new Set([...S.sel].filter(n => { const r = S.rows.find(x => x.order_nbr === n); return r && canShip(r); })); render(); return; }
     if (t.id === 'all') { visible().filter(canShip).forEach(r => t.checked ? S.sel.add(r.order_nbr) : S.sel.delete(r.order_nbr)); render(); return; }
     if (t.dataset.pick) { t.checked ? S.sel.add(t.dataset.pick) : S.sel.delete(t.dataset.pick); render(); }
