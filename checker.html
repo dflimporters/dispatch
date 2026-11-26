@@ -80,6 +80,7 @@
     const e0 = K.epoch || 0;
     const loads = (await fetchLoadsView(K.date)).filter(l => ['done', 'partial'].includes(l.status) && !l.closed_at);
     const ids = loads.map(l => l.id);
+    await markTruckerChanges(loads);
     const r = ids.length ? await sb.rpc('dispatch_pick_bundle', { p_load_ids: ids, p_with_checks: true }) : { data: { picks: [], done: [], staged: [], items: [], gone: [] } };
     if (r.error) throw r.error;
     await loadKinds();
@@ -194,7 +195,7 @@
     const shortN = all.filter(isShort).length;
     return `
       <div class="lhead" style="margin-bottom:6px"><div><span class="lnbr">${esc(l.load_nbr)}</span> ${shipsTag(l)}${loadKindTags(l)}${waveTag(l.wave)} ${loadOriginTags(l)}<b>${esc(l.truck_type || '')}</b>
-        <span class="target">${esc(l.ship_via || '')}</span> <span class="muted">${esc(l.contractor || '')}</span></div>${checkPill(l)}</div>
+        <span class="target">${esc(l.ship_via || '')}</span> <span class="muted">${esc(l.contractor || '')}</span> ${truckerChgPill(l)}</div>${checkPill(l)}</div>
       <div class="zchips"><span class="zl">Zones (${l.zones.length}):</span>${l.zones.map(z => `<span class="zchip">${esc(z)}</span>`).join('') || '<span class="muted">none</span>'}</div>
       <div class="muted" style="margin-bottom:10px">${plural(l.count, 'shipment')} · ${plural(all.length, 'item')}${s.areas ? ` · ${s.staged}/${s.areas} areas staged` : ''}${!finished && who ? ` · Checking: <b>${esc(who)}</b> <button class="back" data-whochange style="margin:0 0 0 6px">Change</button>` : ''}</div>
       ${goneBanner((K.gone || []).filter(g => g.load_id === l.id))}

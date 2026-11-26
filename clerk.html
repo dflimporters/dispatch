@@ -66,7 +66,7 @@
   const C = {
     date: jmDate(0), loads: [], dates: [], sync: null, busy: false,
     drafts: new Map(), returning: new Set(), was: new Map(), poll: null,
-    open: new Set(), seen: new Set(), wave: loadWaveFilter('clerk'),
+    open: new Set(), seen: new Set(), wave: loadWaveFilter('clerk'), changing: new Set(),
   };
 
   async function loadAll() {
@@ -105,7 +105,7 @@
     const d = C.drafts.get(l.id);
     return !!d && (d.ship_via !== (l.ship_via || '') || d.callNote || d.ret || d.notes);
   }
-  function isOpen(l) { return C.open.has(l.id) || C.returning.has(l.id) || typedIn(l); }
+  function isOpen(l) { return C.open.has(l.id) || C.returning.has(l.id) || C.changing.has(l.id) || typedIn(l); }
   function visLoads() { return C.loads.filter(l => C.wave === 'all' || l.wave === C.wave); }
 
   // ------------------------------------------------------------------
@@ -210,6 +210,23 @@
       <details ${keep('ships-' + l.id)}><summary>Shipments on this load (${l.count})</summary>${shipsTable(l, false)}</details>`;
   }
 
+  // Wrong trucker locked in: allowed on a written load until the checker's confirm starts (after that the
+  // Load Sheets page has Change trucker, which also fixes the invoices). The database enforces the rest.
+  function canChangeTrucker(l) {
+    return ['done', 'partial'].includes(l.status) && !l.write_requested_at && !l.confirm_requested_at
+      && !['confirming', 'confirmed', 'partial'].includes(l.check_status || '');
+  }
+  function changeForm(l) {
+    const d = draftOf(l);
+    return `<div class="warnbox info" style="margin-top:8px">
+      <b>Change the whole load to another trucker.</b> Ship Via is rewritten on all ${plural(l.count, 'shipment')} in Acumatica. Picks and checks are kept; reprint the load sheet afterwards.
+      <div class="cform" style="margin-top:6px">
+        <label class="field">New trucker's Ship Via<input data-d="chg_via" list="shipViaList" value="${esc(d.chg_via || '')}" placeholder="Code or name" autocomplete="off"></label>
+        <label class="field wide">Why is it changing? (required)<input data-d="chg_why" value="${esc(d.chg_why || '')}" placeholder="e.g. wrong trucker locked in by mistake"></label>
+      </div>
+      <div class="lactions"><button class="btn primary small" data-act="chg_go">Change trucker &amp; write to Acumatica</button><button class="btn small" data-act="chg_cancel">Cancel</button></div></div>`;
+  }
+
   function writtenBody(l) {
     const queued = writeQueued(l), writing = l.status === 'writing' || queued;
     const stuck = l.status === 'writing' && Date.now() - new Date(l.updated_at).getTime() > 5 * 60e3;
@@ -225,7 +242,9 @@
         ${l.status === 'confirmed' && !writing ? `<button class="btn primary small" data-act="apply">Write to Acumatica</button><button class="btn small" data-act="unconfirm">Undo confirmation</button>` : ''}
         ${l.status === 'partial' && !writing ? `<button class="btn primary small" data-act="apply">Retry ${plural(bad.length, 'shipment')}</button>` : ''}
         ${stuck ? '<button class="btn small" data-act="unstick">Writing seems stuck: mark it so it can be retried</button>' : ''}
+        ${canChangeTrucker(l) && !writing && !C.changing.has(l.id) ? '<button class="btn small" data-act="chg_open" title="Wrong trucker locked in? Put the right one on the whole load while it is being picked or checked">Change trucker…</button>' : ''}
       </div>
+      ${C.changing.has(l.id) ? changeForm(l) : ''}
       <div class="inline-err" data-err></div>
       ${eventList(l.events, 'hist-' + l.id)}`;
   }
@@ -340,6 +359,23 @@
         await rpc('dispatch_confirm_load', { p_id: id, p_ship_via: sv, p_contractor: d.contractor, p_notes: d.notes.trim() || l.notes || '' });
         C.drafts.delete(id);
         await apply(id);
+      });
+      return;
+    }
+    if (a === 'chg_open') { C.changing.add(id); C.open.add(id); render(); return; }
+    if (a === 'chg_cancel') { C.changing.delete(id); delete d.chg_via; delete d.chg_why; render(); return; }
+    if (a === 'chg_go') {
+      const sv = (d.chg_via || '').trim(), why = (d.chg_why || '').trim();
+      if (!sv) { cardErr(id, "Pick the new trucker's Ship Via."); return; }
+      if (!shipViaChoices().some(c => c.ship_via === sv)) { cardErr(id, `${sv} isn't a Ship Via code${D.env === 'test' ? ' that exists in TEST' : ' in Acumatica'}. Pick one from the list.`); return; }
+      if (sv === l.ship_via) { cardErr(id, `${l.load_nbr} is already on ${sv}.`); return; }
+      if (!why) { cardErr(id, 'Say why the trucker is changing.'); return; }
+      if (!confirm(`Change ${l.load_nbr} from ${l.ship_via} to ${sv}?\n\nThis rewrites Ship Via on ${plural(l.count, 'shipment')} in ${D.env === 'test' ? 'Acumatica TEST' : 'Acumatica'}. Picks and checks are kept. Reprint the load sheet afterwards.`)) return;
+      act(id, async () => {
+        await rpc('dispatch_change_trucker', { p_id: id, p_ship_via: sv, p_contractor: (codeInfo(sv) || {}).description || '', p_reason: why });
+        C.changing.delete(id); delete d.chg_via; delete d.chg_why;
+        await apply(id);
+        toast(`${l.load_nbr} is being changed to ${sv}. Reprint the sheet once it shows Done.`);
       });
       return;
     }

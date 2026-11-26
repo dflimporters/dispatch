@@ -901,6 +901,19 @@ function statusPill(s) {
   }[s] || esc(s);
 }
 // A load waiting in the Acumatica queue (dispatch-acu drains it in the background).
+// Pickers and checkers hold the old paper when the trucker changes mid-job: flag those loads with the change
+// (latest 'reassign' event: from -> to). Call on the loads you are about to draw; draw with truckerChgPill.
+async function markTruckerChanges(loads) {
+  if (!loads.length) return;
+  const r = await sb.from('load_events').select('load_id,detail,created_at').eq('kind', 'reassign')
+    .in('load_id', loads.map(l => l.id)).order('created_at', { ascending: false });
+  if (r.error) { console.error('[trucker changes]', r.error); return; }
+  loads.forEach(l => {
+    const e = (r.data || []).find(x => x.load_id === l.id && x.detail && x.detail.mode === 'full');
+    l.tchg = e ? `${e.detail.from_via || '—'} → ${e.detail.to_via || '—'}` : '';
+  });
+}
+function truckerChgPill(l) { return l.tchg ? `<span class="pill warn" title="Trucker changed: ${esc(l.tchg)}. Use the new sheet.">Trucker changed: ${esc(l.tchg)}</span>` : ''; }
 function writeQueued(l) { return ['confirmed', 'partial'].includes(l.status) && !!l.write_requested_at; }
 function confirmQueued(l) { return ['checking', 'partial'].includes(l.check_status) && !!l.confirm_requested_at; }
 
