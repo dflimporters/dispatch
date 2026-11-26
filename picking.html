@@ -84,6 +84,7 @@
   async function loadAll() {
     const loads = (await fetchLoadsView(P.date, { events: false })).filter(l => ['done', 'partial'].includes(l.status) && l.check_status !== 'confirmed' && !l.checker_done_at && !l.closed_at);
     await loadKinds();
+    await markTruckerChanges(loads);
     P.loads = loads.sort((a, b) => isSpecialLoad(b) - isSpecialLoad(a) || (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)); // pickup / donation / promotion first, then in load-number (creation) order
     await loadPicks();
   }
@@ -166,7 +167,7 @@
         + `<button class="btn small" data-reopen ${ids} ${locked ? 'disabled' : ''}>Reopen</button>`
       : `<button class="btn primary small" data-areadone ${ids} ${locked || lines.some(x => x.picked_qty == null) ? 'disabled' : ''}>${areaName(a)} done</button>`;
     return `<section class="grp" data-item="g:${l.id}:${a}">
-      <div class="ghead"><div class="gl"><b>${areaName(a)}</b><span class="lnbr">${esc(l.load_nbr)}</span>${shipsTag(l)}${loadKindTags(l)}${waveTag(l.wave)}${loadOriginTags(l)}<span class="target">${esc(l.ship_via || '')}</span>${l.check_status ? '<span class="pill info">Being checked</span>' : ''}${dn ? '<span class="pill ok">picked</span>' : ''}${stg ? '<span class="pill ok">staged</span>' : ''}</div><div class="gr">${btns}</div></div>
+      <div class="ghead"><div class="gl"><b>${areaName(a)}</b><span class="lnbr">${esc(l.load_nbr)}</span>${shipsTag(l)}${loadKindTags(l)}${waveTag(l.wave)}${loadOriginTags(l)}<span class="target">${esc(l.ship_via || '')}</span>${truckerChgPill(l)}${l.check_status ? '<span class="pill info">Being checked</span>' : ''}${dn ? '<span class="pill ok">picked</span>' : ''}${stg ? '<span class="pill ok">staged</span>' : ''}</div><div class="gr">${btns}</div></div>
       ${lines.slice().sort(itemSorter()).map(x => itemRow(l, x, locked)).join('')}
     </section>`;
   }
