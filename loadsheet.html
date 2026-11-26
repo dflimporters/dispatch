@@ -340,6 +340,11 @@
         <a class="btn small" href="tower.html">Control Tower</a>
         <button class="btn small" data-act="refresh">Refresh</button>
       </div>
+      <div class="chips" style="margin:6px 0">${L.days.map(d => {
+        const n = L.loads.filter(l => l.load_date === d && !l.cancelled).length;
+        const on = d in L.open ? L.open[d] : d === L.date;
+        return `<button class="chip ${on ? 'on' : ''}" data-day-chip="${d}">${esc(niceDate(d))}${d === jmDate(0) ? ' · today' : ''} · ${n}</button>`;
+      }).join('')}</div>
       ${reassignHtml()}
       ${finderHtml()}
       ${L.days.map(daySection).join('')}`;
@@ -538,6 +543,12 @@
   }
 
   document.getElementById('app').addEventListener('click', e => {
+    const chip = e.target.closest('[data-day-chip]');
+    if (chip) {   // quick filter: show only that day
+      L.days.forEach(d => { L.open[d] = d === chip.dataset.dayChip; });
+      render();
+      return;
+    }
     const b = e.target.closest('[data-act]');
     if (!b) return;
     const card = b.closest('[data-load]');
