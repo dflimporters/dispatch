@@ -93,6 +93,14 @@
     K.areaDone = r.data.done || [];
     K.picks = new Map(ids.map(id => [id, (r.data.picks || []).filter(x => x.load_id === id)]));
     K.items = new Map(ids.map(id => [id, new Map((r.data.items || []).filter(x => x.load_id === id).map(x => [x.inventory_id, x]))]));
+    // Once a short line is confirmed in Acumatica it drops to 0 and leaves the pick list, but its substitution flag is still open
+    // in Invoicing. Put it back from the snapshot taken when the flag was raised so the checker sees the same line.
+    K.picks.forEach((list, id) => K.items.get(id).forEach(c => {
+      if (!c.sub_needed || list.some(p => p.inventory_id === c.inventory_id)) return;
+      const s = c.sub_context || {};
+      list.push({ load_id: id, inventory_id: c.inventory_id, description: s.description || c.inventory_id, uom: s.uom || '',
+        required: s.required != null ? Number(s.required) : Number(c.checked_qty || 0), picked_qty: null, area: 0 });
+    }));
   }
 
   function itemsOf(l) { return K.items.get(l.id) || new Map(); }
