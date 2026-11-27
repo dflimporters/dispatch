@@ -282,7 +282,13 @@
     });
     return m;
   }
-  const finalOf = l => { if (!V.final.has(l.id)) V.final.set(l.id, pDefaults(l)); return V.final.get(l.id); };
+  const finalOf = l => {
+    if (!V.final.has(l.id)) V.final.set(l.id, pDefaults(l));
+    // The cached split can predate a refresh of the load's lines; fill any line it lacks.
+    const m = V.final.get(l.id), miss = pLinesOf(l).filter(x => !Number.isFinite(m.get(pkey(x.nbr, x.line_nbr))));
+    if (miss.length) { const keep = V.notes.get(l.id), d = pDefaults(l); if (keep) V.notes.set(l.id, keep); miss.forEach(x => { const k = pkey(x.nbr, x.line_nbr); m.set(k, d.get(k)); }); }
+    return m;
+  };
   // SKUs of the load; `short` = the checker counted fewer than the shipments hold.
   function pItems(l) {
     const fin = finalOf(l), got = V.items.get(l.id) || new Map(), by = new Map();
